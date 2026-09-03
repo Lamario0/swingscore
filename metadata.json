@@ -1,0 +1,6 @@
+{
+  "name": "WCS Scoring Portal",
+  "description": "Real-time West Coast Swing dance competition judging, registration, coordinator check-in, and results calculation system.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

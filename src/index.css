@@ -1,0 +1,14 @@
+@import "tailwindcss";
+
+@media print {
+  .print\:break-before-page {
+    break-before: page !important;
+    page-break-before: always !important;
+  }
+  
+  tr.print\:break-before-page {
+    display: table-row-group !important;
+    break-before: page !important;
+    page-break-before: always !important;
+  }
+}
