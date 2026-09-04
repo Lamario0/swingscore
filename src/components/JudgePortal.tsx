@@ -392,7 +392,12 @@ export default function JudgePortal({
             </span>
           </div>
           <button
-            onClick={() => {
+            onClick={async () => {
+              if (judgeId) {
+                await onUpdateSettings({
+                  claimedJudges: (settings.claimedJudges || []).filter((name) => name !== judgeId),
+                });
+              }
               if (onSelectJudge) onSelectJudge("");
             }}
             className="px-3 py-1.5 bg-slate-800 hover:bg-slate-700 text-white rounded-xl text-xs font-semibold transition-all"
@@ -766,7 +771,12 @@ export default function JudgePortal({
             </span>
           </div>
           <button
-            onClick={() => {
+            onClick={async () => {
+              if (judgeId) {
+                await onUpdateSettings({
+                  claimedJudges: (settings.claimedJudges || []).filter((name) => name !== judgeId),
+                });
+              }
               if (onSelectJudge) onSelectJudge("");
             }}
             className="px-3 py-1.5 bg-slate-800 hover:bg-slate-700 text-white rounded-xl text-xs font-semibold transition-all"
@@ -806,7 +816,12 @@ export default function JudgePortal({
             </span>
           </div>
           <button
-            onClick={() => {
+            onClick={async () => {
+              if (judgeId) {
+                await onUpdateSettings({
+                  claimedJudges: (settings.claimedJudges || []).filter((name) => name !== judgeId),
+                });
+              }
               if (onSelectJudge) onSelectJudge("");
             }}
             className="px-3 py-1.5 bg-slate-800 hover:bg-slate-700 text-white rounded-xl text-xs font-semibold transition-all"
@@ -848,7 +863,12 @@ export default function JudgePortal({
             </span>
           </div>
           <button
-            onClick={() => {
+            onClick={async () => {
+              if (judgeId) {
+                await onUpdateSettings({
+                  claimedJudges: (settings.claimedJudges || []).filter((name) => name !== judgeId),
+                });
+              }
               if (onSelectJudge) onSelectJudge("");
             }}
             className="px-3 py-1.5 bg-slate-800 hover:bg-slate-700 text-white rounded-xl text-xs font-semibold transition-all"
@@ -982,7 +1002,12 @@ export default function JudgePortal({
           </span>
         </div>
         <button
-          onClick={() => {
+          onClick={async () => {
+            if (judgeId) {
+              await onUpdateSettings({
+                claimedJudges: (settings.claimedJudges || []).filter((name) => name !== judgeId),
+              });
+            }
             if (onSelectJudge) onSelectJudge("");
           }}
           className="px-3 py-1.5 bg-slate-800 hover:bg-slate-700 text-white rounded-xl text-xs font-semibold transition-all"

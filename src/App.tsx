@@ -21,19 +21,22 @@ export default function App() {
       return "";
     }
   });
-  // Remember which judge name THIS browser has claimed, even across a logout or a
-  // refresh (selectedJudgeId itself resets to "" on logout so the picker screen
-  // shows again). We intentionally never clear this on logout -- only a full
-  // contest reset (/api/reset, /api/clear-all) releases a claim -- so the same
-  // browser can always re-enter as the judge it already claimed.
+  // Remember which judge name THIS browser has claimed, so a refresh doesn't
+  // bounce a judge back to the picker screen mid-heat. The Log Out button in
+  // JudgePortal releases the claim server-side (removes it from
+  // settings.claimedJudges) and then calls this with "" -- at that point we
+  // clear the local marker too, so a stale match here can't make a name someone
+  // else has since claimed look like it's still this browser's.
   const setSelectedJudgeId = (id: string) => {
     setSelectedJudgeIdState(id);
-    if (id) {
-      try {
+    try {
+      if (id) {
         localStorage.setItem("swingscore_judge_claim", id);
-      } catch {
-        // ignore storage errors (private browsing, etc.)
+      } else {
+        localStorage.removeItem("swingscore_judge_claim");
       }
+    } catch {
+      // ignore storage errors (private browsing, etc.)
     }
   };
   const myClaimedJudge = (() => {
