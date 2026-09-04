@@ -1,5 +1,5 @@
 import React from "react";
-import { ShieldAlert, Award, UserCheck, Users, Landmark, ExternalLink, Globe, KeyRound, Trophy, ChevronDown, ChevronUp } from "lucide-react";
+import { ShieldAlert, Award, UserCheck, Users, Landmark, ExternalLink, Globe, KeyRound, Trophy, ChevronDown, ChevronUp, Sparkles } from "lucide-react";
 import { AppSettings } from "../types";
 
 interface PlatformPortalProps {
@@ -68,6 +68,16 @@ export default function PlatformPortal({ isDarkMode, settings, onUpdateSettings 
       description: "Spectator scoreboard displaying relative placement rankings, judge vote matrices, callback cuts, and live score synchronization.",
       icon: <Landmark className="w-5 h-5 text-violet-500" />,
       color: "border-violet-500/20 hover:border-violet-500/40 bg-violet-500/[0.02]"
+    },
+    {
+      title: "Scoring & Results Ledger",
+      domain: "scoring.swingscore.com",
+      path: "/scoring",
+      query: "?role=scoring",
+      passcode: "scoring",
+      description: "Internal system of record for completed contests — every heat closed out by the admin's Complete Contest action lands here.",
+      icon: <Sparkles className="w-5 h-5 text-indigo-500" />,
+      color: "border-indigo-500/20 hover:border-indigo-500/40 bg-indigo-500/[0.02]"
     }
   ];
 

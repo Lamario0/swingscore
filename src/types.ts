@@ -1,4 +1,4 @@
-export type Division = "Newcomer" | "Novice" | "Intermediate" | "Advanced" | "Advance" | "All-Star" | "All Stars" | "Pro" | "Open";
+export type Division = "Newcomer" | "Novice" | "Intermediate" | "Advance" | "All-Star" | "Pro" | "Open";
 export type Role = "Lead" | "Follow" | "Mixed";
 export type CallbackValue = "Yes" | "No" | "Alt 1" | "Alt 2" | "Alt 3";
 export type JudgingStyle = "raw" | "placement" | "callback";
@@ -6,6 +6,7 @@ export type JudgingStyle = "raw" | "placement" | "callback";
 export interface Competitor {
   bib: string;
   name: string;
+  email?: string;
   division: string;
   role: "Lead" | "Follow";
   checkedIn: boolean;
@@ -55,6 +56,7 @@ export interface AppSettings {
   heatType?: "Prelim" | "Semi-Final" | "Quarter Final" | "Finals";
   queuedHeatId?: string | null;
   checkInFinalized?: boolean;
+  queuedCheckInFinalized?: boolean;
   publishedHeatIds?: string[];
   judgeNames?: string[];
   judgeRoles?: ("Leaders" | "Followers" | "Finals" | "None")[];
@@ -75,6 +77,7 @@ export interface AppSettings {
   nextChiefJudgeName?: string;
   nextChiefJudgeRole?: "Leaders" | "Followers" | "Both" | "Finals" | "None";
   completedResults?: CompletedContestResult[];
+  lockedDivisions?: string[];
 }
 
 export interface CompletedContestResult {
@@ -103,4 +106,4 @@ export interface AppState {
   settings: AppSettings;
 }
 
-export type ViewRole = "admin" | "coordinator" | "judge" | "competitor" | "results";
+export type ViewRole = "admin" | "coordinator" | "judge" | "competitor" | "results" | "scoring";

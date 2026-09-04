@@ -4,7 +4,7 @@ import { Competitor, Division, AppSettings } from "../types";
 
 interface RegisterCompetitorProps {
   competitors: Competitor[];
-  onRegister: (competitor: { bib: string; name: string; division: string; role: "Lead" | "Follow" }) => Promise<void>;
+  onRegister: (competitor: { bib: string; name: string; email: string; division: string; role: "Lead" | "Follow" }) => Promise<void>;
   isDarkMode: boolean;
   settings: AppSettings;
 }
@@ -12,6 +12,7 @@ interface RegisterCompetitorProps {
 export default function RegisterCompetitor({ competitors, onRegister, isDarkMode, settings }: RegisterCompetitorProps) {
   const [bib, setBib] = useState("");
   const [name, setName] = useState("");
+  const [email, setEmail] = useState("");
   const [division, setDivision] = useState<Division>("Novice");
   const [role, setRole] = useState<"Lead" | "Follow">("Lead");
   const [search, setSearch] = useState("");
@@ -46,7 +47,7 @@ export default function RegisterCompetitor({ competitors, onRegister, isDarkMode
     setError("");
     setSuccess("");
 
-    if (!bib.trim() || !name.trim()) {
+    if (!bib.trim() || !name.trim() || !email.trim()) {
       setError("Please fill out all fields.");
       return;
     }
@@ -56,17 +57,30 @@ export default function RegisterCompetitor({ competitors, onRegister, isDarkMode
       return;
     }
 
+    const emailPattern = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+    if (!emailPattern.test(email.trim())) {
+      setError("Please enter a valid email address.");
+      return;
+    }
+
+    if ((settings.lockedDivisions || []).includes(division)) {
+      setError(`Registration for the ${division} division is closed — check-in has already been created.`);
+      return;
+    }
+
     setLoading(true);
     try {
       await onRegister({
         bib: bib.trim(),
         name: name.trim(),
+        email: email.trim(),
         division,
         role
       });
       setSuccess(`Dancer ${name} (Bib ${bib}) registered successfully!`);
       setBib("");
       setName("");
+      setEmail("");
     } catch (err: any) {
       setError(err.message || "Failed to register competitor.");
     } finally {
@@ -86,7 +100,7 @@ export default function RegisterCompetitor({ competitors, onRegister, isDarkMode
   const followsCount = competitors.filter((c) => c.role === "Follow").length;
   const noviceCount = competitors.filter((c) => c.division === "Novice").length;
   const intermediateCount = competitors.filter((c) => c.division === "Intermediate").length;
-  const advancedCount = competitors.filter((c) => c.division === "Advanced").length;
+  const advancedCount = competitors.filter((c) => c.division === "Advance").length;
 
   return (
     <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
@@ -152,8 +166,8 @@ export default function RegisterCompetitor({ competitors, onRegister, isDarkMode
                   <option value="Newcomer">Newcomer</option>
                   <option value="Novice">Novice</option>
                   <option value="Intermediate">Intermediate</option>
-                  <option value="Advanced">Advanced</option>
-                  <option value="All Stars">All Stars</option>
+                  <option value="Advance">Advance</option>
+                  <option value="All-Star">All-Star</option>
                   <option value="Pro">Pro</option>
                   <option value="Open">Open</option>
                 </select>
@@ -168,6 +182,7 @@ export default function RegisterCompetitor({ competitors, onRegister, isDarkMode
                 <tr className={`${isDarkMode ? "bg-slate-800/50 text-slate-300" : "bg-slate-50 text-slate-500"} text-xs font-semibold font-mono border-b border-slate-200 dark:border-slate-800`}>
                   <th className="p-3">Bib</th>
                   <th className="p-3">Name</th>
+                  <th className="p-3">Email</th>
                   <th className="p-3">Division</th>
                   <th className="p-3">Role</th>
                   <th className="p-3">Check-In Status</th>
@@ -182,6 +197,7 @@ export default function RegisterCompetitor({ competitors, onRegister, isDarkMode
                     >
                       <td className="p-3 font-mono font-bold text-violet-500">{c.bib}</td>
                       <td className="p-3 font-medium">{c.name}</td>
+                      <td className="p-3 text-slate-400">{c.email || "—"}</td>
                       <td className="p-3">
                         <span className={`px-2 py-0.5 rounded-full text-[10px] font-semibold border ${
                           c.division === "Novice" ? "bg-sky-500/10 text-sky-500 border-sky-500/20" :
@@ -210,7 +226,7 @@ export default function RegisterCompetitor({ competitors, onRegister, isDarkMode
                   ))
                 ) : (
                   <tr>
-                    <td colSpan={5} className="p-6 text-center text-slate-500">
+                    <td colSpan={6} className="p-6 text-center text-slate-500">
                       No competitors found. Use the form to register new dancers.
                     </td>
                   </tr>
@@ -276,26 +292,49 @@ export default function RegisterCompetitor({ competitors, onRegister, isDarkMode
               />
             </div>
 
+            {/* Email */}
+            <div>
+              <label className="block text-xs font-medium text-slate-400 mb-1.5">Email Address</label>
+              <input
+                id="competitor-email-input"
+                type="email"
+                required
+                placeholder="e.g. charlie@example.com"
+                value={email}
+                onChange={(e) => setEmail(e.target.value)}
+                className={`w-full px-3.5 py-2 text-xs rounded-xl border focus:outline-none focus:ring-1 focus:ring-violet-500 ${
+                  isDarkMode ? "bg-slate-800 border-slate-700 text-slate-100 placeholder-slate-500" : "bg-slate-50 border-slate-200 text-slate-800"
+                }`}
+              />
+            </div>
+
             {/* Division */}
             <div>
               <label className="block text-xs font-medium text-slate-400 mb-1.5">Division</label>
               <div className="grid grid-cols-2 gap-2">
-                {(["Newcomer", "Novice", "Intermediate", "Advanced", "All Stars", "Pro", "Open"] as Division[]).map((div) => (
-                  <button
-                    key={div}
-                    type="button"
-                    onClick={() => setDivision(div)}
-                    className={`py-2 text-xs font-medium rounded-xl border transition-all ${
-                      division === div
-                        ? "bg-violet-600 border-violet-600 text-white shadow-sm"
-                        : isDarkMode
-                          ? "bg-slate-800 border-slate-700 text-slate-300 hover:bg-slate-750"
-                          : "bg-slate-50 border-slate-200 text-slate-600 hover:bg-slate-100"
-                    }`}
-                  >
-                    {div}
-                  </button>
-                ))}
+                {(["Newcomer", "Novice", "Intermediate", "Advance", "All-Star", "Pro", "Open"] as Division[]).map((div) => {
+                  const isLocked = (settings.lockedDivisions || []).includes(div);
+                  return (
+                    <button
+                      key={div}
+                      type="button"
+                      disabled={isLocked}
+                      title={isLocked ? `${div} registration is closed` : undefined}
+                      onClick={() => setDivision(div)}
+                      className={`py-2 text-xs font-medium rounded-xl border transition-all ${
+                        isLocked
+                          ? "bg-slate-100 dark:bg-slate-900 border-slate-200 dark:border-slate-800 text-slate-400 dark:text-slate-600 cursor-not-allowed opacity-60"
+                          : division === div
+                            ? "bg-violet-600 border-violet-600 text-white shadow-sm"
+                            : isDarkMode
+                              ? "bg-slate-800 border-slate-700 text-slate-300 hover:bg-slate-750"
+                              : "bg-slate-50 border-slate-200 text-slate-600 hover:bg-slate-100"
+                      }`}
+                    >
+                      {div}{isLocked ? " 🔒" : ""}
+                    </button>
+                  );
+                })}
               </div>
             </div>
 

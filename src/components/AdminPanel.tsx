@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef } from "react";
-import { Shield, Sparkles, RefreshCw, Trash2, PlusCircle, CheckSquare, Settings, AlertTriangle, Play, Eye, EyeOff, Lock, Unlock, Trophy, Calendar, ArrowUp, ArrowDown, Plus, ChevronDown, ChevronUp, SortAsc, Scissors, Edit, X, FileText, Award } from "lucide-react";
+import { Shield, Sparkles, RefreshCw, Trash2, PlusCircle, CheckSquare, Settings, AlertTriangle, Play, Eye, EyeOff, Lock, Unlock, Trophy, Calendar, ArrowUp, ArrowDown, Plus, ChevronDown, ChevronUp, SortAsc, Scissors, Edit, X, FileText, Award, ExternalLink } from "lucide-react";
 import { Competitor, Heat, JudgingStyle, AppSettings, ScoreRecord, CallbackValue, CompletedContestResult } from "../types";
 import { calculateHeatResults } from "../utils/calculations";
 
@@ -23,7 +23,7 @@ interface AdminPanelProps {
     isCallback: CallbackValue;
   }) => Promise<void>;
   isDarkMode: boolean;
-  onUpdateCompetitor?: (oldBib: string, updates: { bib: string; name: string; division: string; role: "Lead" | "Follow"; checkedIn?: boolean; scratched?: boolean }) => Promise<void>;
+  onUpdateCompetitor?: (oldBib: string, updates: { bib: string; name: string; email?: string; division: string; role: "Lead" | "Follow"; checkedIn?: boolean; scratched?: boolean }) => Promise<void>;
 }
 
 export default function AdminPanel({
@@ -54,6 +54,7 @@ export default function AdminPanel({
   const [editingCompetitor, setEditingCompetitor] = useState<Competitor | null>(null);
   const [editBib, setEditBib] = useState("");
   const [editName, setEditName] = useState("");
+  const [editEmail, setEditEmail] = useState("");
   const [editRole, setEditRole] = useState<"Lead" | "Follow">("Lead");
   const [editDivision, setEditDivision] = useState("");
   const [editCheckedIn, setEditCheckedIn] = useState(false);
@@ -65,6 +66,7 @@ export default function AdminPanel({
     setEditingCompetitor(c);
     setEditBib(c.bib);
     setEditName(c.name);
+    setEditEmail(c.email || "");
     setEditRole(c.role);
     setEditDivision(c.division);
     setEditCheckedIn(c.checkedIn);
@@ -81,6 +83,14 @@ export default function AdminPanel({
       setEditError("Dancer name is required.");
       return;
     }
+    if (!editEmail.trim()) {
+      setEditError("Email address is required.");
+      return;
+    }
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(editEmail.trim())) {
+      setEditError("Please enter a valid email address.");
+      return;
+    }
     if (!editDivision) {
       setEditError("Division is required.");
       return;
@@ -93,6 +103,7 @@ export default function AdminPanel({
         await onUpdateCompetitor(editingCompetitor.bib, {
           bib: editBib.trim(),
           name: editName.trim(),
+          email: editEmail.trim(),
           division: editDivision,
           role: editRole,
           checkedIn: editCheckedIn,
@@ -599,7 +610,7 @@ export default function AdminPanel({
     if (contest === "Routine") {
       return ["Novice", "Intermediate", "Open"];
     }
-    return ["Newcomer", "Novice", "Intermediate", "Advanced", "All Stars", "Pro", "Open"];
+    return ["Newcomer", "Novice", "Intermediate", "Advance", "All-Star", "Pro", "Open"];
   };
 
   const handleContestTypeChange = (newContest: "Jack & Jill" | "Strictly Swing" | "Routine") => {
@@ -607,6 +618,10 @@ export default function AdminPanel({
     const validDivs = getDivisionsForContest(newContest);
     if (!validDivs.includes(division)) {
       setDivision(validDivs[0]);
+    }
+    // Routines are always judged as a Finals-phase couples round.
+    if (newContest === "Routine" && heatType !== "Finals") {
+      setHeatType("Finals");
     }
   };
 
@@ -758,6 +773,11 @@ export default function AdminPanel({
       return;
     }
 
+    if (activeHeatControlTab === "next" && !settings.checkInFinalized) {
+      setFormError("The Live Contest's check-in sheet must be finalized before the Next Contest's check-in sheet can be created.");
+      return;
+    }
+
     setLoading(true);
     try {
       await onCreateHeat({
@@ -768,7 +788,15 @@ export default function AdminPanel({
         heatType: heatType,
         contestType: contestType
       }, activeHeatControlTab);
-      setFormSuccess(`Heat "${newHeatName}" created successfully with ${selectedBibs.length} dancers!`);
+
+      // Once a check-in sheet has been created for this division, close registration
+      // for that division (regardless of contest phase) so the roster can't shift underneath it.
+      const alreadyLocked = settings.lockedDivisions || [];
+      if (!alreadyLocked.includes(division)) {
+        await onUpdateSettings({ lockedDivisions: [...alreadyLocked, division] });
+      }
+
+      setFormSuccess(`Heat "${newHeatName}" created successfully with ${selectedBibs.length} dancers! Registration for ${division} is now closed.`);
       setNewHeatName("");
       setSelectedBibs([]);
       setCollapsedCards((prev) => ({
@@ -974,20 +1002,22 @@ export default function AdminPanel({
               </button>
             </div>
 
-            <button
-              type="button"
-              onClick={() => toggleCard("heatsCatalog")}
-              className={`px-3 py-1.5 text-xs font-bold rounded-xl border transition-all flex items-center gap-1.5 cursor-pointer ${
-                !collapsedCards.heatsCatalog
-                  ? "bg-violet-600 border-violet-600 text-white"
-                  : isDarkMode
-                    ? "bg-slate-800 border-slate-700 text-slate-300 hover:bg-slate-750"
-                    : "bg-slate-50 border-slate-200 text-slate-750 hover:bg-slate-100"
-              }`}
-            >
-              <Trophy className="w-3.5 h-3.5" />
-              Contests ({heats.length})
-            </button>
+            {activeHeatControlTab === "live" && (
+              <button
+                type="button"
+                onClick={() => toggleCard("heatsCatalog")}
+                className={`px-3 py-1.5 text-xs font-bold rounded-xl border transition-all flex items-center gap-1.5 cursor-pointer ${
+                  !collapsedCards.heatsCatalog
+                    ? "bg-violet-600 border-violet-600 text-white"
+                    : isDarkMode
+                      ? "bg-slate-800 border-slate-700 text-slate-300 hover:bg-slate-750"
+                      : "bg-slate-50 border-slate-200 text-slate-750 hover:bg-slate-100"
+                }`}
+              >
+                <Trophy className="w-3.5 h-3.5" />
+                Contests ({(settings.completedResults || []).length})
+              </button>
+            )}
           </div>
         </div>
 
@@ -1070,27 +1100,31 @@ export default function AdminPanel({
                   <select
                     id="heat-type-setup"
                     value={heatType}
+                    disabled={contestType === "Routine"}
                     onChange={(e) => {
                       const newHeatType = e.target.value as any;
                       setHeatType(newHeatType);
                       const isNext = activeHeatControlTab === "next";
+                      const judgingStyleForPhase = newHeatType === "Finals" ? "placement" : "raw";
                       if (isNext) {
                         onUpdateSettings({
                           nextHeatType: newHeatType,
                           nextContestType: contestType,
                           nextDivision: division,
-                          nextJudgingStyle: newHeatType === "Finals" ? "placement" : "raw"
+                          nextJudgingStyle: judgingStyleForPhase
                         });
                       } else {
                         onUpdateSettings({
                           heatType: newHeatType,
                           contestType: contestType,
                           division: division,
-                          judgingStyle: newHeatType === "Finals" ? "placement" : "raw"
+                          judgingStyle: judgingStyleForPhase
                         });
                       }
                     }}
                     className={`w-full px-3 py-2 text-xs rounded-xl border focus:outline-none focus:ring-1 focus:ring-violet-500 font-medium ${
+                      contestType === "Routine" ? "opacity-50 cursor-not-allowed" : ""
+                    } ${
                       isDarkMode ? "bg-slate-800 border-slate-700 text-slate-100" : "bg-slate-50 border-slate-200 text-slate-800"
                     }`}
                   >
@@ -1099,6 +1133,9 @@ export default function AdminPanel({
                     <option value="Semi-Final">Semi-Final</option>
                     <option value="Finals">Finals</option>
                   </select>
+                  {contestType === "Routine" && (
+                    <p className="text-[10px] text-slate-400 mt-1 italic">Routines are always judged as Finals.</p>
+                  )}
                 </div>
 
                 <div className="grid grid-cols-1 gap-2 pt-1.5">
@@ -1119,9 +1156,10 @@ export default function AdminPanel({
                     <button
                       id="autofill-heat-builder-btn"
                       onClick={handleAutoFillHeatForm}
-                      disabled={!!settings.queuedHeatId}
+                      disabled={!!settings.queuedHeatId || !settings.currentHeatId}
+                      title={!settings.currentHeatId ? "A Live Contest must be configured first" : (settings.queuedHeatId ? "A Next Contest is already queued" : undefined)}
                       className={`w-full py-2 text-xs font-semibold rounded-xl border flex items-center justify-center gap-1.5 transition-all ${
-                        settings.queuedHeatId
+                        (settings.queuedHeatId || !settings.currentHeatId)
                           ? "bg-slate-100 dark:bg-slate-800 text-slate-400 dark:text-slate-600 border-slate-200 dark:border-slate-800 cursor-not-allowed opacity-50"
                           : "bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 dark:hover:bg-slate-750 text-slate-700 dark:text-slate-300 border-slate-200 dark:border-slate-700 cursor-pointer"
                       }`}
@@ -1273,8 +1311,11 @@ export default function AdminPanel({
               {/* Judging Style */}
               <div>
                 <label className="block text-xs font-semibold text-slate-400 font-mono uppercase tracking-wider mb-2">Judging System</label>
-                <div className="grid grid-cols-3 gap-2">
-                  {heatType !== "Finals" && (
+                {/* Jack & Jill / Strictly Swing + Finals: Placement only (forced).
+                    Jack & Jill / Strictly Swing + any other phase: choice of Raw or Call-Back.
+                    Routine (always Finals): choice of Raw or Placement. */}
+                <div className="grid grid-cols-2 gap-2">
+                  {(contestType === "Routine" || heatType !== "Finals") && (
                     <button
                       id="style-raw-btn"
                       onClick={() => onUpdateSettings(isNextTab ? { nextJudgingStyle: "raw" } : { judgingStyle: "raw" })}
@@ -1289,7 +1330,7 @@ export default function AdminPanel({
                       Raw Score
                     </button>
                   )}
-                  {heatType === "Finals" && (
+                  {(contestType === "Routine" || heatType === "Finals") && (
                     <button
                       id="style-placement-btn"
                       onClick={() => onUpdateSettings(isNextTab ? { nextJudgingStyle: "placement" } : { judgingStyle: "placement" })}
@@ -1304,7 +1345,7 @@ export default function AdminPanel({
                       Placement
                     </button>
                   )}
-                  {heatType !== "Finals" && (
+                  {contestType !== "Routine" && heatType !== "Finals" && (
                     <button
                       id="style-callback-btn"
                       onClick={() => onUpdateSettings(isNextTab ? { nextJudgingStyle: "callback" } : { judgingStyle: "callback" })}
@@ -1312,7 +1353,7 @@ export default function AdminPanel({
                         currentJudgingStyle === "callback"
                           ? "bg-violet-600 border-violet-600 text-white shadow-sm"
                           : isDarkMode
-                            ? "bg-slate-800 border-slate-750 text-slate-305 hover:bg-slate-750"
+                            ? "bg-slate-800 border-slate-700 text-slate-300 hover:bg-slate-750"
                             : "bg-slate-50 border-slate-200 text-slate-600 hover:bg-slate-100"
                       }`}
                     >
@@ -1320,6 +1361,9 @@ export default function AdminPanel({
                     </button>
                   )}
                 </div>
+                {contestType !== "Routine" && heatType === "Finals" && (
+                  <p className="text-[10px] text-slate-400 mt-1.5 italic">Jack & Jill / Strictly Swing finals are always scored by relative Placement.</p>
+                )}
               </div>
 
               {/* Callbacks & Alternates Quotas */}
@@ -1596,7 +1640,7 @@ export default function AdminPanel({
             <div className="flex items-center gap-2">
               <PlusCircle className="w-5 h-5 text-violet-500" />
               <div>
-                <h2 className="text-lg font-bold tracking-tight">Contest Check-In Sheet</h2>
+                <h2 className="text-lg font-bold tracking-tight">{division} {contestType} — {heatType} Check-In Sheet</h2>
                 <p className="text-[10px] text-slate-400 font-medium">Generate check-in sheets for floor coordinators to manage & check-in competitors</p>
               </div>
             </div>
@@ -1708,9 +1752,7 @@ export default function AdminPanel({
                             className={`w-full p-2.5 rounded-xl border text-left text-xs flex items-center justify-between transition-all ${
                               isSelected
                                 ? "bg-violet-600/15 border-violet-500 text-violet-500 font-bold"
-                                : isDarkMode
-                                  ? "bg-slate-800/60 border-slate-750 text-slate-300 hover:bg-slate-750"
-                                  : "bg-slate-50 border-slate-200 text-slate-700 hover:bg-slate-100"
+                                : "bg-yellow-400/15 border-yellow-500/40 text-yellow-700 dark:text-yellow-400 hover:bg-yellow-400/25"
                             }`}
                           >
                             <div className="flex items-center gap-2">
@@ -1718,7 +1760,7 @@ export default function AdminPanel({
                               <span className="truncate">{c.name}</span>
                             </div>
                             <span className="text-[9px] px-1.5 py-0.5 rounded font-mono font-semibold bg-sky-500/10 text-sky-500 border-sky-500/10">
-                              Leader
+                              {isSelected ? "Leader" : "Not Selected"}
                             </span>
                           </button>
                         );
@@ -1743,9 +1785,7 @@ export default function AdminPanel({
                             className={`w-full p-2.5 rounded-xl border text-left text-xs flex items-center justify-between transition-all ${
                               isSelected
                                 ? "bg-violet-600/15 border-violet-500 text-violet-500 font-bold"
-                                : isDarkMode
-                                  ? "bg-slate-800/60 border-slate-750 text-slate-300 hover:bg-slate-750"
-                                  : "bg-slate-50 border-slate-200 text-slate-700 hover:bg-slate-100"
+                                : "bg-yellow-400/15 border-yellow-500/40 text-yellow-700 dark:text-yellow-400 hover:bg-yellow-400/25"
                             }`}
                           >
                             <div className="flex items-center gap-2">
@@ -1753,7 +1793,7 @@ export default function AdminPanel({
                               <span className="truncate">{c.name}</span>
                             </div>
                             <span className="text-[9px] px-1.5 py-0.5 rounded font-mono font-semibold bg-pink-500/10 text-pink-500 border-pink-500/10">
-                              Follower
+                              {isSelected ? "Follower" : "Not Selected"}
                             </span>
                           </button>
                         );
@@ -1766,11 +1806,21 @@ export default function AdminPanel({
                 </div>
               </div>
 
+              {activeHeatControlTab === "next" && !settings.checkInFinalized && (
+                <p className="text-[11px] text-amber-500 bg-amber-500/10 border border-amber-500/20 rounded-xl px-3 py-2">
+                  The Live Contest's check-in sheet must be finalized by the Floor Coordinator before the Next Contest's check-in sheet can be created.
+                </p>
+              )}
               <button
                 id="submit-new-heat-btn"
                 type="submit"
-                disabled={loading}
-                className="w-full py-2.5 rounded-xl bg-violet-600 hover:bg-violet-750 text-white text-xs font-bold shadow-md shadow-violet-600/15 flex items-center justify-center gap-2 transition-all"
+                disabled={loading || (activeHeatControlTab === "next" && !settings.checkInFinalized)}
+                title={activeHeatControlTab === "next" && !settings.checkInFinalized ? "Finalize the Live Contest's check-in first" : undefined}
+                className={`w-full py-2.5 rounded-xl text-white text-xs font-bold shadow-md shadow-violet-600/15 flex items-center justify-center gap-2 transition-all ${
+                  loading || (activeHeatControlTab === "next" && !settings.checkInFinalized)
+                    ? "bg-slate-400 dark:bg-slate-700 cursor-not-allowed opacity-60"
+                    : "bg-violet-600 hover:bg-violet-750"
+                }`}
               >
                 <PlusCircle className="w-4 h-4" />
                 {loading ? "Creating..." : "Create"}
@@ -1779,13 +1829,17 @@ export default function AdminPanel({
           )}
         </div>
 
-        {/* Contests Directory */}
+        {/* Contests Directory (Live Contest tab only) */}
+        {activeHeatControlTab === "live" && (
         <div className={`p-6 rounded-2xl border transition-all ${isDarkMode ? "bg-slate-900 border-slate-800 text-slate-100" : "bg-white border-slate-200 shadow-sm text-slate-800"}`}>
           <div 
             className="flex items-center justify-between mb-4 cursor-pointer select-none"
             onClick={() => toggleCard("heatsCatalog")}
           >
-            <h2 className="text-lg font-bold tracking-tight">Contests</h2>
+            <div>
+              <h2 className="text-lg font-bold tracking-tight">Contests</h2>
+              <p className="text-[10px] text-slate-400 font-medium">All contests completed (scored) since the last database reset</p>
+            </div>
             {collapsedCards.heatsCatalog ? (
               <ChevronDown className="w-4 h-4 text-slate-400" />
             ) : (
@@ -1805,7 +1859,7 @@ export default function AdminPanel({
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-slate-200 dark:divide-slate-800 text-xs">
-                  {heats.map((h) => {
+                  {heats.filter((h) => (settings.completedResults || []).some((cr) => cr.heatId === h.id)).map((h) => {
                     const isExpanded = expandedHeatId === h.id;
                     const isPublished = settings.publishedHeatIds?.includes(h.id);
                     const isCurrent = settings.currentHeatId === h.id;
@@ -2186,10 +2240,10 @@ export default function AdminPanel({
                       </React.Fragment>
                     );
                   })}
-                  {heats.length === 0 && (
+                  {heats.filter((h) => (settings.completedResults || []).some((cr) => cr.heatId === h.id)).length === 0 && (
                     <tr>
                       <td colSpan={5} className="p-6 text-center text-slate-500">
-                        No heats exist yet. Use the builder above to configure heats.
+                        No contests have been completed since the last reset yet.
                       </td>
                     </tr>
                   )}
@@ -2198,6 +2252,7 @@ export default function AdminPanel({
             </div>
           )}
         </div>
+        )}
 
       {/* Active Heat Editor (Full Width at Bottom) */}
       {activeHeatControlTab === "live" && (
@@ -3705,7 +3760,7 @@ export default function AdminPanel({
         Complete Contest
       </h2>
       <p className="text-[11px] text-slate-400 mb-4 leading-relaxed">
-        Clicking <strong>Finalize Contest Results</strong> advances the live rotation floor. It requires all judge scores to be complete.
+        Clicking <strong>Complete Contest</strong> sends the finalized judge results to Scoring and advances the live rotation floor. It requires all judge scores to be complete.
       </p>
 
       {!canCompleteHeat ? (
@@ -3842,7 +3897,16 @@ export default function AdminPanel({
         }`}
       >
         <CheckSquare className="w-4 h-4" />
-        Finalize Contest Results
+        Complete Contest
+      </button>
+
+      <button
+        type="button"
+        onClick={() => { window.location.search = "?role=scoring"; }}
+        className="w-full mt-2 py-2 rounded-xl font-bold text-[11px] border border-violet-500/30 text-violet-500 hover:bg-violet-500/10 transition-all flex items-center justify-center gap-1.5 cursor-pointer"
+      >
+        <ExternalLink className="w-3.5 h-3.5" />
+        Go to Scoring
       </button>
     </div>
     </>)}
@@ -3990,6 +4054,19 @@ export default function AdminPanel({
               </div>
             </div>
 
+            {/* Email */}
+            <div>
+              <label className="block text-[10px] uppercase font-bold tracking-wider text-slate-400 mb-1">Email Address</label>
+              <input
+                type="email"
+                value={editEmail}
+                onChange={(e) => setEditEmail(e.target.value)}
+                className={`w-full px-2.5 py-1.5 rounded-lg border focus:outline-none focus:ring-1 focus:ring-violet-500 font-medium ${
+                  isDarkMode ? "bg-slate-950 border-slate-850 text-slate-100" : "bg-slate-50 border-slate-200 text-slate-800"
+                }`}
+              />
+            </div>
+
             {/* Division and Role */}
             <div className="grid grid-cols-2 gap-3">
               <div>
@@ -4004,9 +4081,10 @@ export default function AdminPanel({
                   <option value="Newcomer">Newcomer</option>
                   <option value="Novice">Novice</option>
                   <option value="Intermediate">Intermediate</option>
-                  <option value="Advanced">Advanced</option>
+                  <option value="Advance">Advance</option>
                   <option value="All-Star">All-Star</option>
                   <option value="Pro">Pro</option>
+                  <option value="Open">Open</option>
                 </select>
               </div>
               <div>

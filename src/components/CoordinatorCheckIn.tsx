@@ -9,7 +9,7 @@ interface CoordinatorCheckInProps {
   isDarkMode: boolean;
   settings: AppSettings;
   onUpdateSettings?: (newSettings: Partial<AppSettings>) => Promise<void>;
-  onUpdateCompetitor?: (oldBib: string, updates: { bib: string; name: string; division: string; role: "Lead" | "Follow"; checkedIn?: boolean; scratched?: boolean }) => Promise<void>;
+  onUpdateCompetitor?: (oldBib: string, updates: { bib: string; name: string; email?: string; division: string; role: "Lead" | "Follow"; checkedIn?: boolean; scratched?: boolean }) => Promise<void>;
 }
 
 type CheckInTab = "master" | "leaders" | "followers" | "activeHeat";
@@ -32,6 +32,7 @@ export default function CoordinatorCheckIn({
   const [editingCompetitor, setEditingCompetitor] = useState<Competitor | null>(null);
   const [editBib, setEditBib] = useState("");
   const [editName, setEditName] = useState("");
+  const [editEmail, setEditEmail] = useState("");
   const [editRole, setEditRole] = useState<"Lead" | "Follow">("Lead");
   const [editDivision, setEditDivision] = useState("");
   const [editCheckedIn, setEditCheckedIn] = useState(false);
@@ -43,6 +44,7 @@ export default function CoordinatorCheckIn({
     setEditingCompetitor(c);
     setEditBib(c.bib);
     setEditName(c.name);
+    setEditEmail(c.email || "");
     setEditRole(c.role);
     setEditDivision(c.division);
     setEditCheckedIn(c.checkedIn);
@@ -59,6 +61,14 @@ export default function CoordinatorCheckIn({
       setEditError("Dancer name is required.");
       return;
     }
+    if (!editEmail.trim()) {
+      setEditError("Email address is required.");
+      return;
+    }
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(editEmail.trim())) {
+      setEditError("Please enter a valid email address.");
+      return;
+    }
     if (!editDivision) {
       setEditError("Division is required.");
       return;
@@ -71,6 +81,7 @@ export default function CoordinatorCheckIn({
         await onUpdateCompetitor(editingCompetitor.bib, {
           bib: editBib.trim(),
           name: editName.trim(),
+          email: editEmail.trim(),
           division: editDivision,
           role: editRole,
           checkedIn: editCheckedIn,
@@ -1203,6 +1214,19 @@ export default function CoordinatorCheckIn({
                 </div>
               </div>
 
+              {/* Email */}
+              <div>
+                <label className="block text-[10px] uppercase font-bold tracking-wider text-slate-400 mb-1">Email Address</label>
+                <input
+                  type="email"
+                  value={editEmail}
+                  onChange={(e) => setEditEmail(e.target.value)}
+                  className={`w-full px-2.5 py-1.5 rounded-lg border focus:outline-none focus:ring-1 focus:ring-violet-500 font-medium ${
+                    isDarkMode ? "bg-slate-950 border-slate-850 text-slate-100" : "bg-slate-50 border-slate-200 text-slate-800"
+                  }`}
+                />
+              </div>
+
               {/* Division and Role */}
               <div className="grid grid-cols-2 gap-3">
                 <div>
@@ -1217,9 +1241,10 @@ export default function CoordinatorCheckIn({
                     <option value="Newcomer">Newcomer</option>
                     <option value="Novice">Novice</option>
                     <option value="Intermediate">Intermediate</option>
-                    <option value="Advanced">Advanced</option>
+                    <option value="Advance">Advance</option>
                     <option value="All-Star">All-Star</option>
                     <option value="Pro">Pro</option>
+                    <option value="Open">Open</option>
                   </select>
                 </div>
                 <div>

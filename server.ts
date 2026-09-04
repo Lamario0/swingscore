@@ -6,6 +6,7 @@ import { createServer as createViteServer } from "vite";
 interface Competitor {
   bib: string;
   name: string;
+  email?: string;
   division: string;
   role: "Lead" | "Follow";
   checkedIn: boolean;
@@ -70,6 +71,28 @@ interface AppSettings {
   nextCallbackCountFollowers?: number;
   nextAlternateCountLeaders?: number;
   nextAlternateCountFollowers?: number;
+  lockedDivisions?: string[];
+  queuedCheckInFinalized?: boolean;
+  completedResults?: CompletedContestResult[];
+}
+
+interface CompletedContestResult {
+  id: string;
+  heatId: string;
+  name: string;
+  division: string;
+  heatType: "Prelim" | "Semi-Final" | "Quarter Final" | "Finals";
+  timestamp: string;
+  judgingStyle: "raw" | "placement" | "callback";
+  rankings: {
+    rank: number;
+    bib: string;
+    name: string;
+    averageScore?: number;
+    averagePlacement?: number;
+    qualified?: boolean;
+    isAlternate?: boolean;
+  }[];
 }
 
 interface AppState {
@@ -83,17 +106,17 @@ const DATA_FILE = path.join(process.cwd(), "data.json");
 
 const SEED_COMPETITORS: Competitor[] = [
   // Leaders from the spreadsheet reference
-  { bib: "1", name: "Jules Green", division: "Novice", role: "Lead", checkedIn: true, scratched: false, registryPoints: 84 },
-  { bib: "2", name: "Joel Blue", division: "Novice", role: "Lead", checkedIn: true, scratched: false, registryPoints: 85 },
-  { bib: "3", name: "Josiah Yellow", division: "Novice", role: "Lead", checkedIn: true, scratched: false, registryPoints: 90 },
-  { bib: "4", name: "Ron Red", division: "Novice", role: "Lead", checkedIn: true, scratched: false, registryPoints: 80 },
+  { bib: "1", name: "Jules Green", email: "jules.green@example.com", division: "Novice", role: "Lead", checkedIn: true, scratched: false, registryPoints: 84 },
+  { bib: "2", name: "Joel Blue", email: "joel.blue@example.com", division: "Novice", role: "Lead", checkedIn: true, scratched: false, registryPoints: 85 },
+  { bib: "3", name: "Josiah Yellow", email: "josiah.yellow@example.com", division: "Novice", role: "Lead", checkedIn: true, scratched: false, registryPoints: 90 },
+  { bib: "4", name: "Ron Red", email: "ron.red@example.com", division: "Novice", role: "Lead", checkedIn: true, scratched: false, registryPoints: 80 },
 
   // Followers from the spreadsheet reference
-  { bib: "11", name: "Rachel Red", division: "Novice", role: "Follow", checkedIn: true, scratched: false, registryPoints: 75 },
-  { bib: "12", name: "Mallory Blue", division: "Novice", role: "Follow", checkedIn: true, scratched: false, registryPoints: 80 },
-  { bib: "13", name: "Willow Green", division: "Novice", role: "Follow", checkedIn: true, scratched: false, registryPoints: 69 },
-  { bib: "14", name: "Mindy (Yellow)", division: "Novice", role: "Follow", checkedIn: false, scratched: false, registryPoints: 55 },
-  { bib: "15", name: "Misty (Green)", division: "Novice", role: "Follow", checkedIn: true, scratched: false, registryPoints: 85 }
+  { bib: "11", name: "Rachel Red", email: "rachel.red@example.com", division: "Novice", role: "Follow", checkedIn: true, scratched: false, registryPoints: 75 },
+  { bib: "12", name: "Mallory Blue", email: "mallory.blue@example.com", division: "Novice", role: "Follow", checkedIn: true, scratched: false, registryPoints: 80 },
+  { bib: "13", name: "Willow Green", email: "willow.green@example.com", division: "Novice", role: "Follow", checkedIn: true, scratched: false, registryPoints: 69 },
+  { bib: "14", name: "Mindy (Yellow)", email: "mindy.yellow@example.com", division: "Novice", role: "Follow", checkedIn: false, scratched: false, registryPoints: 55 },
+  { bib: "15", name: "Misty (Green)", email: "misty.green@example.com", division: "Novice", role: "Follow", checkedIn: true, scratched: false, registryPoints: 85 }
 ];
 
 const SEED_HEATS: Heat[] = [
@@ -164,13 +187,20 @@ const DEFAULT_STATE: AppState = {
     division: "Novice",
     heatType: "Finals",
     queuedHeatId: null,
-    checkInFinalized: false,
+    // The seeded demo heat ("heat-strictly-finals") ships with SEED_SCORES already
+    // recorded against it, so check-in must already be finalized for that heat to
+    // make sense out of the box. /api/reset and /api/clear-all both explicitly
+    // override this back to false for a genuinely blank slate.
+    checkInFinalized: true,
     publishedHeatIds: [],
     finalizedSheets: [],
     judgeNames: ["Judge A", "Judge B", "Judge C", "Judge D", "Judge E"],
     judgeRoles: ["None", "None", "None", "None", "None"],
     chiefJudgeName: "Chief Judge",
-    chiefJudgeRole: "Both"
+    chiefJudgeRole: "Both",
+    lockedDivisions: [],
+    queuedCheckInFinalized: false,
+    completedResults: []
   }
 };
 
@@ -245,13 +275,30 @@ async function startServer() {
   });
 
   app.post("/api/register", (req, res) => {
-    const { bib, name, division, role } = req.body;
-    if (!bib || !name || !division || !role) {
+    const { bib, name, email, division, role } = req.body;
+    if (!bib || !name || !email || !division || !role) {
       res.status(400).json({ error: "Missing required competitor fields" });
       return;
     }
 
+    const emailPattern = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+    if (!emailPattern.test(email)) {
+      res.status(400).json({ error: "Please enter a valid email address" });
+      return;
+    }
+
     const state = readState();
+
+    if (state.settings.registrationEnabled === false) {
+      res.status(403).json({ error: "Registration is currently closed by the event administrators" });
+      return;
+    }
+
+    if ((state.settings.lockedDivisions || []).includes(division)) {
+      res.status(403).json({ error: `Registration for the ${division} division is closed — check-in has already been created for this division` });
+      return;
+    }
+
     // Check if bib already exists
     const exists = state.competitors.some((c) => c.bib === bib);
     if (exists) {
@@ -262,6 +309,7 @@ async function startServer() {
     const newCompetitor: Competitor = {
       bib,
       name,
+      email,
       division,
       role,
       checkedIn: false
@@ -295,7 +343,7 @@ async function startServer() {
   });
 
   app.post("/api/competitor/update", (req, res) => {
-    const { oldBib, newBib, name, role, division, checkedIn, scratched } = req.body;
+    const { oldBib, newBib, name, email, role, division, checkedIn, scratched } = req.body;
     if (!oldBib || !newBib || !role || !division) {
       res.status(400).json({ error: "Missing required competitor update fields" });
       return;
@@ -319,6 +367,7 @@ async function startServer() {
 
     competitor.bib = newBib;
     if (name !== undefined) competitor.name = name;
+    if (email !== undefined) competitor.email = email;
     competitor.role = role;
     competitor.division = division;
     if (checkedIn !== undefined) competitor.checkedIn = checkedIn;
@@ -603,7 +652,10 @@ async function startServer() {
         queuedHeatId: null,
         publishedHeatIds: [],
         checkInFinalized: false,
-        finalizedSheets: []
+        queuedCheckInFinalized: false,
+        finalizedSheets: [],
+        lockedDivisions: [],
+        completedResults: []
       }
     };
     writeState(clearedState);
@@ -638,7 +690,10 @@ async function startServer() {
         judgeNames: ["Judge A", "Judge B", "Judge C", "Judge D", "Judge E"],
         judgeRoles: ["None", "None", "None", "None", "None"],
         chiefJudgeName: "Chief Judge",
-        chiefJudgeRole: "Both"
+        chiefJudgeRole: "Both",
+        lockedDivisions: [],
+        queuedCheckInFinalized: false,
+        completedResults: []
       }
     };
     writeState(EMPTY_STATE);

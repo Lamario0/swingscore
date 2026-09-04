@@ -6,6 +6,7 @@ import CoordinatorCheckIn from "./components/CoordinatorCheckIn";
 import JudgePortal from "./components/JudgePortal";
 import AdminPanel from "./components/AdminPanel";
 import ResultsDashboard from "./components/ResultsDashboard";
+import ScoringDashboard from "./components/ScoringDashboard";
 import PlatformPortal from "./components/PlatformPortal";
 import RoleLogin from "./components/RoleLogin";
 import { Competitor, Heat, ScoreRecord, AppSettings, ViewRole, CallbackValue } from "./types";
@@ -32,6 +33,7 @@ export default function App() {
       if (hostname.startsWith("registration.") || hostname.startsWith("register.")) return "competitor";
       if (hostname.startsWith("floorcord.") || hostname.startsWith("coordinator.") || hostname.startsWith("checkin.")) return "coordinator";
       if (hostname.startsWith("results.")) return "results";
+      if (hostname.startsWith("scoring.")) return "scoring";
 
       // 2. Query parameter or testing slugs
       if (queryRole === "admin") return "admin";
@@ -39,6 +41,7 @@ export default function App() {
       if (queryRole === "registration" || queryRole === "competitor" || queryRole === "register") return "competitor";
       if (queryRole === "floorcord" || queryRole === "coordinator" || queryRole === "checkin") return "coordinator";
       if (queryRole === "results") return "results";
+      if (queryRole === "scoring") return "scoring";
 
       // 3. Pathname check-in
       if (pathname.includes("/admin")) return "admin";
@@ -46,6 +49,7 @@ export default function App() {
       if (pathname.includes("/registration") || pathname.includes("/competitor") || pathname.includes("/register")) return "competitor";
       if (pathname.includes("/floorcord") || pathname.includes("/coordinator") || pathname.includes("/checkin") || pathname.includes("/check-in")) return "coordinator";
       if (pathname.includes("/results")) return "results";
+      if (pathname.includes("/scoring")) return "scoring";
 
       // 4. Hash fallback
       if (hash.includes("admin")) return "admin";
@@ -53,6 +57,7 @@ export default function App() {
       if (hash.includes("registration") || hash.includes("competitor") || hash.includes("register")) return "competitor";
       if (hash.includes("floorcord") || hash.includes("coordinator") || hash.includes("checkin")) return "coordinator";
       if (hash.includes("results")) return "results";
+      if (hash.includes("scoring")) return "scoring";
 
       return "portal";
     };
@@ -150,7 +155,7 @@ export default function App() {
   }, [settings, selectedJudgeId]);
 
   // Actions
-  const handleRegisterCompetitor = async (competitor: { bib: string; name: string; division: string; role: "Lead" | "Follow" }) => {
+  const handleRegisterCompetitor = async (competitor: { bib: string; name: string; email: string; division: string; role: "Lead" | "Follow" }) => {
     const res = await fetch("/api/register", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -175,7 +180,7 @@ export default function App() {
 
   const handleUpdateCompetitor = async (
     oldBib: string,
-    updates: { bib: string; name: string; division: string; role: "Lead" | "Follow"; checkedIn?: boolean; scratched?: boolean }
+    updates: { bib: string; name: string; email?: string; division: string; role: "Lead" | "Follow"; checkedIn?: boolean; scratched?: boolean }
   ) => {
     const res = await fetch("/api/competitor/update", {
       method: "POST",
@@ -469,7 +474,13 @@ export default function App() {
             <RoleLogin
               role={currentRole === "portal" ? "results" : currentRole}
               isDarkMode={isDarkMode}
-              onSuccess={() => setIsAuthenticated(true)}
+              onSuccess={() => {
+                // Persist the session so a page refresh doesn't force the passcode again
+                if (currentRole !== "portal") {
+                  localStorage.setItem(`swingscore_auth_${currentRole}`, "true");
+                }
+                setIsAuthenticated(true);
+              }}
             />
           ) : (
             <div className="transition-all duration-300">
@@ -486,6 +497,14 @@ export default function App() {
                   competitors={competitors}
                   heats={heats}
                   scores={scores}
+                  settings={settings}
+                  isDarkMode={isDarkMode}
+                  onRefresh={fetchState}
+                />
+              )}
+
+              {currentRole === "scoring" && (
+                <ScoringDashboard
                   settings={settings}
                   isDarkMode={isDarkMode}
                   onRefresh={fetchState}

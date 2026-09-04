@@ -47,6 +47,11 @@ export default function Header({
           label: "Public Scoreboard",
           color: "bg-violet-500/10 text-violet-500 border-violet-500/20"
         };
+      case "scoring":
+        return {
+          label: "Scoring & Results Ledger",
+          color: "bg-indigo-500/10 text-indigo-500 border-indigo-500/20"
+        };
       default:
         return {
           label: "Central Gateway",

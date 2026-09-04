@@ -1,8 +1,8 @@
 import React, { useState } from "react";
-import { Lock, Eye, EyeOff, ShieldAlert, Award, UserCheck, Users, Landmark, AlertCircle } from "lucide-react";
+import { Lock, Eye, EyeOff, ShieldAlert, Award, UserCheck, Users, Landmark, AlertCircle, Trophy } from "lucide-react";
 
 interface RoleLoginProps {
-  role: "admin" | "judge" | "coordinator" | "competitor" | "results";
+  role: "admin" | "judge" | "coordinator" | "competitor" | "results" | "scoring";
   isDarkMode: boolean;
   onSuccess: () => void;
 }
@@ -50,6 +50,15 @@ export default function RoleLogin({ role, isDarkMode, onSuccess }: RoleLoginProp
           passcode: "register",
           color: "border-blue-500/20 text-blue-500 bg-blue-500/5",
           icon: <Users className="w-10 h-10 text-blue-500" />
+        };
+      case "scoring":
+        return {
+          title: "Scoring & Results Ledger",
+          description: "Internal system of record for finalized judge decisions, compiled contest by contest as heats are completed.",
+          domain: "scoring.swingscore.com",
+          passcode: "scoring",
+          color: "border-indigo-500/20 text-indigo-500 bg-indigo-500/5",
+          icon: <Trophy className="w-10 h-10 text-indigo-500" />
         };
       default:
         return {

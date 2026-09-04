@@ -773,6 +773,47 @@ export default function JudgePortal({
     );
   }
 
+  if (!settings.checkInFinalized) {
+    return (
+      <div className="space-y-6 animate-fade-in">
+        <div className={`p-4 rounded-2xl border flex justify-between items-center transition-all ${
+          isDarkMode ? "bg-slate-900 border-slate-800" : "bg-white border-slate-100 shadow-sm"
+        }`}>
+          <div className="flex items-center gap-2">
+            <span className="w-2.5 h-2.5 rounded-full bg-amber-500 animate-pulse" />
+            <span className="text-xs font-mono font-bold text-slate-300">
+              Logged in as: <strong className="text-violet-400">{judgeId}</strong> ({judgeRole})
+            </span>
+          </div>
+          <button
+            onClick={() => {
+              if (onSelectJudge) onSelectJudge("");
+            }}
+            className="px-3 py-1.5 bg-slate-800 hover:bg-slate-700 text-white rounded-xl text-xs font-semibold transition-all"
+          >
+            Log Out
+          </button>
+        </div>
+
+        <div className={`p-8 rounded-2xl border text-center transition-all ${isDarkMode ? "bg-slate-900 border-slate-800 text-slate-100" : "bg-white border-slate-200 text-slate-800 shadow-sm"}`}>
+          <Clock className="w-12 h-12 mx-auto text-amber-500 mb-4 animate-pulse" />
+          <h3 className="text-lg font-bold tracking-tight">Awaiting Floor Coordinator Check-In</h3>
+          <p className="text-xs text-slate-400 mt-2 max-w-sm mx-auto">
+            {activeHeat.name} has been created, but the Floor Coordinator has not yet finalized the check-in sheet.
+            Judge sheets populate with competitors as soon as check-in is submitted.
+          </p>
+          <button
+            onClick={handleManualRefresh}
+            className="mt-6 px-4 py-2 bg-slate-800 hover:bg-slate-700 text-white rounded-xl text-xs font-semibold flex items-center gap-2 mx-auto transition-all"
+          >
+            <RefreshCw className={`w-3.5 h-3.5 ${syncing ? "animate-spin" : ""}`} />
+            Force Sync Status
+          </button>
+        </div>
+      </div>
+    );
+  }
+
   if (!isAssignedToThisHeat || heatCompetitors.length === 0) {
     const message = notAssignedMessage || `No competitors of your assigned role ("${judgeRole}") are present in this heat.`;
     return (
