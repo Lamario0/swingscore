@@ -57,12 +57,6 @@ export default function RegisterCompetitor({ competitors, onRegister, isDarkMode
       return;
     }
 
-    const emailPattern = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-    if (!emailPattern.test(email.trim())) {
-      setError("Please enter a valid email address.");
-      return;
-    }
-
     if ((settings.lockedDivisions || []).includes(division)) {
       setError(`Registration for the ${division} division is closed — check-in has already been created.`);
       return;

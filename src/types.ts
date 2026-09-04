@@ -78,6 +78,10 @@ export interface AppSettings {
   nextChiefJudgeRole?: "Leaders" | "Followers" | "Both" | "Finals" | "None";
   completedResults?: CompletedContestResult[];
   lockedDivisions?: string[];
+  // Judge names/Chief Judge name that have been "claimed" by entering the scoring
+  // console at least once. A claimed name can no longer be selected by a different
+  // browser, preventing two people from submitting scores under the same judge.
+  claimedJudges?: string[];
 }
 
 export interface CompletedContestResult {

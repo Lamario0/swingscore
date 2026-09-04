@@ -65,10 +65,6 @@ export default function CoordinatorCheckIn({
       setEditError("Email address is required.");
       return;
     }
-    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(editEmail.trim())) {
-      setEditError("Please enter a valid email address.");
-      return;
-    }
     if (!editDivision) {
       setEditError("Division is required.");
       return;

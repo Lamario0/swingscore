@@ -74,6 +74,7 @@ interface AppSettings {
   lockedDivisions?: string[];
   queuedCheckInFinalized?: boolean;
   completedResults?: CompletedContestResult[];
+  claimedJudges?: string[];
 }
 
 interface CompletedContestResult {
@@ -200,7 +201,8 @@ const DEFAULT_STATE: AppState = {
     chiefJudgeRole: "Both",
     lockedDivisions: [],
     queuedCheckInFinalized: false,
-    completedResults: []
+    completedResults: [],
+    claimedJudges: []
   }
 };
 
@@ -278,12 +280,6 @@ async function startServer() {
     const { bib, name, email, division, role } = req.body;
     if (!bib || !name || !email || !division || !role) {
       res.status(400).json({ error: "Missing required competitor fields" });
-      return;
-    }
-
-    const emailPattern = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-    if (!emailPattern.test(email)) {
-      res.status(400).json({ error: "Please enter a valid email address" });
       return;
     }
 
@@ -655,7 +651,8 @@ async function startServer() {
         queuedCheckInFinalized: false,
         finalizedSheets: [],
         lockedDivisions: [],
-        completedResults: []
+        completedResults: [],
+        claimedJudges: []
       }
     };
     writeState(clearedState);
@@ -693,7 +690,8 @@ async function startServer() {
         chiefJudgeRole: "Both",
         lockedDivisions: [],
         queuedCheckInFinalized: false,
-        completedResults: []
+        completedResults: [],
+        claimedJudges: []
       }
     };
     writeState(EMPTY_STATE);

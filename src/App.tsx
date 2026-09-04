@@ -14,7 +14,35 @@ import { Competitor, Heat, ScoreRecord, AppSettings, ViewRole, CallbackValue } f
 export default function App() {
   // Navigation & Preferences (Dynamically detected via URL slug, query string, or subdomains)
   const [currentRole, setCurrentRole] = useState<ViewRole | "portal">("portal");
-  const [selectedJudgeId, setSelectedJudgeId] = useState<string>("");
+  const [selectedJudgeId, setSelectedJudgeIdState] = useState<string>(() => {
+    try {
+      return localStorage.getItem("swingscore_judge_claim") || "";
+    } catch {
+      return "";
+    }
+  });
+  // Remember which judge name THIS browser has claimed, even across a logout or a
+  // refresh (selectedJudgeId itself resets to "" on logout so the picker screen
+  // shows again). We intentionally never clear this on logout -- only a full
+  // contest reset (/api/reset, /api/clear-all) releases a claim -- so the same
+  // browser can always re-enter as the judge it already claimed.
+  const setSelectedJudgeId = (id: string) => {
+    setSelectedJudgeIdState(id);
+    if (id) {
+      try {
+        localStorage.setItem("swingscore_judge_claim", id);
+      } catch {
+        // ignore storage errors (private browsing, etc.)
+      }
+    }
+  };
+  const myClaimedJudge = (() => {
+    try {
+      return localStorage.getItem("swingscore_judge_claim") || "";
+    } catch {
+      return "";
+    }
+  })();
   const [isDarkMode, setIsDarkMode] = useState<boolean>(true);
   const [isAuthenticated, setIsAuthenticated] = useState<boolean>(false);
 
@@ -546,6 +574,7 @@ export default function App() {
                   settings={settings}
                   onSelectJudge={setSelectedJudgeId}
                   onUpdateSettings={handleUpdateSettings}
+                  myClaimedJudge={myClaimedJudge}
                 />
               )}
 

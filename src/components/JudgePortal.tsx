@@ -21,6 +21,10 @@ interface JudgePortalProps {
   settings: AppSettings;
   onSelectJudge?: (id: string) => void;
   onUpdateSettings: (newSettings: Partial<AppSettings>) => Promise<void>;
+  // The judge name (if any) that THIS browser has already claimed, so it can
+  // still re-select that same name after a logout or refresh even though the
+  // name is otherwise locked out for everyone else.
+  myClaimedJudge?: string;
 }
 
 export default function JudgePortal({
@@ -35,7 +39,8 @@ export default function JudgePortal({
   onRefresh,
   settings,
   onSelectJudge,
-  onUpdateSettings
+  onUpdateSettings,
+  myClaimedJudge,
 }: JudgePortalProps) {
   const [localScores, setLocalScores] = useState<{ [bib: string]: number }>({});
   const [localCallbacks, setLocalCallbacks] = useState<{ [bib: string]: CallbackValue }>({});
@@ -115,6 +120,11 @@ export default function JudgePortal({
     .filter((j) => j.role !== "None");
 
   const isChiefEnabled = chiefRole !== "None";
+
+  // A name is available to pick if nobody has claimed it yet, OR this browser is
+  // the one that claimed it (so the rightful judge can always get back in).
+  const claimedJudges = settings.claimedJudges || [];
+  const isNameClaimedByOther = (name: string) => claimedJudges.includes(name) && name !== myClaimedJudge;
 
   // Check if current judgeId is enabled and in active list
   const isCurrentJudgeEnabled = !!judgeId && ((judgeId === chiefName && isChiefEnabled) || 
@@ -324,29 +334,39 @@ export default function JudgePortal({
                 }`}
               >
                 <option value="">Choose your profile...</option>
-                {enabledJudges.map((j) => (
-                  <option key={j.name} value={j.name}>
-                    {j.name} ({j.role})
-                  </option>
-                ))}
-                {isChiefEnabled && (
-                  <option value={chiefName}>
-                    {chiefName} (Chief / {chiefRole})
-                  </option>
-                )}
+                {enabledJudges.map((j) => {
+                  const takenByOther = isNameClaimedByOther(j.name);
+                  return (
+                    <option key={j.name} value={j.name} disabled={takenByOther}>
+                      {j.name} ({j.role}){takenByOther ? " — Already Claimed" : ""}
+                    </option>
+                  );
+                })}
+                {isChiefEnabled && (() => {
+                  const takenByOther = isNameClaimedByOther(chiefName);
+                  return (
+                    <option value={chiefName} disabled={takenByOther}>
+                      {chiefName} (Chief / {chiefRole}){takenByOther ? " — Already Claimed" : ""}
+                    </option>
+                  );
+                })()}
               </select>
             </div>
 
             <button
               id="enter-scoring-console-btn"
-              disabled={!tempSelectedJudge}
-              onClick={() => {
-                if (tempSelectedJudge && onSelectJudge) {
+              disabled={!tempSelectedJudge || isNameClaimedByOther(tempSelectedJudge)}
+              onClick={async () => {
+                if (!tempSelectedJudge || isNameClaimedByOther(tempSelectedJudge)) return;
+                if (!claimedJudges.includes(tempSelectedJudge)) {
+                  await onUpdateSettings({ claimedJudges: [...claimedJudges, tempSelectedJudge] });
+                }
+                if (onSelectJudge) {
                   onSelectJudge(tempSelectedJudge);
                 }
               }}
               className={`w-full py-3 rounded-xl font-semibold text-xs tracking-wide uppercase transition-all ${
-                tempSelectedJudge
+                tempSelectedJudge && !isNameClaimedByOther(tempSelectedJudge)
                   ? "bg-violet-600 hover:bg-violet-500 text-white shadow-lg shadow-violet-500/20 cursor-pointer"
                   : "bg-slate-800 text-slate-500 cursor-not-allowed border border-slate-700/50"
               }`}
@@ -1001,8 +1021,11 @@ export default function JudgePortal({
                 <span className={`text-[10px] font-bold font-mono block uppercase tracking-wider ${isQuotaReady && isQuotaSatisfied ? "text-green-500" : "text-red-500"}`}>
                   Callback Quota
                 </span>
-                <span className={`text-xs font-bold font-mono ${isQuotaReady && isQuotaSatisfied ? "text-green-500" : "text-red-500"}`}>
-                  Callbacks: {currentYesCount}/{targetCallbackCount} • Alts: {currentAltCount}/{targetAlternateCount}
+                <span className={`text-xs font-bold font-mono block ${isQuotaReady && isQuotaSatisfied ? "text-green-500" : "text-red-500"}`}>
+                  Callbacks: {currentYesCount}/{targetCallbackCount}
+                </span>
+                <span className={`text-xs font-bold font-mono block ${isQuotaReady && isQuotaSatisfied ? "text-green-500" : "text-red-500"}`}>
+                  Alts: {currentAltCount}/{targetAlternateCount}
                 </span>
                 {targetAlternateCount > 1 && !areAltsSatisfied && (
                   <span className="block text-[9px] text-rose-500 font-mono mt-0.5 font-bold animate-pulse">
