@@ -56,6 +56,8 @@ interface AppSettings {
   heatType?: "Prelim" | "Semi-Final" | "Quarter Final" | "Finals";
   queuedHeatId?: string | null;
   checkInFinalized?: boolean;
+  contestConfigLocked?: boolean;
+  nextContestConfigLocked?: boolean;
   publishedHeatIds?: string[];
   judgeNames?: string[];
   judgeRoles?: ("Leaders" | "Followers" | "Finals" | "None")[];
@@ -202,7 +204,9 @@ const DEFAULT_STATE: AppState = {
     lockedDivisions: [],
     queuedCheckInFinalized: false,
     completedResults: [],
-    claimedJudges: []
+    claimedJudges: [],
+    contestConfigLocked: false,
+    nextContestConfigLocked: false
   }
 };
 
@@ -652,7 +656,9 @@ async function startServer() {
         finalizedSheets: [],
         lockedDivisions: [],
         completedResults: [],
-        claimedJudges: []
+        claimedJudges: [],
+        contestConfigLocked: false,
+        nextContestConfigLocked: false
       }
     };
     writeState(clearedState);
@@ -691,7 +697,9 @@ async function startServer() {
         lockedDivisions: [],
         queuedCheckInFinalized: false,
         completedResults: [],
-        claimedJudges: []
+        claimedJudges: [],
+        contestConfigLocked: false,
+        nextContestConfigLocked: false
       }
     };
     writeState(EMPTY_STATE);

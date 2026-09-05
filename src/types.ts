@@ -57,6 +57,11 @@ export interface AppSettings {
   queuedHeatId?: string | null;
   checkInFinalized?: boolean;
   queuedCheckInFinalized?: boolean;
+  // Once true, the Contest Configuration card's contest type/division/phase
+  // fields for that slot (live vs queued) become read-only until the
+  // matching Reset button clears the slot back to defaults.
+  contestConfigLocked?: boolean;
+  nextContestConfigLocked?: boolean;
   publishedHeatIds?: string[];
   judgeNames?: string[];
   judgeRoles?: ("Leaders" | "Followers" | "Finals" | "None")[];

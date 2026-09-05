@@ -584,6 +584,10 @@ export default function AdminPanel({
 
   const isNextTab = activeHeatControlTab === "next";
   const currentJudgingStyle = isNextTab ? (settings.nextJudgingStyle || "raw") : settings.judgingStyle;
+  // Once the respective Contest Configuration button has been pressed for this
+  // slot (live vs queued), its type/division/phase fields are locked until the
+  // matching Reset button clears that slot.
+  const isContestConfigLocked = isNextTab ? !!settings.nextContestConfigLocked : !!settings.contestConfigLocked;
 
   const isAllJudgesComplete = !!(
     activeHeat && 
@@ -719,8 +723,9 @@ export default function AdminPanel({
         await onUpdateSettings({
           nextContestType: contestType,
           nextDivision: division,
-          nextHeatType: heatType
-        });
+          nextHeatType: heatType,
+          nextContestConfigLocked: true
+        } as any);
       } else {
         // If there is an active Live Heat and floor coordinator check-in has not been finalized, adjust the current heat
         if (settings.currentHeatId && !settings.checkInFinalized) {
@@ -761,7 +766,8 @@ export default function AdminPanel({
         await onUpdateSettings({
           contestType,
           division,
-          heatType
+          heatType,
+          contestConfigLocked: true
         });
       }
       // Collapse Contest Config & Expand Create Heat Sheet
@@ -811,6 +817,8 @@ export default function AdminPanel({
         contestType: contestType
       }, "next");
 
+      await onUpdateSettings({ nextContestConfigLocked: true } as any);
+
       setActiveHeatControlTab("next");
     } catch (err) {
       console.error("Failed to automatically pre-create next heat:", err);
@@ -822,7 +830,83 @@ export default function AdminPanel({
       contestConfig: true,
     }));
   };
-  
+
+  // Wipes the Live Contest's slot back to a blank state: deletes its current
+  // heat (cascading its scores), clears check-in/finalization flags, resets
+  // the Contest Configuration fields to their defaults, and unlocks them so
+  // the card can be reconfigured from scratch.
+  const handleResetLiveContest = async () => {
+    if (!window.confirm("Reset the Live Contest? This deletes its current heat and any scores recorded against it, clears its type/division/phase configuration, and unlocks the Contest Configuration card.")) {
+      return;
+    }
+    setLoading(true);
+    try {
+      const heatIdToClear = settings.currentHeatId;
+      if (heatIdToClear) {
+        await onDeleteHeat(heatIdToClear);
+      }
+      const payload: any = {
+        currentHeatId: null,
+        checkInFinalized: false,
+        contestType: "Jack & Jill",
+        division: "Novice",
+        heatType: "Prelim",
+        judgingStyle: "raw",
+        contestConfigLocked: false
+      };
+      if (heatIdToClear) {
+        payload.finalizedSheets = (settings.finalizedSheets || []).filter((entry) => !entry.startsWith(`${heatIdToClear}:`));
+      }
+      await onUpdateSettings(payload);
+      if (!isNextTab) {
+        setContestType("Jack & Jill");
+        setDivision("Novice");
+        setHeatType("Prelim");
+      }
+    } catch (err) {
+      alert("Failed to reset the Live Contest.");
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  // Wipes the Queued (Next) Contest's slot back to a blank state, mirroring
+  // handleResetLiveContest for the staged "next" fields.
+  const handleResetNextContest = async () => {
+    if (!window.confirm("Reset the Queued Contest? This deletes its queued heat and any scores recorded against it, clears its staged type/division/phase configuration, and unlocks it for reconfiguration.")) {
+      return;
+    }
+    setLoading(true);
+    try {
+      const heatIdToClear = settings.queuedHeatId;
+      if (heatIdToClear) {
+        await onDeleteHeat(heatIdToClear);
+      }
+      const payload: any = {
+        queuedHeatId: null,
+        queuedCheckInFinalized: false,
+        nextContestType: null,
+        nextDivision: null,
+        nextHeatType: null,
+        nextJudgingStyle: null,
+        nextContestConfigLocked: false
+      };
+      if (heatIdToClear) {
+        payload.finalizedSheets = (settings.finalizedSheets || []).filter((entry) => !entry.startsWith(`${heatIdToClear}:`));
+      }
+      await onUpdateSettings(payload);
+      if (isNextTab) {
+        setContestType("Jack & Jill");
+        setDivision("Novice");
+        setHeatType("Prelim");
+      }
+    } catch (err) {
+      alert("Failed to reset the Queued Contest.");
+    } finally {
+      setLoading(false);
+    }
+  };
+
   const [loading, setLoading] = useState(false);
   const [formError, setFormError] = useState("");
   const [formSuccess, setFormSuccess] = useState("");
@@ -1153,8 +1237,11 @@ export default function AdminPanel({
                   <select
                     id="contest-type-setup"
                     value={contestType}
+                    disabled={isContestConfigLocked}
                     onChange={(e) => handleContestTypeChange(e.target.value as any)}
                     className={`w-full px-3 py-2 text-xs rounded-xl border focus:outline-none focus:ring-1 focus:ring-violet-500 font-medium ${
+                      isContestConfigLocked ? "opacity-50 cursor-not-allowed" : ""
+                    } ${
                       isDarkMode ? "bg-slate-800 border-slate-700 text-slate-100" : "bg-slate-50 border-slate-200 text-slate-800"
                     }`}
                   >
@@ -1170,8 +1257,11 @@ export default function AdminPanel({
                   <select
                     id="division-setup"
                     value={division}
+                    disabled={isContestConfigLocked}
                     onChange={(e) => setDivision(e.target.value)}
                     className={`w-full px-3 py-2 text-xs rounded-xl border focus:outline-none focus:ring-1 focus:ring-violet-500 font-medium ${
+                      isContestConfigLocked ? "opacity-50 cursor-not-allowed" : ""
+                    } ${
                       isDarkMode ? "bg-slate-800 border-slate-700 text-slate-100" : "bg-slate-50 border-slate-200 text-slate-800"
                     }`}
                   >
@@ -1187,7 +1277,7 @@ export default function AdminPanel({
                   <select
                     id="heat-type-setup"
                     value={heatType}
-                    disabled={contestType === "Routine"}
+                    disabled={contestType === "Routine" || isContestConfigLocked}
                     onChange={(e) => {
                       const newHeatType = e.target.value as any;
                       setHeatType(newHeatType);
@@ -1210,7 +1300,7 @@ export default function AdminPanel({
                       }
                     }}
                     className={`w-full px-3 py-2 text-xs rounded-xl border focus:outline-none focus:ring-1 focus:ring-violet-500 font-medium ${
-                      contestType === "Routine" ? "opacity-50 cursor-not-allowed" : ""
+                      contestType === "Routine" || isContestConfigLocked ? "opacity-50 cursor-not-allowed" : ""
                     } ${
                       isDarkMode ? "bg-slate-800 border-slate-700 text-slate-100" : "bg-slate-50 border-slate-200 text-slate-800"
                     }`}
@@ -1223,37 +1313,79 @@ export default function AdminPanel({
                   {contestType === "Routine" && (
                     <p className="text-[10px] text-slate-400 mt-1 italic">Routines are always judged as Finals.</p>
                   )}
+                  {isContestConfigLocked && (
+                    <p className="text-[10px] text-violet-400 mt-1.5 flex items-center gap-1 font-semibold">
+                      <Lock className="w-3 h-3" />
+                      Locked — use the reset button to make changes.
+                    </p>
+                  )}
                 </div>
 
-                <div className="grid grid-cols-1 gap-2 pt-1.5">
-                  <button
-                    id="save-contest-params-btn"
-                    onClick={handleApplyContestParameters}
-                    disabled={loading || (activeHeatControlTab === "next" && !settings.currentHeatId)}
-                    className={`w-full py-2 text-white text-xs font-bold rounded-xl shadow-sm flex items-center justify-center gap-1.5 transition-all ${
-                      loading || (activeHeatControlTab === "next" && !settings.currentHeatId)
-                        ? "bg-slate-300 dark:bg-slate-800 text-slate-500 cursor-not-allowed opacity-50"
-                        : "bg-violet-600 hover:bg-violet-700 cursor-pointer"
-                    }`}
-                  >
-                    <Settings className="w-3.5 h-3.5" />
-                    {activeHeatControlTab === "next" ? "Prepare Heat" : "Configure Now"}
-                  </button>
-                  {activeHeatControlTab !== "next" && (
+                <div className="space-y-2 pt-1.5">
+                  <div className="flex items-center gap-2">
                     <button
-                      id="autofill-heat-builder-btn"
-                      onClick={handleAutoFillHeatForm}
-                      disabled={!!settings.queuedHeatId || !settings.currentHeatId}
-                      title={!settings.currentHeatId ? "A Live Contest must be configured first" : (settings.queuedHeatId ? "A Next Contest is already queued" : undefined)}
-                      className={`w-full py-2 text-xs font-semibold rounded-xl border flex items-center justify-center gap-1.5 transition-all ${
-                        (settings.queuedHeatId || !settings.currentHeatId)
-                          ? "bg-slate-100 dark:bg-slate-800 text-slate-400 dark:text-slate-600 border-slate-200 dark:border-slate-800 cursor-not-allowed opacity-50"
-                          : "bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 dark:hover:bg-slate-750 text-slate-700 dark:text-slate-300 border-slate-200 dark:border-slate-700 cursor-pointer"
+                      id="save-contest-params-btn"
+                      onClick={handleApplyContestParameters}
+                      disabled={loading || (activeHeatControlTab === "next" && !settings.currentHeatId) || isContestConfigLocked}
+                      className={`flex-1 py-2 text-white text-xs font-bold rounded-xl shadow-sm flex items-center justify-center gap-1.5 transition-all ${
+                        loading || (activeHeatControlTab === "next" && !settings.currentHeatId) || isContestConfigLocked
+                          ? "bg-slate-300 dark:bg-slate-800 text-slate-500 cursor-not-allowed opacity-50"
+                          : "bg-violet-600 hover:bg-violet-700 cursor-pointer"
                       }`}
                     >
-                      <PlusCircle className="w-3.5 h-3.5 text-violet-500" />
-                      Prepare Next
+                      <Settings className="w-3.5 h-3.5" />
+                      {activeHeatControlTab === "next" ? "Prepare Heat" : "Configure Now"}
                     </button>
+                    <button
+                      type="button"
+                      id="reset-contest-config-btn"
+                      onClick={() => (isNextTab ? handleResetNextContest() : handleResetLiveContest())}
+                      disabled={loading}
+                      title={isNextTab ? "Reset the Queued Contest" : "Reset the Live Contest"}
+                      className={`flex-shrink-0 p-2.5 rounded-xl border transition-all ${
+                        loading ? "opacity-50 cursor-not-allowed" : "cursor-pointer"
+                      } ${
+                        isDarkMode
+                          ? "bg-slate-800 hover:bg-rose-500/10 border-slate-700 text-slate-400 hover:text-rose-400"
+                          : "bg-slate-100 hover:bg-rose-500/10 border-slate-200 text-slate-500 hover:text-rose-500"
+                      }`}
+                    >
+                      <Trash2 className="w-3.5 h-3.5" />
+                    </button>
+                  </div>
+                  {activeHeatControlTab !== "next" && (
+                    <div className="flex items-center gap-2">
+                      <button
+                        id="autofill-heat-builder-btn"
+                        onClick={handleAutoFillHeatForm}
+                        disabled={!!settings.queuedHeatId || !settings.currentHeatId || !!settings.nextContestConfigLocked}
+                        title={!settings.currentHeatId ? "A Live Contest must be configured first" : (settings.queuedHeatId ? "A Next Contest is already queued" : undefined)}
+                        className={`flex-1 py-2 text-xs font-semibold rounded-xl border flex items-center justify-center gap-1.5 transition-all ${
+                          (settings.queuedHeatId || !settings.currentHeatId || settings.nextContestConfigLocked)
+                            ? "bg-slate-100 dark:bg-slate-800 text-slate-400 dark:text-slate-600 border-slate-200 dark:border-slate-800 cursor-not-allowed opacity-50"
+                            : "bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 dark:hover:bg-slate-750 text-slate-700 dark:text-slate-300 border-slate-200 dark:border-slate-700 cursor-pointer"
+                        }`}
+                      >
+                        <PlusCircle className="w-3.5 h-3.5 text-violet-500" />
+                        Prepare Next
+                      </button>
+                      <button
+                        type="button"
+                        id="reset-next-contest-config-btn"
+                        onClick={handleResetNextContest}
+                        disabled={loading}
+                        title="Reset the Queued Contest"
+                        className={`flex-shrink-0 p-2.5 rounded-xl border transition-all ${
+                          loading ? "opacity-50 cursor-not-allowed" : "cursor-pointer"
+                        } ${
+                          isDarkMode
+                            ? "bg-slate-800 hover:bg-rose-500/10 border-slate-700 text-slate-400 hover:text-rose-400"
+                            : "bg-slate-100 hover:bg-rose-500/10 border-slate-200 text-slate-500 hover:text-rose-500"
+                        }`}
+                      >
+                        <Trash2 className="w-3.5 h-3.5" />
+                      </button>
+                    </div>
                   )}
                 </div>
               </div>
