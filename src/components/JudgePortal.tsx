@@ -1083,21 +1083,16 @@ export default function JudgePortal({
           const callbackVal = localCallbacks[c.bib] || "No";
           const status = savedStatus[c.bib] || "idle";
 
-          const originalIndex = activeHeat ? activeHeat.competitorBibs.indexOf(c.bib) : -1;
-          const isSplitActive = originalIndex !== -1 && (activeHeat?.splits || []).includes(originalIndex);
+          const roleBibs = activeHeat ? activeHeat.competitorBibs.filter(bib => {
+            const comp = competitors.find(cc => cc.bib === bib);
+            return (comp?.role || "Lead") === (c.role || "Lead");
+          }) : [];
+          const roleSpecificIndex = roleBibs.indexOf(c.bib);
+          const isSplitActive = roleSpecificIndex !== -1 && (activeHeat?.splits || []).includes(roleSpecificIndex);
           let nextHeatNum = 1;
           if (isSplitActive && activeHeat) {
-            const sameRoleBibs = activeHeat.competitorBibs.filter(bib => {
-              const comp = competitors.find(comp => comp.bib === bib);
-              return (comp?.role || "Lead") === (c.role || "Lead");
-            });
-            const splitsForSameRole = (activeHeat.splits || []).filter(s => {
-              const splitBib = activeHeat.competitorBibs[s];
-              const splitComp = competitors.find(comp => comp.bib === splitBib);
-              return (splitComp?.role || "Lead") === (c.role || "Lead");
-            });
-            const sameRoleSplitsBefore = splitsForSameRole.filter(s => s <= originalIndex).length;
-            nextHeatNum = sameRoleSplitsBefore + 1;
+            const splitsBefore = (activeHeat.splits || []).filter(s => s <= roleSpecificIndex).length;
+            nextHeatNum = splitsBefore + 1;
           }
 
           if (judgingStyle === "raw") {
