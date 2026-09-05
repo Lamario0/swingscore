@@ -320,13 +320,13 @@ export default function AdminPanel({
           
           // Calculate sub-heat
           let subHeat = 1;
-          if (split1 !== undefined && idx > split1) {
-            if (split2 !== undefined && idx > split2) {
+          if (split1 !== undefined && idx >= split1) {
+            if (split2 !== undefined && idx >= split2) {
               subHeat = 3;
             } else {
               subHeat = 2;
             }
-          } else if (split1 === undefined && split2 !== undefined && idx > split2) {
+          } else if (split1 === undefined && split2 !== undefined && idx >= split2) {
             subHeat = 2;
           }
 
@@ -352,13 +352,13 @@ export default function AdminPanel({
   const leadRows = activeHeat
     ? orderedHeatRows
         .filter(row => row.role === "Lead")
-        .map((row, idx) => ({ ...row, index: idx }))
+        .map((row, idx) => ({ ...row, globalIndex: row.index, index: idx }))
     : [];
 
   const followRows = activeHeat
     ? orderedHeatRows
         .filter(row => row.role === "Follow")
-        .map((row, idx) => ({ ...row, index: idx }))
+        .map((row, idx) => ({ ...row, globalIndex: row.index, index: idx }))
     : [];
 
   const handleMoveToHeat = async (idx: number, targetHeat: 1 | 2 | 3) => {
@@ -395,10 +395,10 @@ export default function AdminPanel({
     // Recalculate split indices
     const newSplits: number[] = [];
     if (heat1.length > 0 && (heat2.length > 0 || heat3.length > 0)) {
-      newSplits.push(heat1.length - 1);
+      newSplits.push(heat1.length);
     }
     if (heat2.length > 0 && heat3.length > 0) {
-      newSplits.push(heat1.length + heat2.length - 1);
+      newSplits.push(heat1.length + heat2.length);
     }
 
     await onUpdateHeat(activeHeat.id, {
@@ -2683,7 +2683,8 @@ export default function AdminPanel({
                               <tbody className="divide-y divide-slate-100 dark:divide-slate-800">
                                 {leadRows.map((row, idx) => {
                                   const leadComp = competitors.find(c => c.bib === row.bibLabel);
-                                  const isSplitActive = currentSplits.includes(row.index);
+                                  const nextGlobalIndex = leadRows[idx + 1] ? leadRows[idx + 1].globalIndex : -1;
+                                  const isSplitActive = nextGlobalIndex !== -1 && currentSplits.includes(nextGlobalIndex);
 
                                   return (
                                     <React.Fragment key={`lead-${row.id}`}>
@@ -2803,8 +2804,8 @@ export default function AdminPanel({
                                               alert("Maximum of 2 splits (creating up to 3 heats) is allowed.");
                                               return;
                                             }
-                                            if (!existingSplits.includes(row.index)) {
-                                              const updatedSplits = [...existingSplits, row.index].sort((a,b) => a - b);
+                                            if (nextGlobalIndex !== -1 && !existingSplits.includes(nextGlobalIndex)) {
+                                              const updatedSplits = [...existingSplits, nextGlobalIndex].sort((a,b) => a - b);
                                               await onUpdateHeat(activeHeat.id, { splits: updatedSplits, isCustom: true });
                                             }
                                           }}
@@ -2816,7 +2817,12 @@ export default function AdminPanel({
                                         >
                                           <td colSpan={5} className="p-1 text-center relative font-mono text-xs">
                                             {isSplitActive ? (() => {
-                                              const nextHeatNum = currentSplits.filter(s => s <= row.index).length + 1;
+                                              const roleSplits = currentSplits.filter(s => {
+                                                const splitBib = activeHeat.competitorBibs[s];
+                                                const splitComp = competitors.find(cc => cc.bib === splitBib);
+                                                return (splitComp?.role || "Lead") === "Lead";
+                                              });
+                                              const nextHeatNum = roleSplits.filter(s => s <= nextGlobalIndex).length + 1;
                                               return (
                                                 <div className="py-2 flex flex-col items-center justify-center gap-0.5 bg-violet-600/5 dark:bg-violet-600/[0.03] border-t border-b border-violet-500/20 relative rounded-lg">
                                                   <span className="px-2 py-0.5 bg-violet-600 text-white font-mono font-bold text-[9px] uppercase tracking-wider rounded-md shadow-sm">
@@ -2825,7 +2831,7 @@ export default function AdminPanel({
                                                   <button
                                                     type="button"
                                                     onClick={async () => {
-                                                      const updatedSplits = (activeHeat.splits || []).filter(s => s !== row.index);
+                                                      const updatedSplits = (activeHeat.splits || []).filter(s => s !== nextGlobalIndex);
                                                       await onUpdateHeat(activeHeat.id, { splits: updatedSplits, isCustom: true });
                                                     }}
                                                     className="absolute right-3 top-1/2 -translate-y-1/2 p-1 bg-rose-600 hover:bg-rose-700 text-white rounded-lg cursor-pointer transition-all shadow-sm"
@@ -2934,7 +2940,8 @@ export default function AdminPanel({
                               <tbody className="divide-y divide-slate-100 dark:divide-slate-800">
                                 {followRows.map((row, idx) => {
                                   const followComp = competitors.find(c => c.bib === row.bibLabel);
-                                  const isSplitActive = currentSplits.includes(row.index);
+                                  const nextGlobalIndex = followRows[idx + 1] ? followRows[idx + 1].globalIndex : -1;
+                                  const isSplitActive = nextGlobalIndex !== -1 && currentSplits.includes(nextGlobalIndex);
 
                                   return (
                                     <React.Fragment key={`follow-${row.id}`}>
@@ -3054,8 +3061,8 @@ export default function AdminPanel({
                                               alert("Maximum of 2 splits (creating up to 3 heats) is allowed.");
                                               return;
                                             }
-                                            if (!existingSplits.includes(row.index)) {
-                                              const updatedSplits = [...existingSplits, row.index].sort((a,b) => a - b);
+                                            if (nextGlobalIndex !== -1 && !existingSplits.includes(nextGlobalIndex)) {
+                                              const updatedSplits = [...existingSplits, nextGlobalIndex].sort((a,b) => a - b);
                                               await onUpdateHeat(activeHeat.id, { splits: updatedSplits, isCustom: true });
                                             }
                                           }}
@@ -3067,7 +3074,12 @@ export default function AdminPanel({
                                         >
                                           <td colSpan={5} className="p-1 text-center relative font-mono text-xs">
                                             {isSplitActive ? (() => {
-                                              const nextHeatNum = currentSplits.filter(s => s <= row.index).length + 1;
+                                              const roleSplits = currentSplits.filter(s => {
+                                                const splitBib = activeHeat.competitorBibs[s];
+                                                const splitComp = competitors.find(cc => cc.bib === splitBib);
+                                                return (splitComp?.role || "Lead") === "Follow";
+                                              });
+                                              const nextHeatNum = roleSplits.filter(s => s <= nextGlobalIndex).length + 1;
                                               return (
                                                 <div className="py-2 flex flex-col items-center justify-center gap-0.5 bg-violet-600/5 dark:bg-violet-600/[0.03] border-t border-b border-violet-500/20 relative rounded-lg">
                                                   <span className="px-2 py-0.5 bg-violet-600 text-white font-mono font-bold text-[9px] uppercase tracking-wider rounded-md shadow-sm">
@@ -3076,7 +3088,7 @@ export default function AdminPanel({
                                                   <button
                                                     type="button"
                                                     onClick={async () => {
-                                                      const updatedSplits = (activeHeat.splits || []).filter(s => s !== row.index);
+                                                      const updatedSplits = (activeHeat.splits || []).filter(s => s !== nextGlobalIndex);
                                                       await onUpdateHeat(activeHeat.id, { splits: updatedSplits, isCustom: true });
                                                     }}
                                                     className="absolute right-3 top-1/2 -translate-y-1/2 p-1 bg-rose-600 hover:bg-rose-700 text-white rounded-lg cursor-pointer transition-all shadow-sm"
@@ -3138,7 +3150,8 @@ export default function AdminPanel({
                         </thead>
                         <tbody className="divide-y divide-slate-200 dark:divide-slate-800 text-xs">
                         {orderedHeatRows.map((row, idx) => {
-                          const isSplitActive = currentSplits.includes(row.index);
+                          const nextGlobalIndex = orderedHeatRows[idx + 1] ? orderedHeatRows[idx + 1].index : -1;
+                          const isSplitActive = nextGlobalIndex !== -1 && currentSplits.includes(nextGlobalIndex);
                           const individualComp = activeHeat.role !== "Mixed"
                             ? competitors.find(c => c.bib === row.id)
                             : null;
@@ -3256,8 +3269,8 @@ export default function AdminPanel({
                                       alert("Maximum of 2 splits (creating up to 3 heats) is allowed.");
                                       return;
                                     }
-                                    if (!existingSplits.includes(row.index)) {
-                                      const updatedSplits = [...existingSplits, row.index].sort((a,b) => a - b);
+                                    if (nextGlobalIndex !== -1 && !existingSplits.includes(nextGlobalIndex)) {
+                                      const updatedSplits = [...existingSplits, nextGlobalIndex].sort((a,b) => a - b);
                                       await onUpdateHeat(activeHeat.id, { splits: updatedSplits, isCustom: true });
                                     }
                                   }}
@@ -3269,7 +3282,7 @@ export default function AdminPanel({
                                 >
                                   <td colSpan={6} className="p-1 text-center relative font-mono text-xs">
                                     {isSplitActive ? (() => {
-                                      const nextHeatNum = currentSplits.filter(s => s <= row.index).length + 1;
+                                      const nextHeatNum = currentSplits.filter(s => s <= nextGlobalIndex).length + 1;
                                       return (
                                         <div className="py-4 flex flex-col items-center justify-center gap-1 bg-violet-600/5 dark:bg-violet-600/[0.03] border-t border-b border-violet-500/20 relative rounded-xl">
                                           <div className="h-3 w-px bg-violet-500/30 mb-0.5" />
@@ -3281,7 +3294,7 @@ export default function AdminPanel({
                                           <button
                                             type="button"
                                             onClick={async () => {
-                                              const updatedSplits = (activeHeat.splits || []).filter(s => s !== row.index);
+                                              const updatedSplits = (activeHeat.splits || []).filter(s => s !== nextGlobalIndex);
                                               await onUpdateHeat(activeHeat.id, { splits: updatedSplits, isCustom: true });
                                             }}
                                             className="absolute right-6 top-1/2 -translate-y-1/2 p-2 bg-rose-600 hover:bg-rose-700 text-white rounded-xl cursor-pointer transition-all shadow-sm"
@@ -3634,7 +3647,8 @@ export default function AdminPanel({
                     </thead>
                     <tbody className="divide-y divide-slate-200 dark:divide-slate-800 text-xs">
                     {orderedHeatRows.map((row, idx) => {
-                      const isSplitActive = currentSplits.includes(row.index);
+                      const nextGlobalIndex = orderedHeatRows[idx + 1] ? orderedHeatRows[idx + 1].index : -1;
+                      const isSplitActive = nextGlobalIndex !== -1 && currentSplits.includes(nextGlobalIndex);
                       const individualComp = activeHeat.role !== "Mixed"
                         ? competitors.find(c => c.bib === row.id)
                         : null;
@@ -3759,8 +3773,8 @@ export default function AdminPanel({
                                   alert("Maximum of 2 splits (creating up to 3 heats) is allowed.");
                                   return;
                                 }
-                                if (!existingSplits.includes(row.index)) {
-                                  const updatedSplits = [...existingSplits, row.index].sort((a,b) => a - b);
+                                if (nextGlobalIndex !== -1 && !existingSplits.includes(nextGlobalIndex)) {
+                                  const updatedSplits = [...existingSplits, nextGlobalIndex].sort((a,b) => a - b);
                                   await onUpdateHeat(activeHeat.id, { splits: updatedSplits, isCustom: true });
                                 }
                               }}
@@ -3772,7 +3786,7 @@ export default function AdminPanel({
                             >
                               <td colSpan={5} className="p-1 text-center relative font-mono text-xs">
                                 {isSplitActive ? (() => {
-                                  const nextHeatNum = currentSplits.filter(s => s <= row.index).length + 1;
+                                  const nextHeatNum = currentSplits.filter(s => s <= nextGlobalIndex).length + 1;
                                   return (
                                     <div className="py-4 flex flex-col items-center justify-center gap-1 bg-violet-600/5 dark:bg-violet-600/[0.03] border-t border-b border-violet-500/20 relative rounded-xl">
                                       <div className="h-3 w-px bg-violet-500/30 mb-0.5" />
@@ -3784,7 +3798,7 @@ export default function AdminPanel({
                                       <button
                                         type="button"
                                         onClick={async () => {
-                                          const updatedSplits = (activeHeat.splits || []).filter(s => s !== row.index);
+                                          const updatedSplits = (activeHeat.splits || []).filter(s => s !== nextGlobalIndex);
                                           await onUpdateHeat(activeHeat.id, { splits: updatedSplits, isCustom: true });
                                         }}
                                         className="absolute right-6 top-1/2 -translate-y-1/2 p-2 bg-rose-600 hover:bg-rose-700 text-white rounded-xl cursor-pointer transition-all shadow-sm"

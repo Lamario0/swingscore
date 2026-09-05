@@ -601,14 +601,18 @@ export default function CoordinatorCheckIn({
                       <tbody className="divide-y divide-slate-200 dark:divide-slate-800 text-xs">
                         {filteredLeads.length > 0 ? (
                           filteredLeads.map((c) => {
-                            const heatLeads = activeHeatCompetitors.filter(hl => hl.role === "Lead");
-                            const roleSpecificIndex = heatLeads.findIndex(hl => hl.bib === c.bib);
-                            const isSplitActive = roleSpecificIndex !== -1 && (activeHeat?.splits || []).includes(roleSpecificIndex);
+                            const originalIndex = activeHeat ? activeHeat.competitorBibs.indexOf(c.bib) : -1;
+                            const isSplitActive = originalIndex !== -1 && (activeHeat?.splits || []).includes(originalIndex);
                             
                             let nextHeatNum = 1;
                             if (isSplitActive && activeHeat) {
-                              const splitsBefore = (activeHeat.splits || []).filter(s => s <= roleSpecificIndex).length;
-                              nextHeatNum = splitsBefore + 1;
+                              const splitsForSameRole = (activeHeat.splits || []).filter(s => {
+                                const splitBib = activeHeat.competitorBibs[s];
+                                const splitComp = competitors.find(comp => comp.bib === splitBib);
+                                return (splitComp?.role || "Lead") === "Lead";
+                              });
+                              const sameRoleSplitsBefore = splitsForSameRole.filter(s => s <= originalIndex).length;
+                              nextHeatNum = sameRoleSplitsBefore + 1;
                             }
 
                             return (
@@ -710,14 +714,18 @@ export default function CoordinatorCheckIn({
                       <tbody className="divide-y divide-slate-200 dark:divide-slate-800 text-xs">
                         {filteredFollows.length > 0 ? (
                           filteredFollows.map((c) => {
-                            const heatFollows = activeHeatCompetitors.filter(hf => hf.role === "Follow");
-                            const roleSpecificIndex = heatFollows.findIndex(hf => hf.bib === c.bib);
-                            const isSplitActive = roleSpecificIndex !== -1 && (activeHeat?.splits || []).includes(roleSpecificIndex);
+                            const originalIndex = activeHeat ? activeHeat.competitorBibs.indexOf(c.bib) : -1;
+                            const isSplitActive = originalIndex !== -1 && (activeHeat?.splits || []).includes(originalIndex);
                             
                             let nextHeatNum = 1;
                             if (isSplitActive && activeHeat) {
-                              const splitsBefore = (activeHeat.splits || []).filter(s => s <= roleSpecificIndex).length;
-                              nextHeatNum = splitsBefore + 1;
+                              const splitsForSameRole = (activeHeat.splits || []).filter(s => {
+                                const splitBib = activeHeat.competitorBibs[s];
+                                const splitComp = competitors.find(comp => comp.bib === splitBib);
+                                return (splitComp?.role || "Lead") === "Follow";
+                              });
+                              const sameRoleSplitsBefore = splitsForSameRole.filter(s => s <= originalIndex).length;
+                              nextHeatNum = sameRoleSplitsBefore + 1;
                             }
 
                             return (
