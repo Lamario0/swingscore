@@ -14,6 +14,7 @@ interface ScoringDashboardProps {
 }
 
 type SortMode = "bib" | "score";
+type SideFilter = "all" | "leaders" | "followers";
 
 interface MatrixRow {
   bib: string;
@@ -22,12 +23,14 @@ interface MatrixRow {
   cells: Record<string, string>;
   relativeResult: string;
   isAllNo: boolean;
+  role: "Lead" | "Follow";
 }
 
 interface Matrix {
   judgeNames: string[];
   rows: MatrixRow[];
   resultColumnLabel: string;
+  hasDistinctRoles: boolean;
 }
 
 function buildMatrix(
@@ -36,7 +39,8 @@ function buildMatrix(
   competitors: Competitor[],
   scores: ScoreRecord[],
   sortMode: SortMode,
-  hideAllNo: boolean
+  hideAllNo: boolean,
+  sideFilter: SideFilter
 ): Matrix | null {
   const heat = heats.find((h) => h.id === contest.heatId);
   if (!heat) return null;
@@ -61,12 +65,37 @@ function buildMatrix(
     results = results.filter((r) => r.yesCount > 0 || (r.altCount || 0) > 0);
   }
 
-  const sorted = [...results].sort((a, b) => {
+  // Mixed, non-Finals heats are judged (and internally computed) as separate
+  // Leader and Follower fields -- calculateHeatResults itself recurses into
+  // that exact split, so r.competitor.role here is a real Lead/Follow role,
+  // not the "Lead" placeholder used for couple units on Finals/Routine heats.
+  // That lets this matrix group/filter by side using the real role, and skip
+  // grouping entirely for heats judged as couples.
+  const hasDistinctRoles = heat.role === "Mixed" && heat.heatType !== "Finals";
+
+  if (hasDistinctRoles && sideFilter !== "all") {
+    results = results.filter((r) =>
+      sideFilter === "leaders" ? r.competitor.role === "Lead" : r.competitor.role === "Follow"
+    );
+  }
+
+  const sortFn = (a: (typeof results)[number], b: (typeof results)[number]) => {
     if (sortMode === "bib") {
       return a.competitor.bib.localeCompare(b.competitor.bib, undefined, { numeric: true });
     }
     return a.rank - b.rank;
-  });
+  };
+
+  // Leaders first, then Followers -- each side sorted independently, so the
+  // grouping survives regardless of sort mode. Heats without distinct sides
+  // (single-role heats, and Finals/Routine couples heats) keep the previous
+  // single flat sort.
+  const sorted = hasDistinctRoles
+    ? [
+        ...results.filter((r) => r.competitor.role === "Lead").sort(sortFn),
+        ...results.filter((r) => r.competitor.role === "Follow").sort(sortFn)
+      ]
+    : [...results].sort(sortFn);
 
   const rows: MatrixRow[] = sorted.map((r) => {
     const cells: Record<string, string> = {};
@@ -104,14 +133,15 @@ function buildMatrix(
       rank: r.rank,
       cells,
       relativeResult,
-      isAllNo: contest.judgingStyle === "callback" && r.yesCount === 0 && (r.altCount || 0) === 0
+      isAllNo: contest.judgingStyle === "callback" && r.yesCount === 0 && (r.altCount || 0) === 0,
+      role: r.competitor.role === "Follow" ? ("Follow" as const) : ("Lead" as const)
     };
   });
 
   const resultColumnLabel =
     contest.judgingStyle === "placement" ? "Placements" : contest.judgingStyle === "callback" ? "Callback Tally" : "Raw Avg";
 
-  return { judgeNames, rows, resultColumnLabel };
+  return { judgeNames, rows, resultColumnLabel, hasDistinctRoles };
 }
 
 export default function ScoringDashboard({ settings, competitors, heats, scores, isDarkMode, onRefresh, onUpdateSettings }: ScoringDashboardProps) {
@@ -119,6 +149,7 @@ export default function ScoringDashboard({ settings, competitors, heats, scores,
   const [divisionFilter, setDivisionFilter] = useState<string>("All");
   const [sortMode, setSortMode] = useState<SortMode>("score");
   const [hideAllNo, setHideAllNo] = useState(false);
+  const [sideFilter, setSideFilter] = useState<SideFilter>("all");
   const [publishBusyId, setPublishBusyId] = useState<string | null>(null);
 
   const completed = settings.completedResults || [];
@@ -294,6 +325,34 @@ export default function ScoringDashboard({ settings, competitors, heats, scores,
           <EyeOff className="w-3 h-3" />
           Hide All-No Competitors
         </label>
+
+        <div className="flex items-center gap-2 flex-wrap">
+          <span className="flex items-center gap-1 text-[10px] font-mono uppercase tracking-wider text-slate-400">
+            <Filter className="w-3 h-3" /> Side
+          </span>
+          {(
+            [
+              { key: "all", label: "All" },
+              { key: "leaders", label: "Leaders Only" },
+              { key: "followers", label: "Followers Only" }
+            ] as { key: SideFilter; label: string }[]
+          ).map((opt) => (
+            <button
+              key={opt.key}
+              id={`scoring-side-${opt.key}-btn`}
+              onClick={() => setSideFilter(opt.key)}
+              className={`px-2.5 py-1 rounded-lg text-[11px] font-semibold border transition-all ${
+                sideFilter === opt.key
+                  ? "bg-indigo-600 border-indigo-600 text-white"
+                  : isDarkMode
+                    ? "bg-slate-900 border-slate-800 text-slate-400 hover:border-slate-700"
+                    : "bg-white border-slate-200 text-slate-500 hover:border-slate-300"
+              }`}
+            >
+              {opt.label}
+            </button>
+          ))}
+        </div>
       </div>
 
       {/* Results ledger */}
@@ -305,7 +364,7 @@ export default function ScoringDashboard({ settings, competitors, heats, scores,
         <div className="space-y-4">
           {visible.slice().reverse().map((contest) => {
             const isExpanded = !!expandedIds[contest.id];
-            const matrix = isExpanded ? buildMatrix(contest, heats, competitors, scores, sortMode, hideAllNo) : null;
+            const matrix = isExpanded ? buildMatrix(contest, heats, competitors, scores, sortMode, hideAllNo, sideFilter) : null;
             const isPublished = (settings.publishedHeatIds || []).includes(contest.heatId);
             return (
               <div
@@ -386,11 +445,25 @@ export default function ScoringDashboard({ settings, competitors, heats, scores,
                             </tr>
                           </thead>
                           <tbody>
-                            {matrix.rows.map((row) => {
+                            {matrix.rows.map((row, idx) => {
                               const isPodium = contest.heatType === "Finals" && row.rank <= 3;
+                              const showDivider =
+                                matrix.hasDistinctRoles &&
+                                sideFilter === "all" &&
+                                (idx === 0 || matrix.rows[idx - 1].role !== row.role);
                               return (
+                                <React.Fragment key={row.bib}>
+                                {showDivider && (
+                                  <tr>
+                                    <td
+                                      colSpan={matrix.judgeNames.length + 3}
+                                      className={`px-2 pt-3 pb-1 text-[9px] font-bold uppercase tracking-wider font-mono ${isDarkMode ? "text-slate-500" : "text-slate-400"}`}
+                                    >
+                                      {row.role === "Lead" ? "Leaders" : "Followers"}
+                                    </td>
+                                  </tr>
+                                )}
                                 <tr
-                                  key={row.bib}
                                   className={`border-b last:border-0 ${isDarkMode ? "border-slate-800/50" : "border-slate-100"} ${isPodium ? "bg-amber-500/[0.03]" : row.isAllNo ? "opacity-50" : ""}`}
                                 >
                                   <td className="p-2 text-center font-mono font-bold text-slate-400">
@@ -409,6 +482,7 @@ export default function ScoringDashboard({ settings, competitors, heats, scores,
                                     {row.relativeResult}
                                   </td>
                                 </tr>
+                                </React.Fragment>
                               );
                             })}
                           </tbody>

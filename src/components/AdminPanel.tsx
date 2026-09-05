@@ -245,22 +245,19 @@ export default function AdminPanel({
         // What this judge is ACTUALLY judging for the current heat, distinct from
         // their persistent config role (which may just say "Both" or "Finals") --
         // derived from who they actually see, so "Both" resolves to a concrete
-        // Leaders/Followers/Couples answer for this specific heat. Couple bibs
-        // are synthesized as "leadBib_followBib" and get a placeholder role of
-        // "Lead" purely for layout purposes elsewhere, so bib shape (not the
-        // .role field) is what actually distinguishes a couple entry here.
-        const hasCoupleEntries = heatCompetitorsForJudge.some((c) => c.bib.includes("_"));
+        // Leaders/Followers/Both answer for this specific heat. Finals heats are
+        // always judged as couples, so the indicator is redundant there and is
+        // suppressed entirely ("N/A").
+        const isHeatFinalsForBadge = activeHeat.heatType === "Finals" || activeHeat.name.includes("Finals");
         const rolesSeen = new Set(heatCompetitorsForJudge.map((c) => c.role));
-        const judgingSide: "Leaders" | "Followers" | "Couples" | "N/A" =
-          heatCompetitorsForJudge.length === 0
+        const judgingSide: "Leaders" | "Followers" | "Both" | "N/A" =
+          isHeatFinalsForBadge || heatCompetitorsForJudge.length === 0
             ? "N/A"
-            : hasCoupleEntries
-              ? "Couples"
-              : rolesSeen.size === 1 && rolesSeen.has("Lead")
-                ? "Leaders"
-                : rolesSeen.size === 1 && rolesSeen.has("Follow")
-                  ? "Followers"
-                  : "Couples";
+            : rolesSeen.size === 1 && rolesSeen.has("Lead")
+              ? "Leaders"
+              : rolesSeen.size === 1 && rolesSeen.has("Follow")
+                ? "Followers"
+                : "Both";
 
         return {
           name: j.name,
