@@ -1,14 +1,104 @@
 import React, { useState, useMemo } from "react";
 import { Trophy, RefreshCw, ChevronDown, ChevronUp, BarChart3, ListOrdered, CheckCircle2, Filter } from "lucide-react";
-import { AppSettings } from "../types";
+import { AppSettings, Competitor, Heat, ScoreRecord, CompletedContestResult } from "../types";
+import { calculateHeatResults } from "../utils/calculations";
 
 interface ScoringDashboardProps {
   settings: AppSettings;
+  competitors: Competitor[];
+  heats: Heat[];
+  scores: ScoreRecord[];
   isDarkMode: boolean;
   onRefresh?: () => void;
 }
 
-export default function ScoringDashboard({ settings, isDarkMode, onRefresh }: ScoringDashboardProps) {
+interface MatrixRow {
+  bib: string;
+  name: string;
+  rank: number;
+  cells: Record<string, string>;
+  relativeResult: string;
+}
+
+interface Matrix {
+  judgeNames: string[];
+  rows: MatrixRow[];
+  resultColumnLabel: string;
+}
+
+function buildMatrix(
+  contest: CompletedContestResult,
+  heats: Heat[],
+  competitors: Competitor[],
+  scores: ScoreRecord[]
+): Matrix | null {
+  const heat = heats.find((h) => h.id === contest.heatId);
+  if (!heat) return null;
+
+  // Every judge who actually submitted anything for this heat -- not the
+  // currently-configured judge roster, which may have changed since this
+  // contest ran.
+  const heatScores = scores.filter((s) => s.heatId === heat.id);
+  const judgeNames = Array.from(new Set(heatScores.map((s) => s.judgeId))).sort();
+
+  const recordLookup = new Map<string, ScoreRecord>();
+  heatScores.forEach((s) => recordLookup.set(`${s.judgeId}::${s.competitorBib}`, s));
+
+  // Reuse the same results engine everything else in the app uses, so the
+  // per-judge placements/tallies/averages shown here always match what was
+  // actually decided. callbackCount/alternateCount are irrelevant to the
+  // values this matrix displays (they only affect qualified/isAlternate
+  // flags, which aren't used here), so 0 is passed for both.
+  const results = calculateHeatResults(heat, competitors, scores, contest.judgingStyle, 0, 0);
+
+  const rows: MatrixRow[] = [...results]
+    .sort((a, b) => a.rank - b.rank)
+    .map((r) => {
+      const cells: Record<string, string> = {};
+      judgeNames.forEach((j) => {
+        const rec = recordLookup.get(`${j}::${r.competitor.bib}`);
+        if (!rec) {
+          cells[j] = "—";
+        } else if (contest.judgingStyle === "callback") {
+          cells[j] = rec.isCallback;
+        } else {
+          cells[j] = rec.score > 0 ? String(rec.score) : "—";
+        }
+      });
+
+      let relativeResult = "—";
+      if (contest.judgingStyle === "placement") {
+        const placements = Object.values(r.scoresByJudge)
+          .map((v) => v.placement)
+          .filter((p) => p < 999)
+          .sort((a, b) => a - b);
+        relativeResult = placements.length > 0 ? placements.join("-") : "—";
+      } else if (contest.judgingStyle === "callback") {
+        let s = `Y(${r.yesCount})N(${r.noCount})`;
+        if ((r.alt1Count || 0) > 0) s += `A1(${r.alt1Count})`;
+        if ((r.alt2Count || 0) > 0) s += `A2(${r.alt2Count})`;
+        if ((r.alt3Count || 0) > 0) s += `A3(${r.alt3Count})`;
+        relativeResult = s;
+      } else {
+        relativeResult = r.averageScore > 0 ? r.averageScore.toFixed(1) : "—";
+      }
+
+      return {
+        bib: r.competitor.bib,
+        name: r.competitor.name,
+        rank: r.rank,
+        cells,
+        relativeResult
+      };
+    });
+
+  const resultColumnLabel =
+    contest.judgingStyle === "placement" ? "Placements" : contest.judgingStyle === "callback" ? "Callback Tally" : "Raw Avg";
+
+  return { judgeNames, rows, resultColumnLabel };
+}
+
+export default function ScoringDashboard({ settings, competitors, heats, scores, isDarkMode, onRefresh }: ScoringDashboardProps) {
   const [expandedIds, setExpandedIds] = useState<Record<string, boolean>>({});
   const [divisionFilter, setDivisionFilter] = useState<string>("All");
 
@@ -59,7 +149,8 @@ export default function ScoringDashboard({ settings, isDarkMode, onRefresh }: Sc
             </h1>
             <p className="text-xs text-slate-400 mt-1 max-w-lg leading-relaxed">
               Every contest completed by the admin's Complete Contest action lands here — the permanent
-              record judges' submitted score sheets are compiled into once a heat is closed out.
+              record judges' submitted score sheets are compiled into once a heat is closed out. Cleared
+              on the next full database reset.
             </p>
           </div>
         </div>
@@ -136,6 +227,7 @@ export default function ScoringDashboard({ settings, isDarkMode, onRefresh }: Sc
         <div className="space-y-4">
           {visible.slice().reverse().map((contest) => {
             const isExpanded = !!expandedIds[contest.id];
+            const matrix = isExpanded ? buildMatrix(contest, heats, competitors, scores) : null;
             return (
               <div
                 key={contest.id}
@@ -171,58 +263,53 @@ export default function ScoringDashboard({ settings, isDarkMode, onRefresh }: Sc
 
                 {isExpanded && (
                   <div className="px-4 pb-4 border-t border-slate-100 dark:border-slate-800/80 pt-3">
-                    <div className="overflow-x-auto">
-                      <table className="w-full text-left border-collapse text-xs">
-                        <thead>
-                          <tr className={`text-[10px] font-mono text-slate-400 border-b ${isDarkMode ? "bg-slate-900/60 border-slate-800" : "bg-slate-50 border-slate-150"}`}>
-                            <th className="p-2 w-12 text-center font-bold">Rank</th>
-                            <th className="p-2 w-16 text-center font-bold">Bib</th>
-                            <th className="p-2 font-bold">Competitor / Couple</th>
-                            {contest.judgingStyle === "raw" && <th className="p-2 text-right font-bold">Avg Score</th>}
-                            {contest.judgingStyle === "placement" && <th className="p-2 text-right font-bold">Avg Placement</th>}
-                            <th className="p-2 text-right font-bold">Status</th>
-                          </tr>
-                        </thead>
-                        <tbody>
-                          {contest.rankings.map((ranking) => {
-                            const isPodium = contest.heatType === "Finals" && ranking.rank <= 3;
-                            return (
-                              <tr
-                                key={ranking.bib}
-                                className={`border-b last:border-0 ${isDarkMode ? "border-slate-800/50" : "border-slate-100"} ${isPodium ? "bg-amber-500/[0.03]" : ""}`}
-                              >
-                                <td className="p-2 text-center font-bold font-mono">
-                                  {ranking.rank === 1 ? "🥇" : ranking.rank === 2 ? "🥈" : ranking.rank === 3 ? "🥉" : ranking.rank}
-                                </td>
-                                <td className="p-2 text-center font-mono font-bold text-slate-400">{ranking.bib}</td>
-                                <td className="p-2 font-medium text-slate-700 dark:text-slate-300">{ranking.name}</td>
-                                {contest.judgingStyle === "raw" && (
-                                  <td className="p-2 text-right font-mono font-semibold text-slate-600 dark:text-slate-300">
-                                    {ranking.averageScore !== undefined ? ranking.averageScore.toFixed(1) : "—"}
+                    {!matrix ? (
+                      <p className="text-xs text-slate-400 italic py-4 text-center">
+                        The original heat record for this contest is no longer available (it may have been deleted), so the judge-by-judge scoring sheet can't be rebuilt.
+                      </p>
+                    ) : (
+                      <div className="overflow-x-auto">
+                        <table className="w-full text-left border-collapse text-xs">
+                          <thead>
+                            <tr className={`text-[10px] font-mono text-slate-400 border-b ${isDarkMode ? "bg-slate-900/60 border-slate-800" : "bg-slate-50 border-slate-150"}`}>
+                              <th className="p-2 w-16 text-center font-bold">Bib</th>
+                              <th className="p-2 font-bold">Competitor / Couple</th>
+                              {matrix.judgeNames.map((j) => (
+                                <th key={j} className="p-2 text-center font-bold whitespace-nowrap">{j}</th>
+                              ))}
+                              <th className="p-2 text-right font-bold whitespace-nowrap">{matrix.resultColumnLabel}</th>
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {matrix.rows.map((row) => {
+                              const isPodium = contest.heatType === "Finals" && row.rank <= 3;
+                              return (
+                                <tr
+                                  key={row.bib}
+                                  className={`border-b last:border-0 ${isDarkMode ? "border-slate-800/50" : "border-slate-100"} ${isPodium ? "bg-amber-500/[0.03]" : ""}`}
+                                >
+                                  <td className="p-2 text-center font-mono font-bold text-slate-400">
+                                    {row.bib}
                                   </td>
-                                )}
-                                {contest.judgingStyle === "placement" && (
-                                  <td className="p-2 text-right font-mono font-semibold text-slate-600 dark:text-slate-300">
-                                    {ranking.averagePlacement !== undefined ? ranking.averagePlacement.toFixed(2) : "—"}
+                                  <td className="p-2 font-medium text-slate-700 dark:text-slate-300 whitespace-nowrap">
+                                    {isPodium && (row.rank === 1 ? "🥇 " : row.rank === 2 ? "🥈 " : "🥉 ")}
+                                    {row.name}
                                   </td>
-                                )}
-                                <td className="p-2 text-right">
-                                  {isPodium ? (
-                                    <span className="text-[10px] font-bold font-mono text-amber-500">Podium Winner</span>
-                                  ) : ranking.qualified ? (
-                                    <span className="text-[10px] font-bold font-mono text-emerald-500">Qualified / Callback</span>
-                                  ) : ranking.isAlternate ? (
-                                    <span className="text-[10px] font-bold font-mono text-violet-400">Alternate</span>
-                                  ) : (
-                                    <span className="text-[10px] font-mono text-slate-500">Recorded</span>
-                                  )}
-                                </td>
-                              </tr>
-                            );
-                          })}
-                        </tbody>
-                      </table>
-                    </div>
+                                  {matrix.judgeNames.map((j) => (
+                                    <td key={j} className="p-2 text-center font-mono text-slate-600 dark:text-slate-300">
+                                      {row.cells[j]}
+                                    </td>
+                                  ))}
+                                  <td className="p-2 text-right font-mono font-bold text-slate-700 dark:text-slate-200 whitespace-nowrap">
+                                    {row.relativeResult}
+                                  </td>
+                                </tr>
+                              );
+                            })}
+                          </tbody>
+                        </table>
+                      </div>
+                    )}
                   </div>
                 )}
               </div>

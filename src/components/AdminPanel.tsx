@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useRef } from "react";
 import { Shield, Sparkles, RefreshCw, Trash2, PlusCircle, CheckSquare, Settings, AlertTriangle, Play, Eye, EyeOff, Lock, Unlock, Trophy, Calendar, ArrowUp, ArrowDown, Plus, ChevronDown, ChevronUp, SortAsc, Scissors, Edit, X, FileText, Award, ExternalLink } from "lucide-react";
 import { Competitor, Heat, JudgingStyle, AppSettings, ScoreRecord, CallbackValue, CompletedContestResult } from "../types";
-import { calculateHeatResults } from "../utils/calculations";
+import { calculateHeatResults, getJudgeHeatCompetitors } from "../utils/calculations";
 
 interface AdminPanelProps {
   competitors: Competitor[];
@@ -47,6 +47,7 @@ export default function AdminPanel({
   const [newHeatRole, setNewHeatRole] = useState<"Lead" | "Follow" | "Mixed">("Mixed");
   const [selectedBibs, setSelectedBibs] = useState<string[]>([]);
   const [activeHeatControlTab, setActiveHeatControlTab] = useState<"live" | "next">("live");
+  const [contestEditorTab, setContestEditorTab] = useState<"sheet" | "judges">("sheet");
   const [isFloatingBarHovered, setIsFloatingBarHovered] = useState<boolean>(false);
   const [sliderIndex, setSliderIndex] = useState(1);
 
@@ -182,6 +183,78 @@ export default function AdminPanel({
   const activeHeat = activeHeatControlTab === "live"
     ? heats.find((h) => h.id === settings.currentHeatId)
     : heats.find((h) => h.id === settings.queuedHeatId);
+
+  // ---- Judges tab: live per-judge quota/submission status for the active heat ----
+  const defaultJudgeNamesForStatus = ["Judge A", "Judge B", "Judge C", "Judge D", "Judge E"];
+  const defaultJudgeRolesForStatus = ["None", "None", "None", "None", "None"];
+  const judgeNamesForStatus = settings.judgeNames || defaultJudgeNamesForStatus;
+  const judgeRolesForStatus = settings.judgeRoles || defaultJudgeRolesForStatus;
+  const chiefNameForStatus = settings.chiefJudgeName || "Chief Judge";
+  const chiefRoleForStatus = settings.chiefJudgeRole || "Both";
+
+  const expectedJudgesForActiveHeat: { name: string; role: "Leaders" | "Followers" | "Finals" | "Both" | "None" }[] =
+    judgeNamesForStatus
+      .map((name, idx) => ({
+        name,
+        role: (judgeRolesForStatus[idx] || "None") as "Leaders" | "Followers" | "Finals" | "Both" | "None"
+      }))
+      .filter((j) => j.role !== "None");
+  if (chiefRoleForStatus !== "None") {
+    expectedJudgesForActiveHeat.push({ name: chiefNameForStatus, role: chiefRoleForStatus });
+  }
+
+  const judgeTargetCallbackCount = activeHeat && activeHeat.role === "Lead"
+    ? (settings.callbackCountLeaders !== undefined ? settings.callbackCountLeaders : settings.callbackCount)
+    : activeHeat && activeHeat.role === "Follow"
+      ? (settings.callbackCountFollowers !== undefined ? settings.callbackCountFollowers : settings.callbackCount)
+      : settings.callbackCount;
+
+  const judgeTargetAlternateCount = activeHeat && activeHeat.role === "Lead"
+    ? (settings.alternateCountLeaders !== undefined ? settings.alternateCountLeaders : (settings.alternateCount || 0))
+    : activeHeat && activeHeat.role === "Follow"
+      ? (settings.alternateCountFollowers !== undefined ? settings.alternateCountFollowers : (settings.alternateCount || 0))
+      : (settings.alternateCount || 0);
+
+  const judgeStatusRows = activeHeat
+    ? expectedJudgesForActiveHeat.map((j) => {
+        const heatCompetitorsForJudge = getJudgeHeatCompetitors(activeHeat, competitors, j.role);
+        const recordByBib: Record<string, ScoreRecord> = {};
+        scores
+          .filter((s) => s.judgeId === j.name && s.heatId === activeHeat.id)
+          .forEach((s) => { recordByBib[s.competitorBib] = s; });
+
+        const scoredCount = heatCompetitorsForJudge.filter((c) => !!recordByBib[c.bib]).length;
+        const totalCount = heatCompetitorsForJudge.length;
+
+        const yesCount = heatCompetitorsForJudge.filter((c) => recordByBib[c.bib]?.isCallback === "Yes").length;
+        const altCount = heatCompetitorsForJudge.filter((c) => {
+          const val = recordByBib[c.bib]?.isCallback;
+          return val && val !== "No" && val !== "Yes";
+        }).length;
+
+        let areAltsSatisfied = true;
+        for (let r = 1; r <= judgeTargetAlternateCount; r++) {
+          const cnt = heatCompetitorsForJudge.filter((c) => recordByBib[c.bib]?.isCallback === `Alt ${r}`).length;
+          if (cnt !== 1) areAltsSatisfied = false;
+        }
+        for (let r = judgeTargetAlternateCount + 1; r <= 3; r++) {
+          const cnt = heatCompetitorsForJudge.filter((c) => recordByBib[c.bib]?.isCallback === `Alt ${r}`).length;
+          if (cnt > 0) areAltsSatisfied = false;
+        }
+
+        return {
+          name: j.name,
+          role: j.role,
+          scoredCount,
+          totalCount,
+          yesCount,
+          altCount,
+          isQuotaSatisfied: yesCount === judgeTargetCallbackCount && areAltsSatisfied,
+          isFinalized: (settings.finalizedSheets || []).includes(`${activeHeat.id}:${j.name}`),
+          isClaimed: (settings.claimedJudges || []).includes(j.name)
+        };
+      })
+    : [];
 
   // Unified rows for the active heat editor
   const currentSplits = activeHeat ? [...(activeHeat.splits || [])].sort((a,b) => a - b) : [];
@@ -2319,6 +2392,38 @@ export default function AdminPanel({
         </div>
 
         {!collapsedCards.scoringSheetEditor && (
+          <div className="flex p-0.5 bg-slate-100 dark:bg-slate-950 rounded-xl border border-slate-200 dark:border-slate-800 w-full sm:w-72 mb-5">
+            <button
+              type="button"
+              id="contest-editor-tab-sheet-btn"
+              onClick={() => setContestEditorTab("sheet")}
+              className={`flex-1 py-1.5 text-xs font-bold rounded-lg transition-all cursor-pointer ${
+                contestEditorTab === "sheet"
+                  ? "bg-violet-600 text-white shadow-sm"
+                  : "text-slate-500 hover:text-slate-800 dark:text-slate-400 dark:hover:text-slate-200"
+              }`}
+            >
+              Scoring Sheet
+            </button>
+            <button
+              type="button"
+              id="contest-editor-tab-judges-btn"
+              onClick={() => setContestEditorTab("judges")}
+              className={`flex-1 py-1.5 text-xs font-bold rounded-lg transition-all cursor-pointer flex items-center justify-center gap-1.5 ${
+                contestEditorTab === "judges"
+                  ? "bg-violet-600 text-white shadow-sm"
+                  : "text-slate-500 hover:text-slate-800 dark:text-slate-400 dark:hover:text-slate-200"
+              }`}
+            >
+              Judges
+              {activeHeat && judgeStatusRows.some((r) => r.isClaimed && r.totalCount > 0 && r.scoredCount < r.totalCount) && (
+                <span className="w-1.5 h-1.5 rounded-full bg-amber-400 animate-pulse" />
+              )}
+            </button>
+          </div>
+        )}
+
+        {!collapsedCards.scoringSheetEditor && contestEditorTab === "sheet" && (
           <React.Fragment>
             <p className="text-xs text-slate-400 mb-6 leading-relaxed">
           The scoring sheet is what is submitted to judges to score with. You can manually adjust the running order, remove competitors, or add new competitors. By default, it automatically populates based on Checked-In/Scratched statuses on the registration sheet.
@@ -3742,6 +3847,100 @@ export default function AdminPanel({
           <p className="text-xs text-slate-400 text-center py-4">Select an active heat to view the scoring sheet.</p>
         )}
           </React.Fragment>
+        )}
+
+        {!collapsedCards.scoringSheetEditor && contestEditorTab === "judges" && (
+          <div className="space-y-4">
+            <p className="text-xs text-slate-400 mb-2 leading-relaxed">
+              Live status for every judge assigned a scoring role in the current Live Contest — quota progress, who has and hasn't submitted scores, and the ability to log a judge out (immediately freeing their name for someone else to claim).
+            </p>
+
+            {!activeHeat ? (
+              <p className="text-xs text-slate-400 text-center py-4">Select an active heat to view judge status.</p>
+            ) : judgeStatusRows.length === 0 ? (
+              <p className="text-xs text-slate-400 text-center py-4">No judges are currently assigned a scoring role. Configure judges in Scoring Configurations.</p>
+            ) : (
+              <div className="space-y-3">
+                {judgeStatusRows.map((row) => (
+                  <div
+                    key={row.name}
+                    id={`judge-status-row-${row.name.replace(/\s+/g, "-").toLowerCase()}`}
+                    className={`p-4 rounded-xl border flex flex-col sm:flex-row sm:items-center gap-3 justify-between transition-all ${
+                      isDarkMode ? "bg-slate-950 border-slate-800" : "bg-slate-50 border-slate-200"
+                    }`}
+                  >
+                    <div className="flex items-center gap-3 min-w-0">
+                      <span className={`w-2.5 h-2.5 rounded-full flex-shrink-0 ${row.isClaimed ? "bg-emerald-500 animate-pulse" : "bg-slate-400"}`} />
+                      <div className="min-w-0">
+                        <div className="flex items-center gap-2 flex-wrap">
+                          <span className="text-sm font-bold truncate">{row.name}</span>
+                          <span className="text-[9px] px-1.5 py-0.5 rounded-full bg-violet-500/10 text-violet-400 font-semibold uppercase tracking-wider font-mono">
+                            {row.role}
+                          </span>
+                          {row.isFinalized && (
+                            <span className="text-[9px] px-1.5 py-0.5 rounded-full bg-emerald-500/10 text-emerald-500 font-semibold uppercase tracking-wider font-mono">
+                              Finalized
+                            </span>
+                          )}
+                        </div>
+                        <p className="text-[10px] font-mono text-slate-400 mt-0.5">
+                          {row.isClaimed ? "Logged In" : "Not Logged In"}
+                        </p>
+                      </div>
+                    </div>
+
+                    <div className="flex items-center gap-4 flex-wrap justify-end">
+                      <div className="text-right">
+                        <span className="text-[9px] font-mono uppercase tracking-wider text-slate-400 block">Submitted</span>
+                        <span className={`text-xs font-bold font-mono ${
+                          row.totalCount > 0 && row.scoredCount === row.totalCount ? "text-green-500" : "text-amber-500"
+                        }`}>
+                          {row.scoredCount} / {row.totalCount}
+                        </span>
+                      </div>
+
+                      {settings.judgingStyle === "callback" && (
+                        <div className="text-right">
+                          <span className={`text-[9px] font-mono uppercase tracking-wider block ${row.isQuotaSatisfied ? "text-green-500" : "text-red-500"}`}>
+                            Quota
+                          </span>
+                          <span className={`text-xs font-bold font-mono block ${row.isQuotaSatisfied ? "text-green-500" : "text-red-500"}`}>
+                            Callbacks: {row.yesCount}/{judgeTargetCallbackCount}
+                          </span>
+                          <span className={`text-xs font-bold font-mono block ${row.isQuotaSatisfied ? "text-green-500" : "text-red-500"}`}>
+                            Alts: {row.altCount}/{judgeTargetAlternateCount}
+                          </span>
+                        </div>
+                      )}
+
+                      <button
+                        type="button"
+                        id={`judge-logout-btn-${row.name.replace(/\s+/g, "-").toLowerCase()}`}
+                        disabled={!row.isClaimed || loading}
+                        onClick={async () => {
+                          setLoading(true);
+                          try {
+                            await onUpdateSettings({
+                              claimedJudges: (settings.claimedJudges || []).filter((n) => n !== row.name)
+                            });
+                          } finally {
+                            setLoading(false);
+                          }
+                        }}
+                        className={`px-3 py-1.5 text-xs font-bold rounded-xl border transition-all ${
+                          row.isClaimed
+                            ? "border-rose-500/30 text-rose-500 hover:bg-rose-500/10 cursor-pointer"
+                            : "border-slate-300 dark:border-slate-700 text-slate-400 cursor-not-allowed opacity-50"
+                        }`}
+                      >
+                        Log Out
+                      </button>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
         )}
       </div>
 

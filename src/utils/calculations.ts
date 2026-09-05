@@ -346,6 +346,88 @@ export function calculateHeatResults(
   return results;
 }
 
+// Determine the exact set of competitors (or virtual couple units) a given judge
+// role sees for a heat -- shared between the Judge Portal (so a judge's own
+// sheet lines up with what the app expects of them) and the Admin Panel's
+// Judges tab (so the live "who has/hasn't submitted" view matches exactly).
+export function getJudgeHeatCompetitors(
+  heat: Heat,
+  competitors: Competitor[],
+  judgeRole: "Leaders" | "Followers" | "Finals" | "Both" | "None"
+): Competitor[] {
+  const rawHeatCompetitors = heat.competitorBibs
+    .map((bib) => {
+      const comp = competitors.find((c) => c.bib === bib);
+      if (comp) {
+        if (comp.checkedIn && !comp.scratched) {
+          return comp;
+        }
+        return undefined;
+      }
+
+      // If bib contains underscore, it represents a couple (e.g. "1_11")
+      if (bib.includes("_")) {
+        const [leadBib, followBib] = bib.split("_");
+        const lead = competitors.find((c) => c.bib === leadBib);
+        const follow = competitors.find((c) => c.bib === followBib);
+
+        const isLeadOk = lead ? (lead.checkedIn && !lead.scratched) : false;
+        const isFollowOk = follow ? (follow.checkedIn && !follow.scratched) : false;
+        if (!isLeadOk || !isFollowOk) {
+          return undefined;
+        }
+
+        const isFinals = heat.heatType === "Finals" || heat.name.includes("Finals");
+
+        if (isFinals || judgeRole === "Both") {
+          const leadName = lead ? lead.name : `Lead #${leadBib}`;
+          const followName = follow ? follow.name : `Follow #${followBib}`;
+          return {
+            bib,
+            name: `${leadName} & ${followName}`,
+            division: heat.division,
+            role: "Lead" as const, // virtual role for layout
+            checkedIn: true
+          } as Competitor;
+        } else if (judgeRole === "Leaders") {
+          return lead;
+        } else if (judgeRole === "Followers") {
+          return follow;
+        } else {
+          const leadName = lead ? lead.name : `Lead #${leadBib}`;
+          const followName = follow ? follow.name : `Follow #${followBib}`;
+          return {
+            bib,
+            name: `${leadName} & ${followName}`,
+            division: heat.division,
+            role: "Lead" as const,
+            checkedIn: true
+          } as Competitor;
+        }
+      }
+      return undefined;
+    })
+    .filter((c): c is Competitor => !!c);
+
+  const isHeatFinals = heat.heatType === "Finals" || heat.name.includes("Finals");
+  const baseHeatCompetitors = !isHeatFinals
+    ? [...rawHeatCompetitors].sort((a, b) => a.bib.localeCompare(b.bib, undefined, { numeric: true }))
+    : rawHeatCompetitors;
+
+  return baseHeatCompetitors.filter((c) => {
+    if (isHeatFinals) {
+      return true;
+    }
+    if (judgeRole === "Leaders") {
+      return c.role === "Lead";
+    }
+    if (judgeRole === "Followers") {
+      return c.role === "Follow";
+    }
+    return true;
+  });
+}
+
 export function getPrelimPoints(res: Partial<CompetitorResult>): number {
   if (!res.scoresByJudge) return 0;
   let totalPoints = 0;

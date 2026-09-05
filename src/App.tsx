@@ -537,6 +537,9 @@ export default function App() {
               {currentRole === "scoring" && (
                 <ScoringDashboard
                   settings={settings}
+                  competitors={competitors}
+                  heats={heats}
+                  scores={scores}
                   isDarkMode={isDarkMode}
                   onRefresh={fetchState}
                 />

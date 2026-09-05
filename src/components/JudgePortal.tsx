@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from "react";
 import { Award, Check, Save, User, Clock, AlertTriangle, ChevronUp, ChevronDown, RefreshCw } from "lucide-react";
 import { Competitor, Heat, ScoreRecord, JudgingStyle, CallbackValue, AppSettings } from "../types";
+import { getJudgeHeatCompetitors } from "../utils/calculations";
 
 interface JudgePortalProps {
   competitors: Competitor[];
@@ -154,80 +155,12 @@ export default function JudgePortal({
       ? (settings.alternateCountFollowers !== undefined ? settings.alternateCountFollowers : (settings.alternateCount || 0))
       : (settings.alternateCount || 0);
 
-  const rawHeatCompetitors = activeHeat
-    ? activeHeat.competitorBibs.map((bib) => {
-        // Try finding direct competitor profile
-        const comp = competitors.find((c) => c.bib === bib);
-        if (comp) {
-          if (comp.checkedIn && !comp.scratched) {
-            return comp;
-          }
-          return undefined;
-        }
-
-        // If bib contains underscore, it represents a couple (e.g. "1_11")
-        if (bib.includes("_")) {
-          const [leadBib, followBib] = bib.split("_");
-          const lead = competitors.find((c) => c.bib === leadBib);
-          const follow = competitors.find((c) => c.bib === followBib);
-
-          const isLeadOk = lead ? (lead.checkedIn && !lead.scratched) : false;
-          const isFollowOk = follow ? (follow.checkedIn && !follow.scratched) : false;
-          if (!isLeadOk || !isFollowOk) {
-            return undefined;
-          }
-
-          const isFinals = activeHeat.heatType === "Finals" || activeHeat.name.includes("Finals");
-
-          if (isFinals || judgeRole === "Both") {
-            const leadName = lead ? lead.name : `Lead #${leadBib}`;
-            const followName = follow ? follow.name : `Follow #${followBib}`;
-            return {
-              bib,
-              name: `${leadName} & ${followName}`,
-              division: activeHeat.division,
-              role: "Lead" as const, // virtual role for layout
-              checkedIn: true
-            } as Competitor;
-          } else if (judgeRole === "Leaders") {
-            return lead;
-          } else if (judgeRole === "Followers") {
-            return follow;
-          } else {
-            const leadName = lead ? lead.name : `Lead #${leadBib}`;
-            const followName = follow ? follow.name : `Follow #${followBib}`;
-            return {
-              bib,
-              name: `${leadName} & ${followName}`,
-              division: activeHeat.division,
-              role: "Lead" as const,
-              checkedIn: true
-            } as Competitor;
-          }
-        }
-        return undefined;
-      }).filter((c): c is Competitor => !!c)
-    : [];
-
   const isHeatFinals = activeHeat ? (activeHeat.heatType === "Finals" || activeHeat.name.includes("Finals")) : false;
-  const baseHeatCompetitors = activeHeat && !isHeatFinals
-    ? [...rawHeatCompetitors].sort((a, b) => a.bib.localeCompare(b.bib, undefined, { numeric: true }))
-    : rawHeatCompetitors;
 
-  // Filter based on judge role
+  // Shared with AdminPanel's Judges tab so a judge's own sheet always lines up
+  // with what the admin's live "who has/hasn't submitted" view expects of them.
   const heatCompetitors = activeHeat
-    ? baseHeatCompetitors.filter((c) => {
-        if (isHeatFinals) {
-          return true;
-        }
-        if (judgeRole === "Leaders") {
-          return c.role === "Lead";
-        }
-        if (judgeRole === "Followers") {
-          return c.role === "Follow";
-        }
-        return true;
-      })
+    ? getJudgeHeatCompetitors(activeHeat, competitors, judgeRole)
     : [];
 
   let isAssignedToThisHeat = true;
