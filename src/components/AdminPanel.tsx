@@ -215,64 +215,68 @@ export default function AdminPanel({
       ? (settings.alternateCountFollowers !== undefined ? settings.alternateCountFollowers : (settings.alternateCount || 0))
       : (settings.alternateCount || 0);
 
-  const judgeStatusRows = activeHeat
-    ? expectedJudgesForActiveHeat.map((j) => {
-        const heatCompetitorsForJudge = getJudgeHeatCompetitors(activeHeat, competitors, j.role);
-        const recordByBib: Record<string, ScoreRecord> = {};
-        scores
-          .filter((s) => s.judgeId === j.name && s.heatId === activeHeat.id)
-          .forEach((s) => { recordByBib[s.competitorBib] = s; });
+  // Independent of whether a heat is currently live -- the admin needs to be able to
+  // see and unlock any judge slot at any time, not just while a heat is active.
+  // Heat-specific stats (submitted count, judging side, quota, finalized) simply read
+  // as empty/neutral when there is no active heat; isClaimed/Log Out always work.
+  const judgeStatusRows = expectedJudgesForActiveHeat.map((j) => {
+    const heatCompetitorsForJudge = activeHeat ? getJudgeHeatCompetitors(activeHeat, competitors, j.role) : [];
+    const recordByBib: Record<string, ScoreRecord> = {};
+    if (activeHeat) {
+      scores
+        .filter((s) => s.judgeId === j.name && s.heatId === activeHeat.id)
+        .forEach((s) => { recordByBib[s.competitorBib] = s; });
+    }
 
-        const scoredCount = heatCompetitorsForJudge.filter((c) => !!recordByBib[c.bib]).length;
-        const totalCount = heatCompetitorsForJudge.length;
+    const scoredCount = heatCompetitorsForJudge.filter((c) => !!recordByBib[c.bib]).length;
+    const totalCount = heatCompetitorsForJudge.length;
 
-        const yesCount = heatCompetitorsForJudge.filter((c) => recordByBib[c.bib]?.isCallback === "Yes").length;
-        const altCount = heatCompetitorsForJudge.filter((c) => {
-          const val = recordByBib[c.bib]?.isCallback;
-          return val && val !== "No" && val !== "Yes";
-        }).length;
+    const yesCount = heatCompetitorsForJudge.filter((c) => recordByBib[c.bib]?.isCallback === "Yes").length;
+    const altCount = heatCompetitorsForJudge.filter((c) => {
+      const val = recordByBib[c.bib]?.isCallback;
+      return val && val !== "No" && val !== "Yes";
+    }).length;
 
-        let areAltsSatisfied = true;
-        for (let r = 1; r <= judgeTargetAlternateCount; r++) {
-          const cnt = heatCompetitorsForJudge.filter((c) => recordByBib[c.bib]?.isCallback === `Alt ${r}`).length;
-          if (cnt !== 1) areAltsSatisfied = false;
-        }
-        for (let r = judgeTargetAlternateCount + 1; r <= 3; r++) {
-          const cnt = heatCompetitorsForJudge.filter((c) => recordByBib[c.bib]?.isCallback === `Alt ${r}`).length;
-          if (cnt > 0) areAltsSatisfied = false;
-        }
+    let areAltsSatisfied = true;
+    for (let r = 1; r <= judgeTargetAlternateCount; r++) {
+      const cnt = heatCompetitorsForJudge.filter((c) => recordByBib[c.bib]?.isCallback === `Alt ${r}`).length;
+      if (cnt !== 1) areAltsSatisfied = false;
+    }
+    for (let r = judgeTargetAlternateCount + 1; r <= 3; r++) {
+      const cnt = heatCompetitorsForJudge.filter((c) => recordByBib[c.bib]?.isCallback === `Alt ${r}`).length;
+      if (cnt > 0) areAltsSatisfied = false;
+    }
 
-        // What this judge is ACTUALLY judging for the current heat, distinct from
-        // their persistent config role (which may just say "Both" or "Finals") --
-        // derived from who they actually see, so "Both" resolves to a concrete
-        // Leaders/Followers/Both answer for this specific heat. Finals heats are
-        // always judged as couples, so the indicator is redundant there and is
-        // suppressed entirely ("N/A").
-        const isHeatFinalsForBadge = activeHeat.heatType === "Finals" || activeHeat.name.includes("Finals");
-        const rolesSeen = new Set(heatCompetitorsForJudge.map((c) => c.role));
-        const judgingSide: "Leaders" | "Followers" | "Both" | "N/A" =
-          isHeatFinalsForBadge || heatCompetitorsForJudge.length === 0
-            ? "N/A"
-            : rolesSeen.size === 1 && rolesSeen.has("Lead")
-              ? "Leaders"
-              : rolesSeen.size === 1 && rolesSeen.has("Follow")
-                ? "Followers"
-                : "Both";
+    // What this judge is ACTUALLY judging for the current heat, distinct from
+    // their persistent config role (which may just say "Both" or "Finals") --
+    // derived from who they actually see, so "Both" resolves to a concrete
+    // Leaders/Followers/Both answer for this specific heat. Finals heats are
+    // always judged as couples, so the indicator is redundant there and is
+    // suppressed entirely ("N/A"), as is the case whenever there is no active heat.
+    const isHeatFinalsForBadge = activeHeat ? (activeHeat.heatType === "Finals" || activeHeat.name.includes("Finals")) : false;
+    const rolesSeen = new Set(heatCompetitorsForJudge.map((c) => c.role));
+    const judgingSide: "Leaders" | "Followers" | "Both" | "N/A" =
+      !activeHeat || isHeatFinalsForBadge || heatCompetitorsForJudge.length === 0
+        ? "N/A"
+        : rolesSeen.size === 1 && rolesSeen.has("Lead")
+          ? "Leaders"
+          : rolesSeen.size === 1 && rolesSeen.has("Follow")
+            ? "Followers"
+            : "Both";
 
-        return {
-          name: j.name,
-          role: j.role,
-          judgingSide,
-          scoredCount,
-          totalCount,
-          yesCount,
-          altCount,
-          isQuotaSatisfied: yesCount === judgeTargetCallbackCount && areAltsSatisfied,
-          isFinalized: (settings.finalizedSheets || []).includes(`${activeHeat.id}:${j.name}`),
-          isClaimed: (settings.claimedJudges || []).includes(j.name)
-        };
-      })
-    : [];
+    return {
+      name: j.name,
+      role: j.role,
+      judgingSide,
+      scoredCount,
+      totalCount,
+      yesCount,
+      altCount,
+      isQuotaSatisfied: !!activeHeat && yesCount === judgeTargetCallbackCount && areAltsSatisfied,
+      isFinalized: activeHeat ? (settings.finalizedSheets || []).includes(`${activeHeat.id}:${j.name}`) : false,
+      isClaimed: (settings.claimedJudges || []).includes(j.name)
+    };
+  });
 
   // Unified rows for the active heat editor
   const currentSplits = activeHeat ? [...(activeHeat.splits || [])].sort((a,b) => a - b) : [];
@@ -4006,12 +4010,10 @@ export default function AdminPanel({
         {!collapsedCards.scoringSheetEditor && contestEditorTab === "judges" && (
           <div className="space-y-4">
             <p className="text-xs text-slate-400 mb-2 leading-relaxed">
-              Live status for every judge assigned a scoring role in the current Live Contest — quota progress, who has and hasn't submitted scores, and the ability to log a judge out (immediately freeing their name for someone else to claim).
+              Every judge configured a scoring role, with the ability to log any of them out (immediately freeing their name for someone else to claim) at any time -- whether or not a heat is currently live.{activeHeat ? " Quota progress and who has and hasn't submitted scores reflect the current Live Contest heat." : " Select an active heat to see live submission and quota progress."}
             </p>
 
-            {!activeHeat ? (
-              <p className="text-xs text-slate-400 text-center py-4">Select an active heat to view judge status.</p>
-            ) : judgeStatusRows.length === 0 ? (
+            {judgeStatusRows.length === 0 ? (
               <p className="text-xs text-slate-400 text-center py-4">No judges are currently assigned a scoring role. Configure judges in Scoring Configurations.</p>
             ) : (
               <div className="space-y-3">
@@ -4058,13 +4060,13 @@ export default function AdminPanel({
                       <div className="text-right">
                         <span className="text-[9px] font-mono uppercase tracking-wider text-slate-400 block">Submitted</span>
                         <span className={`text-xs font-bold font-mono ${
-                          row.totalCount > 0 && row.scoredCount === row.totalCount ? "text-green-500" : "text-amber-500"
+                          !activeHeat ? "text-slate-400" : row.totalCount > 0 && row.scoredCount === row.totalCount ? "text-green-500" : "text-amber-500"
                         }`}>
-                          {row.scoredCount} / {row.totalCount}
+                          {activeHeat ? `${row.scoredCount} / ${row.totalCount}` : "No active heat"}
                         </span>
                       </div>
 
-                      {settings.judgingStyle === "callback" && (
+                      {activeHeat && settings.judgingStyle === "callback" && (
                         <div className="text-right">
                           <span className={`text-[9px] font-mono uppercase tracking-wider block ${row.isQuotaSatisfied ? "text-green-500" : "text-red-500"}`}>
                             Quota
