@@ -163,6 +163,26 @@ export default function JudgePortal({
     ? getJudgeHeatCompetitors(activeHeat, competitors, judgeRole)
     : [];
 
+  // Same shared row-position split model as AdminPanel/CoordinatorCheckIn: a stored split
+  // value is a local index within each role's own ordered subset, applied identically to
+  // leaders and followers. Returns which sub-heat (1, 2, or 3) a competitor falls into.
+  const getSplitBucket = (bib: string, role: string): number => {
+    if (!activeHeat) return 1;
+    const sortedSplits = [...(activeHeat.splits || [])].sort((a, b) => a - b);
+    if (sortedSplits.length === 0) return 1;
+    const roleBibs = activeHeat.competitorBibs.filter(b => {
+      const comp = competitors.find(cc => cc.bib === b);
+      return (comp?.role || "Lead") === (role || "Lead");
+    });
+    const roleSpecificIndex = roleBibs.indexOf(bib);
+    if (roleSpecificIndex === -1) return 1;
+    let bucket = 1;
+    for (const s of sortedSplits) {
+      if (roleSpecificIndex >= s) bucket++;
+    }
+    return bucket;
+  };
+
   let isAssignedToThisHeat = true;
   let notAssignedMessage = "";
 
@@ -903,8 +923,11 @@ export default function JudgePortal({
     }
   };
 
-  // Do not re-order the competitors as they are scored. Always render in original bib order (or heat-defined order)
-  const orderedCompetitorsForRender = heatCompetitors;
+  // Group rows by which side of the heat split they fall on (same shared row-position split
+  // used by the Floor Coordinator check-in sheet), keeping each bucket's original relative order.
+  const orderedCompetitorsForRender = (activeHeat?.splits || []).length > 0
+    ? [...heatCompetitors].sort((a, b) => getSplitBucket(a.bib, a.role) - getSplitBucket(b.bib, b.role))
+    : heatCompetitors;
 
   return (
     <div className="space-y-6 animate-fade-in">
@@ -1083,17 +1106,12 @@ export default function JudgePortal({
           const callbackVal = localCallbacks[c.bib] || "No";
           const status = savedStatus[c.bib] || "idle";
 
-          const roleBibs = activeHeat ? activeHeat.competitorBibs.filter(bib => {
-            const comp = competitors.find(cc => cc.bib === bib);
-            return (comp?.role || "Lead") === (c.role || "Lead");
-          }) : [];
-          const roleSpecificIndex = roleBibs.indexOf(c.bib);
-          const isSplitActive = roleSpecificIndex !== -1 && (activeHeat?.splits || []).includes(roleSpecificIndex);
-          let nextHeatNum = 1;
-          if (isSplitActive && activeHeat) {
-            const splitsBefore = (activeHeat.splits || []).filter(s => s <= roleSpecificIndex).length;
-            nextHeatNum = splitsBefore + 1;
-          }
+          const rowBucket = getSplitBucket(c.bib, c.role);
+          const prevBucket = index > 0
+            ? getSplitBucket(orderedCompetitorsForRender[index - 1].bib, orderedCompetitorsForRender[index - 1].role)
+            : rowBucket;
+          const isSplitActive = rowBucket !== prevBucket;
+          const nextHeatNum = rowBucket;
 
           if (judgingStyle === "raw") {
             const isTied = tiedBibs.has(c.bib);

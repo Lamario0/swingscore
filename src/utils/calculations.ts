@@ -410,9 +410,9 @@ export function getJudgeHeatCompetitors(
     .filter((c): c is Competitor => !!c);
 
   const isHeatFinals = heat.heatType === "Finals" || heat.name.includes("Finals");
-  const baseHeatCompetitors = !isHeatFinals
-    ? [...rawHeatCompetitors].sort((a, b) => a.bib.localeCompare(b.bib, undefined, { numeric: true }))
-    : rawHeatCompetitors;
+  // Preserve the heat's own competitor order (matches the Floor Coordinator check-in sheet)
+  // instead of re-sorting by bib, so a heat split lines up identically on both sheets.
+  const baseHeatCompetitors = rawHeatCompetitors;
 
   return baseHeatCompetitors.filter((c) => {
     if (isHeatFinals) {
