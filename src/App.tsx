@@ -542,6 +542,7 @@ export default function App() {
                   scores={scores}
                   isDarkMode={isDarkMode}
                   onRefresh={fetchState}
+                  onUpdateSettings={handleUpdateSettings}
                 />
               )}
 

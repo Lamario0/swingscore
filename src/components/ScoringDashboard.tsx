@@ -1,5 +1,5 @@
 import React, { useState, useMemo } from "react";
-import { Trophy, RefreshCw, ChevronDown, ChevronUp, BarChart3, ListOrdered, CheckCircle2, Filter } from "lucide-react";
+import { Trophy, RefreshCw, ChevronDown, ChevronUp, BarChart3, ListOrdered, CheckCircle2, Filter, ArrowDownAZ, ArrowDownWideNarrow, EyeOff } from "lucide-react";
 import { AppSettings, Competitor, Heat, ScoreRecord, CompletedContestResult } from "../types";
 import { calculateHeatResults } from "../utils/calculations";
 
@@ -10,7 +10,10 @@ interface ScoringDashboardProps {
   scores: ScoreRecord[];
   isDarkMode: boolean;
   onRefresh?: () => void;
+  onUpdateSettings: (newSettings: Partial<AppSettings>) => Promise<void>;
 }
+
+type SortMode = "bib" | "score";
 
 interface MatrixRow {
   bib: string;
@@ -18,6 +21,7 @@ interface MatrixRow {
   rank: number;
   cells: Record<string, string>;
   relativeResult: string;
+  isAllNo: boolean;
 }
 
 interface Matrix {
@@ -30,7 +34,9 @@ function buildMatrix(
   contest: CompletedContestResult,
   heats: Heat[],
   competitors: Competitor[],
-  scores: ScoreRecord[]
+  scores: ScoreRecord[],
+  sortMode: SortMode,
+  hideAllNo: boolean
 ): Matrix | null {
   const heat = heats.find((h) => h.id === contest.heatId);
   if (!heat) return null;
@@ -49,48 +55,58 @@ function buildMatrix(
   // actually decided. callbackCount/alternateCount are irrelevant to the
   // values this matrix displays (they only affect qualified/isAlternate
   // flags, which aren't used here), so 0 is passed for both.
-  const results = calculateHeatResults(heat, competitors, scores, contest.judgingStyle, 0, 0);
+  let results = calculateHeatResults(heat, competitors, scores, contest.judgingStyle, 0, 0);
 
-  const rows: MatrixRow[] = [...results]
-    .sort((a, b) => a.rank - b.rank)
-    .map((r) => {
-      const cells: Record<string, string> = {};
-      judgeNames.forEach((j) => {
-        const rec = recordLookup.get(`${j}::${r.competitor.bib}`);
-        if (!rec) {
-          cells[j] = "—";
-        } else if (contest.judgingStyle === "callback") {
-          cells[j] = rec.isCallback;
-        } else {
-          cells[j] = rec.score > 0 ? String(rec.score) : "—";
-        }
-      });
+  if (contest.judgingStyle === "callback" && hideAllNo) {
+    results = results.filter((r) => r.yesCount > 0 || (r.altCount || 0) > 0);
+  }
 
-      let relativeResult = "—";
-      if (contest.judgingStyle === "placement") {
-        const placements = Object.values(r.scoresByJudge)
-          .map((v) => v.placement)
-          .filter((p) => p < 999)
-          .sort((a, b) => a - b);
-        relativeResult = placements.length > 0 ? placements.join("-") : "—";
+  const sorted = [...results].sort((a, b) => {
+    if (sortMode === "bib") {
+      return a.competitor.bib.localeCompare(b.competitor.bib, undefined, { numeric: true });
+    }
+    return a.rank - b.rank;
+  });
+
+  const rows: MatrixRow[] = sorted.map((r) => {
+    const cells: Record<string, string> = {};
+    judgeNames.forEach((j) => {
+      const rec = recordLookup.get(`${j}::${r.competitor.bib}`);
+      if (!rec) {
+        cells[j] = "—";
       } else if (contest.judgingStyle === "callback") {
-        let s = `Y(${r.yesCount})N(${r.noCount})`;
-        if ((r.alt1Count || 0) > 0) s += `A1(${r.alt1Count})`;
-        if ((r.alt2Count || 0) > 0) s += `A2(${r.alt2Count})`;
-        if ((r.alt3Count || 0) > 0) s += `A3(${r.alt3Count})`;
-        relativeResult = s;
+        cells[j] = rec.isCallback;
       } else {
-        relativeResult = r.averageScore > 0 ? r.averageScore.toFixed(1) : "—";
+        cells[j] = rec.score > 0 ? String(rec.score) : "—";
       }
-
-      return {
-        bib: r.competitor.bib,
-        name: r.competitor.name,
-        rank: r.rank,
-        cells,
-        relativeResult
-      };
     });
+
+    let relativeResult = "—";
+    if (contest.judgingStyle === "placement") {
+      const placements = Object.values(r.scoresByJudge)
+        .map((v) => v.placement)
+        .filter((p) => p < 999)
+        .sort((a, b) => a - b);
+      relativeResult = placements.length > 0 ? placements.join("-") : "—";
+    } else if (contest.judgingStyle === "callback") {
+      let s = `Y(${r.yesCount})N(${r.noCount})`;
+      if ((r.alt1Count || 0) > 0) s += `A1(${r.alt1Count})`;
+      if ((r.alt2Count || 0) > 0) s += `A2(${r.alt2Count})`;
+      if ((r.alt3Count || 0) > 0) s += `A3(${r.alt3Count})`;
+      relativeResult = s;
+    } else {
+      relativeResult = r.averageScore > 0 ? r.averageScore.toFixed(1) : "—";
+    }
+
+    return {
+      bib: r.competitor.bib,
+      name: r.competitor.name,
+      rank: r.rank,
+      cells,
+      relativeResult,
+      isAllNo: contest.judgingStyle === "callback" && r.yesCount === 0 && (r.altCount || 0) === 0
+    };
+  });
 
   const resultColumnLabel =
     contest.judgingStyle === "placement" ? "Placements" : contest.judgingStyle === "callback" ? "Callback Tally" : "Raw Avg";
@@ -98,9 +114,12 @@ function buildMatrix(
   return { judgeNames, rows, resultColumnLabel };
 }
 
-export default function ScoringDashboard({ settings, competitors, heats, scores, isDarkMode, onRefresh }: ScoringDashboardProps) {
+export default function ScoringDashboard({ settings, competitors, heats, scores, isDarkMode, onRefresh, onUpdateSettings }: ScoringDashboardProps) {
   const [expandedIds, setExpandedIds] = useState<Record<string, boolean>>({});
   const [divisionFilter, setDivisionFilter] = useState<string>("All");
+  const [sortMode, setSortMode] = useState<SortMode>("score");
+  const [hideAllNo, setHideAllNo] = useState(false);
+  const [publishBusyId, setPublishBusyId] = useState<string | null>(null);
 
   const completed = settings.completedResults || [];
 
@@ -132,6 +151,18 @@ export default function ScoringDashboard({ settings, competitors, heats, scores,
     return <ListOrdered className="w-3 h-3" />;
   };
 
+  const togglePublish = async (heatId: string) => {
+    setPublishBusyId(heatId);
+    try {
+      const current = settings.publishedHeatIds || [];
+      const isPub = current.includes(heatId);
+      const updated = isPub ? current.filter((id) => id !== heatId) : [...current, heatId];
+      await onUpdateSettings({ publishedHeatIds: updated });
+    } finally {
+      setPublishBusyId(null);
+    }
+  };
+
   return (
     <div className="max-w-5xl mx-auto py-8">
       {/* Header */}
@@ -148,9 +179,9 @@ export default function ScoringDashboard({ settings, competitors, heats, scores,
               Scoring &amp; Results Ledger
             </h1>
             <p className="text-xs text-slate-400 mt-1 max-w-lg leading-relaxed">
-              Every contest completed by the admin's Complete Contest action lands here — the permanent
-              record judges' submitted score sheets are compiled into once a heat is closed out. Cleared
-              on the next full database reset.
+              A static archive of scored contests only — a contest lands here once every judge has submitted
+              and finalized their sheet, and it never changes again on its own. Cleared on the next full
+              database reset.
             </p>
           </div>
         </div>
@@ -196,7 +227,7 @@ export default function ScoringDashboard({ settings, competitors, heats, scores,
 
       {/* Division filter */}
       {divisions.length > 1 && (
-        <div className="flex items-center gap-2 mb-4 flex-wrap">
+        <div className="flex items-center gap-2 mb-3 flex-wrap">
           <span className="flex items-center gap-1 text-[10px] font-mono uppercase tracking-wider text-slate-400">
             <Filter className="w-3 h-3" /> Division
           </span>
@@ -218,16 +249,64 @@ export default function ScoringDashboard({ settings, competitors, heats, scores,
         </div>
       )}
 
+      {/* Sheet display controls (apply to every expanded scoring sheet below) */}
+      <div className="flex items-center gap-4 mb-5 flex-wrap">
+        <div className="flex items-center gap-2 flex-wrap">
+          <span className="flex items-center gap-1 text-[10px] font-mono uppercase tracking-wider text-slate-400">
+            Sort
+          </span>
+          <button
+            id="scoring-sort-score-btn"
+            onClick={() => setSortMode("score")}
+            className={`flex items-center gap-1 px-2.5 py-1 rounded-lg text-[11px] font-semibold border transition-all ${
+              sortMode === "score"
+                ? "bg-indigo-600 border-indigo-600 text-white"
+                : isDarkMode
+                  ? "bg-slate-900 border-slate-800 text-slate-400 hover:border-slate-700"
+                  : "bg-white border-slate-200 text-slate-500 hover:border-slate-300"
+            }`}
+          >
+            <ArrowDownWideNarrow className="w-3 h-3" /> Score (High to Low)
+          </button>
+          <button
+            id="scoring-sort-bib-btn"
+            onClick={() => setSortMode("bib")}
+            className={`flex items-center gap-1 px-2.5 py-1 rounded-lg text-[11px] font-semibold border transition-all ${
+              sortMode === "bib"
+                ? "bg-indigo-600 border-indigo-600 text-white"
+                : isDarkMode
+                  ? "bg-slate-900 border-slate-800 text-slate-400 hover:border-slate-700"
+                  : "bg-white border-slate-200 text-slate-500 hover:border-slate-300"
+            }`}
+          >
+            <ArrowDownAZ className="w-3 h-3" /> Bib Number
+          </button>
+        </div>
+
+        <label className="flex items-center gap-1.5 text-[11px] font-semibold text-slate-400 cursor-pointer select-none">
+          <input
+            id="scoring-hide-all-no-toggle"
+            type="checkbox"
+            checked={hideAllNo}
+            onChange={(e) => setHideAllNo(e.target.checked)}
+            className="cursor-pointer"
+          />
+          <EyeOff className="w-3 h-3" />
+          Hide All-No Competitors
+        </label>
+      </div>
+
       {/* Results ledger */}
       {visible.length === 0 ? (
         <div className={`py-16 text-center rounded-2xl border ${isDarkMode ? "bg-slate-900/40 border-slate-800 text-slate-500" : "bg-white border-slate-200 text-slate-400"} text-xs font-mono italic`}>
-          No contests have been sent to Scoring yet. Complete a contest from the Live Contest tab in Admin to populate this ledger.
+          No contests have been sent to Scoring yet. A contest lands here once the admin runs Complete Contest — which only becomes available after every assigned judge has submitted and finalized their sheet.
         </div>
       ) : (
         <div className="space-y-4">
           {visible.slice().reverse().map((contest) => {
             const isExpanded = !!expandedIds[contest.id];
-            const matrix = isExpanded ? buildMatrix(contest, heats, competitors, scores) : null;
+            const matrix = isExpanded ? buildMatrix(contest, heats, competitors, scores, sortMode, hideAllNo) : null;
+            const isPublished = (settings.publishedHeatIds || []).includes(contest.heatId);
             return (
               <div
                 key={contest.id}
@@ -258,7 +337,29 @@ export default function ScoringDashboard({ settings, competitors, heats, scores,
                       </span>
                     </div>
                   </div>
-                  {isExpanded ? <ChevronUp className="w-4 h-4 text-slate-400 flex-shrink-0" /> : <ChevronDown className="w-4 h-4 text-slate-400 flex-shrink-0" />}
+
+                  <div className="flex items-center gap-2 flex-shrink-0">
+                    <button
+                      type="button"
+                      id={`scoring-publish-toggle-${contest.id}`}
+                      disabled={publishBusyId === contest.heatId}
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        togglePublish(contest.heatId);
+                      }}
+                      title={isPublished ? "Visible on the public Results Terminal — click to hide" : "Hidden from the public Results Terminal — click to publish"}
+                      className={`px-2 py-1 text-[10px] font-bold rounded-lg border cursor-pointer transition-colors ${
+                        isPublished
+                          ? "bg-emerald-500/10 border-emerald-500/25 text-emerald-500 hover:bg-emerald-500/20"
+                          : isDarkMode
+                            ? "bg-slate-800 border-slate-700 text-slate-400 hover:bg-slate-750"
+                            : "bg-slate-100 border-slate-200 text-slate-500 hover:bg-slate-200"
+                      }`}
+                    >
+                      {isPublished ? "Published" : "Hidden"}
+                    </button>
+                    {isExpanded ? <ChevronUp className="w-4 h-4 text-slate-400 flex-shrink-0" /> : <ChevronDown className="w-4 h-4 text-slate-400 flex-shrink-0" />}
+                  </div>
                 </div>
 
                 {isExpanded && (
@@ -266,6 +367,10 @@ export default function ScoringDashboard({ settings, competitors, heats, scores,
                     {!matrix ? (
                       <p className="text-xs text-slate-400 italic py-4 text-center">
                         The original heat record for this contest is no longer available (it may have been deleted), so the judge-by-judge scoring sheet can't be rebuilt.
+                      </p>
+                    ) : matrix.rows.length === 0 ? (
+                      <p className="text-xs text-slate-400 italic py-4 text-center">
+                        Every competitor in this contest received all "No" callbacks, and they're currently hidden. Turn off "Hide All-No Competitors" above to see the full sheet.
                       </p>
                     ) : (
                       <div className="overflow-x-auto">
@@ -286,7 +391,7 @@ export default function ScoringDashboard({ settings, competitors, heats, scores,
                               return (
                                 <tr
                                   key={row.bib}
-                                  className={`border-b last:border-0 ${isDarkMode ? "border-slate-800/50" : "border-slate-100"} ${isPodium ? "bg-amber-500/[0.03]" : ""}`}
+                                  className={`border-b last:border-0 ${isDarkMode ? "border-slate-800/50" : "border-slate-100"} ${isPodium ? "bg-amber-500/[0.03]" : row.isAllNo ? "opacity-50" : ""}`}
                                 >
                                   <td className="p-2 text-center font-mono font-bold text-slate-400">
                                     {row.bib}
@@ -319,8 +424,9 @@ export default function ScoringDashboard({ settings, competitors, heats, scores,
       )}
 
       <div className={`mt-8 p-4 rounded-xl border text-center ${isDarkMode ? "bg-slate-900/30 border-slate-800/60 text-slate-400" : "bg-white border-slate-200 text-slate-500"} text-[11px] leading-relaxed max-w-2xl mx-auto`}>
-        💡 Scoring is the internal system of record. Publicly-facing standings and callback boards live on the
-        separate Results terminal — this ledger is where finalized judge decisions are archived contest by contest.
+        💡 Scoring is the internal system of record. Use the Published/Hidden toggle above to control what appears on
+        the separate public Results Terminal — this ledger itself is where finalized judge decisions are archived,
+        contest by contest, and never updates on its own.
       </div>
     </div>
   );
