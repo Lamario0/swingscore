@@ -692,9 +692,78 @@ export default function AdminPanel({
 
   const nextPhaseOptions = liveHeat ? getNextPhaseOptions(liveHeat.heatType) : [];
 
-  // One row of the live rankings preview: rank, bib, name, points, and a clear
-  // pass/fail cut -- green for qualified, amber for alternate, grey for cut.
-  const renderLiveRankRow = (r: (typeof liveHeatResults)[number]) => (
+  // Fallback advancement source: once "Complete Heat" is clicked, the heat
+  // stops being `liveHeat` (currentHeatId moves on/clears), so the section
+  // above disappears. Without this, there'd be no way to create the next
+  // round from a heat's finalists after completing it -- the admin would
+  // have to manually rebuild the roster in the Next tab. This mirrors the
+  // live section but re-derives from the last entry in completedResults
+  // instead of the live heat. It deliberately RECOMPUTES via calculateHeatResults
+  // (today's scoring engine) rather than trusting that entry's frozen `rankings`
+  // snapshot: `rankings` is the historical announcement record (and should never
+  // change retroactively -- PlatformPortal displays it as-is), but if it was
+  // captured under an older/buggier build, advancing the WRONG competitors from
+  // a stale snapshot would be a real, consequential mistake. Re-running the
+  // current engine against the original heat/scores plus the quotas and judge
+  // roster actually in effect at completion time (frozen on configSnapshot;
+  // falls back to live settings for contests completed before that field
+  // existed) gives the correct call either way. Hidden once a Next Contest has
+  // actually been locked in, and naturally never overlaps with the live section
+  // above (a heat only enters completedResults at the same moment it stops
+  // being liveHeat).
+  const lastCompletedResult = settings.completedResults && settings.completedResults.length > 0
+    ? settings.completedResults[settings.completedResults.length - 1]
+    : null;
+  const lastCompletedHeat = lastCompletedResult ? heats.find((h) => h.id === lastCompletedResult.heatId) : undefined;
+  const lastCompletedConfig = lastCompletedResult?.configSnapshot;
+  const lastCompletedCallbackCount = lastCompletedConfig?.callbackCount ?? (settings.callbackCount || 5);
+  const lastCompletedAlternateCount = lastCompletedConfig?.alternateCount ?? (settings.alternateCount !== undefined ? settings.alternateCount : 2);
+  const lastCompletedSettingsForCalc: AppSettings = lastCompletedConfig
+    ? {
+        ...settings,
+        judgeNames: lastCompletedConfig.judgeNames ?? settings.judgeNames,
+        judgeRoles: lastCompletedConfig.judgeRoles ?? settings.judgeRoles,
+        chiefJudgeName: lastCompletedConfig.chiefJudgeName ?? settings.chiefJudgeName,
+        chiefJudgeRole: lastCompletedConfig.chiefJudgeRole ?? settings.chiefJudgeRole
+      }
+    : settings;
+  const lastCompletedResults = (lastCompletedResult && lastCompletedHeat)
+    ? calculateHeatResults(
+        lastCompletedHeat,
+        competitors,
+        scores,
+        lastCompletedResult.judgingStyle,
+        lastCompletedCallbackCount,
+        lastCompletedAlternateCount,
+        lastCompletedConfig?.callbackCountLeaders,
+        lastCompletedConfig?.callbackCountFollowers,
+        lastCompletedConfig?.alternateCountLeaders,
+        lastCompletedConfig?.alternateCountFollowers,
+        lastCompletedSettingsForCalc
+      )
+    : [];
+  const lastCompletedIsMixed = !!lastCompletedHeat && lastCompletedHeat.role === "Mixed" && lastCompletedResult?.heatType !== "Finals";
+  const lastCompletedRankedLeads = lastCompletedIsMixed
+    ? lastCompletedResults.filter((r) => r.competitor.role === "Lead").sort((a, b) => a.rank - b.rank)
+    : [];
+  const lastCompletedRankedFollows = lastCompletedIsMixed
+    ? lastCompletedResults.filter((r) => r.competitor.role === "Follow").sort((a, b) => a.rank - b.rank)
+    : [];
+  const lastCompletedRankedFlat = lastCompletedIsMixed
+    ? []
+    : [...lastCompletedResults].sort((a, b) => a.rank - b.rank);
+  const showAdvanceCompletedCard = !!lastCompletedResult
+    && lastCompletedResult.heatType !== "Finals"
+    && !settings.nextContestConfigLocked;
+  const lastCompletedNextPhaseOptions = lastCompletedResult ? getNextPhaseOptions(lastCompletedResult.heatType) : [];
+
+  // One row of the rankings preview -- shared by the still-live heat's rankings
+  // and the last-completed-contest advancement card. rank, bib, name, points,
+  // and a clear pass/fail cut: green for qualified, amber for alternate, grey
+  // for cut. `judgingStyleOverride` lets the completed-contest card show its
+  // own frozen judging style even if the live settings have since moved on to
+  // a different contest.
+  const renderLiveRankRow = (r: (typeof liveHeatResults)[number], judgingStyleOverride?: JudgingStyle) => (
     <tr
       key={r.competitor.bib}
       className={`border-b last:border-0 ${isDarkMode ? "border-slate-800/50" : "border-slate-100"} ${
@@ -711,7 +780,7 @@ export default function AdminPanel({
       <td className="p-2 text-center font-mono font-bold text-violet-500">#{r.competitor.bib}</td>
       <td className={`p-2 font-medium ${r.qualified ? "" : "opacity-70"}`}>{r.competitor.name}</td>
       <td className="p-2 text-right font-mono font-semibold">
-        {(settings.judgingStyle || "raw") === "raw" ? r.averageScore.toFixed(2) : `${(r.prelimPoints || 0).toFixed(1)} pts`}
+        {(judgingStyleOverride || settings.judgingStyle || "raw") === "raw" ? r.averageScore.toFixed(2) : `${(r.prelimPoints || 0).toFixed(1)} pts`}
       </td>
       <td className="p-2 text-right">
         <span className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-bold ${
@@ -929,75 +998,120 @@ export default function AdminPanel({
     }));
   };
 
+  // Shared by both advancement paths below (still-live heat, and the last
+  // completed heat once "Complete Heat" has already moved past it): builds
+  // and queues the next round's heat from a pre-computed set of qualified
+  // bibs. Finals targets pair qualified Leads/Follows into couples the same
+  // way Auto-fill Next Heat already does for Finals/Routine heats.
+  const createAdvancementHeat = async (
+    targetHeatType: "Prelim" | "Semi-Final" | "Quarter Final" | "Finals",
+    opts: {
+      isMixed: boolean;
+      qualifiedLeadBibs: string[];
+      qualifiedFollowBibs: string[];
+      qualifiedFlatBibs: string[];
+      contestTypeForNext: "Jack & Jill" | "Strictly Swing" | "Routine";
+      divisionForNext: string;
+    }
+  ): Promise<boolean> => {
+    const isCouplesTarget = targetHeatType === "Finals";
+
+    let finalBibs: string[] = [];
+    let finalCouples: { id: string; leadBib: string; followBib: string }[] = [];
+
+    if (opts.isMixed) {
+      if (isCouplesTarget) {
+        const couplesCount = Math.max(opts.qualifiedLeadBibs.length, opts.qualifiedFollowBibs.length);
+        for (let i = 0; i < couplesCount; i++) {
+          const lead = opts.qualifiedLeadBibs[i] || "";
+          const follow = opts.qualifiedFollowBibs[i] || "";
+          finalCouples.push({ id: `${lead}_${follow}`, leadBib: lead, followBib: follow });
+        }
+        finalBibs = finalCouples.map(c => c.id);
+      } else {
+        finalBibs = [...opts.qualifiedLeadBibs, ...opts.qualifiedFollowBibs];
+      }
+    } else if (isCouplesTarget) {
+      alert("Can't create a Finals (couples) round directly from this heat: it isn't a Mixed Leaders+Followers heat, so there's no way to pair qualifiers into couples automatically. Build the Finals heat manually in the Next tab instead.");
+      return false;
+    } else {
+      finalBibs = opts.qualifiedFlatBibs;
+    }
+
+    if (finalBibs.length === 0) {
+      alert("No qualified competitors were found to carry forward. Check the callback/alternate quotas before creating the next round.");
+      return false;
+    }
+
+    const formattedName = `${opts.divisionForNext} ${opts.contestTypeForNext} - ${targetHeatType}`;
+
+    await onCreateHeat({
+      name: formattedName,
+      division: opts.divisionForNext,
+      role: "Mixed",
+      competitorBibs: finalBibs,
+      couples: finalCouples.length > 0 ? finalCouples : undefined,
+      heatType: targetHeatType,
+      contestType: opts.contestTypeForNext
+    }, "next");
+
+    await onUpdateSettings({
+      nextContestType: opts.contestTypeForNext,
+      nextDivision: opts.divisionForNext,
+      nextHeatType: targetHeatType,
+      nextJudgingStyle: targetHeatType === "Finals" ? "placement" : "raw",
+      nextContestConfigLocked: true
+    } as any);
+
+    setActiveHeatControlTab("next");
+    const totalFinalists = isCouplesTarget ? finalCouples.length * 2 : finalBibs.length;
+    const entryNoun = isCouplesTarget ? `${finalBibs.length} couple${finalBibs.length === 1 ? "" : "s"}` : `${finalBibs.length} competitor${finalBibs.length === 1 ? "" : "s"}`;
+    alert(`${targetHeatType} heat created from ${totalFinalists} finalist${totalFinalists === 1 ? "" : "s"} (${entryNoun}) and queued as the Next Contest.`);
+    return true;
+  };
+
   // Auto-creates the next round's heat pre-populated with ONLY the just-completed
   // live heat's qualified (callback-cut) competitors, and queues it as the Next
   // Contest -- the quick alternative to manually rebuilding the roster in the
-  // Next tab. Finals targets pair qualified Leads/Follows into couples the same
-  // way Auto-fill Next Heat already does for Finals/Routine heats.
+  // Next tab. Only usable while the round is still live (before "Complete Heat").
   const handleCreateNextContestFromFinalists = async (targetHeatType: "Prelim" | "Semi-Final" | "Quarter Final" | "Finals") => {
     if (!liveHeat) return;
     setCreateNextPhaseBusy(targetHeatType);
     try {
-      const contestTypeForNext = liveHeat.contestType || settings.contestType || "Jack & Jill";
-      const divisionForNext = liveHeat.division;
-      const isCouplesTarget = targetHeatType === "Finals";
-
-      let finalBibs: string[] = [];
-      let finalCouples: { id: string; leadBib: string; followBib: string }[] = [];
-
-      if (liveHeatHasDistinctRoles) {
-        const qualifiedLeadBibs = liveHeatRankedLeads.filter(r => r.qualified).map(r => r.competitor.bib);
-        const qualifiedFollowBibs = liveHeatRankedFollows.filter(r => r.qualified).map(r => r.competitor.bib);
-        if (isCouplesTarget) {
-          const couplesCount = Math.max(qualifiedLeadBibs.length, qualifiedFollowBibs.length);
-          for (let i = 0; i < couplesCount; i++) {
-            const lead = qualifiedLeadBibs[i] || "";
-            const follow = qualifiedFollowBibs[i] || "";
-            finalCouples.push({ id: `${lead}_${follow}`, leadBib: lead, followBib: follow });
-          }
-          finalBibs = finalCouples.map(c => c.id);
-        } else {
-          finalBibs = [...qualifiedLeadBibs, ...qualifiedFollowBibs];
-        }
-      } else if (isCouplesTarget) {
-        alert("Can't create a Finals (couples) round directly from this heat: it isn't a Mixed Leaders+Followers heat, so there's no way to pair qualifiers into couples automatically. Build the Finals heat manually in the Next tab instead.");
-        return;
-      } else {
-        finalBibs = liveHeatRankedFlat.filter(r => r.qualified).map(r => r.competitor.bib);
-      }
-
-      if (finalBibs.length === 0) {
-        alert("No qualified competitors were found to carry forward. Check the callback/alternate quotas before creating the next round.");
-        return;
-      }
-
-      const formattedName = `${divisionForNext} ${contestTypeForNext} - ${targetHeatType}`;
-
-      await onCreateHeat({
-        name: formattedName,
-        division: divisionForNext,
-        role: "Mixed",
-        competitorBibs: finalBibs,
-        couples: finalCouples.length > 0 ? finalCouples : undefined,
-        heatType: targetHeatType,
-        contestType: contestTypeForNext
-      }, "next");
-
-      await onUpdateSettings({
-        nextContestType: contestTypeForNext,
-        nextDivision: divisionForNext,
-        nextHeatType: targetHeatType,
-        nextJudgingStyle: targetHeatType === "Finals" ? "placement" : "raw",
-        nextContestConfigLocked: true
-      } as any);
-
-      setActiveHeatControlTab("next");
-      const totalFinalists = isCouplesTarget ? finalCouples.length * 2 : finalBibs.length;
-      const entryNoun = isCouplesTarget ? `${finalBibs.length} couple${finalBibs.length === 1 ? "" : "s"}` : `${finalBibs.length} competitor${finalBibs.length === 1 ? "" : "s"}`;
-      alert(`${targetHeatType} heat created from ${totalFinalists} finalist${totalFinalists === 1 ? "" : "s"} (${entryNoun}) and queued as the Next Contest.`);
+      await createAdvancementHeat(targetHeatType, {
+        isMixed: liveHeatHasDistinctRoles,
+        qualifiedLeadBibs: liveHeatRankedLeads.filter(r => r.qualified).map(r => r.competitor.bib),
+        qualifiedFollowBibs: liveHeatRankedFollows.filter(r => r.qualified).map(r => r.competitor.bib),
+        qualifiedFlatBibs: liveHeatRankedFlat.filter(r => r.qualified).map(r => r.competitor.bib),
+        contestTypeForNext: liveHeat.contestType || settings.contestType || "Jack & Jill",
+        divisionForNext: liveHeat.division
+      });
     } catch (err) {
       console.error("Failed to create next contest from finalists:", err);
       alert("Failed to create the next contest from finalists.");
+    } finally {
+      setCreateNextPhaseBusy(null);
+    }
+  };
+
+  // Same as above, but for when "Complete Heat" has already been clicked and
+  // the round is no longer `liveHeat` -- sources qualified bibs from the last
+  // entry in completedResults instead of live scores.
+  const handleCreateNextContestFromCompleted = async (targetHeatType: "Prelim" | "Semi-Final" | "Quarter Final" | "Finals") => {
+    if (!lastCompletedResult) return;
+    setCreateNextPhaseBusy(targetHeatType);
+    try {
+      await createAdvancementHeat(targetHeatType, {
+        isMixed: lastCompletedIsMixed,
+        qualifiedLeadBibs: lastCompletedRankedLeads.filter(r => r.qualified).map(r => r.competitor.bib),
+        qualifiedFollowBibs: lastCompletedRankedFollows.filter(r => r.qualified).map(r => r.competitor.bib),
+        qualifiedFlatBibs: lastCompletedRankedFlat.filter(r => r.qualified).map(r => r.competitor.bib),
+        contestTypeForNext: lastCompletedHeat?.contestType || settings.contestType || "Jack & Jill",
+        divisionForNext: lastCompletedResult.division
+      });
+    } catch (err) {
+      console.error("Failed to create next contest from the last completed heat:", err);
+      alert("Failed to create the next contest from the last completed heat.");
     } finally {
       setCreateNextPhaseBusy(null);
     }
@@ -4308,7 +4422,7 @@ export default function AdminPanel({
                       <th className="p-2 text-right">Cut</th>
                     </tr>
                   </thead>
-                  <tbody>{liveHeatRankedLeads.map(renderLiveRankRow)}</tbody>
+                  <tbody>{liveHeatRankedLeads.map((r) => renderLiveRankRow(r))}</tbody>
                 </table>
               </div>
             </div>
@@ -4325,7 +4439,7 @@ export default function AdminPanel({
                       <th className="p-2 text-right">Cut</th>
                     </tr>
                   </thead>
-                  <tbody>{liveHeatRankedFollows.map(renderLiveRankRow)}</tbody>
+                  <tbody>{liveHeatRankedFollows.map((r) => renderLiveRankRow(r))}</tbody>
                 </table>
               </div>
             </div>
@@ -4342,7 +4456,7 @@ export default function AdminPanel({
                   <th className="p-2 text-right">Cut</th>
                 </tr>
               </thead>
-              <tbody>{liveHeatRankedFlat.map(renderLiveRankRow)}</tbody>
+              <tbody>{liveHeatRankedFlat.map((r) => renderLiveRankRow(r))}</tbody>
             </table>
           </div>
         )}
@@ -4358,6 +4472,99 @@ export default function AdminPanel({
                   id={`create-next-${phase.replace(/\s+/g, "-").toLowerCase()}-btn`}
                   disabled={createNextPhaseBusy !== null}
                   onClick={() => handleCreateNextContestFromFinalists(phase)}
+                  className="px-3 py-2 rounded-xl text-xs font-bold bg-violet-600 hover:bg-violet-700 text-white shadow-md transition-all flex items-center gap-1.5 disabled:opacity-50 cursor-pointer"
+                >
+                  <Sparkles className="w-3.5 h-3.5" />
+                  {createNextPhaseBusy === phase ? "Creating..." : `Create ${phase} Heat`}
+                </button>
+              ))}
+            </div>
+          </div>
+        )}
+      </div>
+    )}
+
+    {/* Advance Last Completed Contest -- the "Complete Heat" button already ran
+        (so the round above is no longer `liveHeat`), but its finalists haven't
+        been carried into a Next Contest yet. */}
+    {showAdvanceCompletedCard && lastCompletedResult && (
+      <div className={`p-6 rounded-2xl border transition-all ${isDarkMode ? "bg-slate-900 border-slate-800 text-slate-100" : "bg-white border-slate-200 shadow-sm text-slate-800"}`}>
+        <h2 className="text-sm font-bold tracking-tight mb-1 flex items-center gap-1.5">
+          <Trophy className="w-4 h-4 text-violet-500" />
+          Advance Last Completed Contest
+        </h2>
+        <p className="text-[11px] text-slate-400 mb-4 leading-relaxed">
+          <span className="font-semibold text-slate-300">{lastCompletedResult.name}</span> was completed at {lastCompletedResult.timestamp}.{" "}
+          <span className="text-green-500 font-semibold">green</span> rows made the callback cut,{" "}
+          <span className="text-amber-500 font-semibold">amber</span> rows are alternates, and{" "}
+          <span className="text-slate-400 font-semibold">grey</span> rows did not pass.
+        </p>
+
+        {lastCompletedIsMixed ? (
+          <div className="space-y-5">
+            <div>
+              <p className="text-[10px] font-semibold text-slate-400 font-mono uppercase tracking-wider mb-2">Leaders</p>
+              <div className="overflow-x-auto rounded-xl border border-slate-200 dark:border-slate-800">
+                <table className="w-full text-left border-collapse text-xs">
+                  <thead>
+                    <tr className={`${isDarkMode ? "bg-slate-800/50 text-slate-300" : "bg-slate-50 text-slate-500"} text-[10px] font-semibold font-mono border-b border-slate-200 dark:border-slate-800`}>
+                      <th className="p-2 w-14 text-center">Rank</th>
+                      <th className="p-2 w-16 text-center">Bib</th>
+                      <th className="p-2">Name</th>
+                      <th className="p-2 text-right">{lastCompletedResult.judgingStyle === "callback" ? "Points" : "Avg Score"}</th>
+                      <th className="p-2 text-right">Cut</th>
+                    </tr>
+                  </thead>
+                  <tbody>{lastCompletedRankedLeads.map((r) => renderLiveRankRow(r, lastCompletedResult.judgingStyle))}</tbody>
+                </table>
+              </div>
+            </div>
+            <div>
+              <p className="text-[10px] font-semibold text-slate-400 font-mono uppercase tracking-wider mb-2">Followers</p>
+              <div className="overflow-x-auto rounded-xl border border-slate-200 dark:border-slate-800">
+                <table className="w-full text-left border-collapse text-xs">
+                  <thead>
+                    <tr className={`${isDarkMode ? "bg-slate-800/50 text-slate-300" : "bg-slate-50 text-slate-500"} text-[10px] font-semibold font-mono border-b border-slate-200 dark:border-slate-800`}>
+                      <th className="p-2 w-14 text-center">Rank</th>
+                      <th className="p-2 w-16 text-center">Bib</th>
+                      <th className="p-2">Name</th>
+                      <th className="p-2 text-right">{lastCompletedResult.judgingStyle === "callback" ? "Points" : "Avg Score"}</th>
+                      <th className="p-2 text-right">Cut</th>
+                    </tr>
+                  </thead>
+                  <tbody>{lastCompletedRankedFollows.map((r) => renderLiveRankRow(r, lastCompletedResult.judgingStyle))}</tbody>
+                </table>
+              </div>
+            </div>
+          </div>
+        ) : (
+          <div className="overflow-x-auto rounded-xl border border-slate-200 dark:border-slate-800">
+            <table className="w-full text-left border-collapse text-xs">
+              <thead>
+                <tr className={`${isDarkMode ? "bg-slate-800/50 text-slate-300" : "bg-slate-50 text-slate-500"} text-[10px] font-semibold font-mono border-b border-slate-200 dark:border-slate-800`}>
+                  <th className="p-2 w-14 text-center">Rank</th>
+                  <th className="p-2 w-16 text-center">Bib</th>
+                  <th className="p-2">Name</th>
+                  <th className="p-2 text-right">{lastCompletedResult.judgingStyle === "callback" ? "Points" : "Avg Score"}</th>
+                  <th className="p-2 text-right">Cut</th>
+                </tr>
+              </thead>
+              <tbody>{lastCompletedRankedFlat.map((r) => renderLiveRankRow(r, lastCompletedResult.judgingStyle))}</tbody>
+            </table>
+          </div>
+        )}
+
+        {lastCompletedNextPhaseOptions.length > 0 && (
+          <div className="mt-5 pt-4 border-t border-slate-100 dark:border-slate-800">
+            <p className="text-[10px] font-semibold text-slate-400 font-mono uppercase tracking-wider mb-2">Create Next Contest With Finalists</p>
+            <div className="flex flex-wrap gap-2">
+              {lastCompletedNextPhaseOptions.map((phase) => (
+                <button
+                  key={phase}
+                  type="button"
+                  id={`create-next-completed-${phase.replace(/\s+/g, "-").toLowerCase()}-btn`}
+                  disabled={createNextPhaseBusy !== null}
+                  onClick={() => handleCreateNextContestFromCompleted(phase)}
                   className="px-3 py-2 rounded-xl text-xs font-bold bg-violet-600 hover:bg-violet-700 text-white shadow-md transition-all flex items-center gap-1.5 disabled:opacity-50 cursor-pointer"
                 >
                   <Sparkles className="w-3.5 h-3.5" />
@@ -4448,9 +4655,23 @@ export default function AdminPanel({
                   name: r.competitor.name,
                   averageScore: r.averageScore,
                   averagePlacement: r.averagePlacement,
+                  prelimPoints: r.prelimPoints,
                   qualified: r.qualified,
-                  isAlternate: r.isAlternate
-                }))
+                  isAlternate: r.isAlternate,
+                  alternateRank: r.alternateRank
+                })),
+                configSnapshot: {
+                  callbackCount: hCallbackCount,
+                  alternateCount: hAlternateCount,
+                  callbackCountLeaders: settings.callbackCountLeaders,
+                  callbackCountFollowers: settings.callbackCountFollowers,
+                  alternateCountLeaders: settings.alternateCountLeaders,
+                  alternateCountFollowers: settings.alternateCountFollowers,
+                  judgeNames: settings.judgeNames,
+                  judgeRoles: settings.judgeRoles,
+                  chiefJudgeName: settings.chiefJudgeName,
+                  chiefJudgeRole: settings.chiefJudgeRole
+                }
               };
 
               updatedCompletedResults = [

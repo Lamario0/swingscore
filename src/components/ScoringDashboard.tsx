@@ -61,10 +61,6 @@ function buildMatrix(
   // flags, which aren't used here), so 0 is passed for both.
   let results = calculateHeatResults(heat, competitors, scores, contest.judgingStyle, 0, 0);
 
-  if (contest.judgingStyle === "callback" && hideAllNo) {
-    results = results.filter((r) => r.yesCount > 0 || (r.altCount || 0) > 0);
-  }
-
   // Mixed, non-Finals heats are judged (and internally computed) as separate
   // Leader and Follower fields -- calculateHeatResults itself recurses into
   // that exact split, so r.competitor.role here is a real Lead/Follow role,
@@ -98,6 +94,7 @@ function buildMatrix(
     : [...results].sort(sortFn);
 
   const rows: MatrixRow[] = sorted.map((r) => {
+    const isAllNo = contest.judgingStyle === "callback" && r.yesCount === 0 && (r.altCount || 0) === 0;
     const cells: Record<string, string> = {};
     judgeNames.forEach((j) => {
       const rec = recordLookup.get(`${j}::${r.competitor.bib}`);
@@ -129,11 +126,13 @@ function buildMatrix(
 
     return {
       bib: r.competitor.bib,
-      name: r.competitor.name,
+      // Bib number and every judge's score/cell stay visible either way --
+      // only the name itself is redacted, and only when the toggle is on.
+      name: hideAllNo && isAllNo ? "" : r.competitor.name,
       rank: r.rank,
       cells,
       relativeResult,
-      isAllNo: contest.judgingStyle === "callback" && r.yesCount === 0 && (r.altCount || 0) === 0,
+      isAllNo,
       role: r.competitor.role === "Follow" ? ("Follow" as const) : ("Lead" as const)
     };
   });
@@ -323,7 +322,7 @@ export default function ScoringDashboard({ settings, competitors, heats, scores,
             className="cursor-pointer"
           />
           <EyeOff className="w-3 h-3" />
-          Hide All-No Competitors
+          Hide Names for All-No Competitors
         </label>
 
         <div className="flex items-center gap-2 flex-wrap">
@@ -429,7 +428,7 @@ export default function ScoringDashboard({ settings, competitors, heats, scores,
                       </p>
                     ) : matrix.rows.length === 0 ? (
                       <p className="text-xs text-slate-400 italic py-4 text-center">
-                        Every competitor in this contest received all "No" callbacks, and they're currently hidden. Turn off "Hide All-No Competitors" above to see the full sheet.
+                        No competitors found for this contest.
                       </p>
                     ) : (
                       <div className="overflow-x-auto">
@@ -471,7 +470,7 @@ export default function ScoringDashboard({ settings, competitors, heats, scores,
                                   </td>
                                   <td className="p-2 font-medium text-slate-700 dark:text-slate-300 whitespace-nowrap">
                                     {isPodium && (row.rank === 1 ? "🥇 " : row.rank === 2 ? "🥈 " : "🥉 ")}
-                                    {row.name}
+                                    {row.name ? row.name : <span className="italic text-slate-400">Name hidden</span>}
                                   </td>
                                   {matrix.judgeNames.map((j) => (
                                     <td key={j} className="p-2 text-center font-mono text-slate-600 dark:text-slate-300">

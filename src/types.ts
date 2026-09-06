@@ -103,9 +103,29 @@ export interface CompletedContestResult {
     name: string;
     averageScore?: number;
     averagePlacement?: number;
+    prelimPoints?: number;
     qualified?: boolean;
     isAlternate?: boolean;
+    alternateRank?: number;
   }[];
+  // The judging configuration actually in effect when this contest was completed
+  // (callback/alternate quotas, judge roster, Chief Judge) -- frozen here so that
+  // "advance to next round" can re-run today's scoring engine against the exact
+  // quotas/roster used at the time, even if the live settings have since moved on
+  // to a different contest. Optional/absent on contests completed before this
+  // field existed; callers fall back to live settings in that case.
+  configSnapshot?: {
+    callbackCount: number;
+    alternateCount: number;
+    callbackCountLeaders?: number;
+    callbackCountFollowers?: number;
+    alternateCountLeaders?: number;
+    alternateCountFollowers?: number;
+    judgeNames?: string[];
+    judgeRoles?: ("Leaders" | "Followers" | "Finals" | "None")[];
+    chiefJudgeName?: string;
+    chiefJudgeRole?: "Leaders" | "Followers" | "Both" | "Finals" | "None";
+  };
 }
 
 export interface AppState {
