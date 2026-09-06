@@ -3,13 +3,22 @@ import { Shield, Sparkles, RefreshCw, Trash2, PlusCircle, CheckSquare, Settings,
 import { Competitor, Heat, JudgingStyle, AppSettings, ScoreRecord, CallbackValue, CompletedContestResult } from "../types";
 import { calculateHeatResults, getJudgeHeatCompetitors } from "../utils/calculations";
 
+// Which phase(s) a completed non-Finals round can advance to, per the
+// contest's own progression rules. Finals is terminal (no further round).
+function getNextPhaseOptions(heatType: "Prelim" | "Semi-Final" | "Quarter Final" | "Finals" | undefined): ("Prelim" | "Semi-Final" | "Quarter Final" | "Finals")[] {
+  if (heatType === "Prelim") return ["Semi-Final", "Finals"];
+  if (heatType === "Semi-Final") return ["Quarter Final", "Finals"];
+  if (heatType === "Quarter Final") return ["Semi-Final", "Finals"];
+  return [];
+}
+
 interface AdminPanelProps {
   competitors: Competitor[];
   heats: Heat[];
   scores: ScoreRecord[];
   settings: AppSettings;
   onUpdateSettings: (newSettings: Partial<AppSettings>) => Promise<void>;
-  onCreateHeat: (heat: { name: string; division: string; role: "Lead" | "Follow" | "Mixed"; competitorBibs: string[]; heatType?: "Prelim" | "Semi-Final" | "Quarter Final" | "Finals"; contestType?: "Jack & Jill" | "Strictly Swing" | "Routine" }, target?: "live" | "next") => Promise<void>;
+  onCreateHeat: (heat: { name: string; division: string; role: "Lead" | "Follow" | "Mixed"; competitorBibs: string[]; couples?: { id: string; leadBib: string; followBib: string }[]; heatType?: "Prelim" | "Semi-Final" | "Quarter Final" | "Finals"; contestType?: "Jack & Jill" | "Strictly Swing" | "Routine" }, target?: "live" | "next") => Promise<void>;
   onDeleteHeat: (heatId: string) => Promise<void>;
   onUpdateHeat: (heatId: string, updates: { name?: string; division?: string; role?: "Lead" | "Follow" | "Mixed"; competitorBibs?: string[]; couples?: any[]; isCustom?: boolean; splits?: number[] }) => Promise<void>;
   onSimulateScores: (heatId: string) => Promise<void>;
@@ -124,6 +133,7 @@ export default function AdminPanel({
   const [draggedOverRowIndex, setDraggedOverRowIndex] = useState<number | null>(null);
   const [expandedHeatId, setExpandedHeatId] = useState<string | null>(null);
   const [reviewJudgeForHeat, setReviewJudgeForHeat] = useState<Record<string, string | null>>({});
+  const [createNextPhaseBusy, setCreateNextPhaseBusy] = useState<string | null>(null);
 
   const [collapsedCards, setCollapsedCards] = useState<Record<string, boolean>>({
     contestConfig: true,
@@ -633,6 +643,90 @@ export default function AdminPanel({
 
   const canCompleteHeat = isLiveHeatComplete;
 
+  // Live ranking preview: once a non-Finals heat is complete, show competitors
+  // ranked highest to lowest with a clear pass/fail (green/grey) cut, and offer
+  // to auto-create the next round from just the qualifiers. Finals has no
+  // callback cut (it's the last round), so this is skipped for it entirely.
+  const hLiveCallbackCount = liveHeat && liveHeat.role === "Lead"
+    ? (settings.callbackCountLeaders !== undefined ? settings.callbackCountLeaders : settings.callbackCount)
+    : liveHeat && liveHeat.role === "Follow"
+      ? (settings.callbackCountFollowers !== undefined ? settings.callbackCountFollowers : settings.callbackCount)
+      : (settings.callbackCount || 5);
+
+  const hLiveAlternateCount = liveHeat && liveHeat.role === "Lead"
+    ? (settings.alternateCountLeaders !== undefined ? settings.alternateCountLeaders : (settings.alternateCount !== undefined ? settings.alternateCount : 2))
+    : liveHeat && liveHeat.role === "Follow"
+      ? (settings.alternateCountFollowers !== undefined ? settings.alternateCountFollowers : (settings.alternateCount !== undefined ? settings.alternateCount : 2))
+      : (settings.alternateCount !== undefined ? settings.alternateCount : 2);
+
+  const liveHeatIsFinals = liveHeat?.heatType === "Finals";
+
+  const liveHeatResults = (liveHeat && !liveHeatIsFinals)
+    ? calculateHeatResults(
+        liveHeat,
+        competitors,
+        scores,
+        settings.judgingStyle || "raw",
+        hLiveCallbackCount,
+        hLiveAlternateCount,
+        settings.callbackCountLeaders,
+        settings.callbackCountFollowers,
+        settings.alternateCountLeaders,
+        settings.alternateCountFollowers,
+        settings
+      )
+    : [];
+
+  // Mixed, non-Finals heats are computed as separate Leader/Follower fields
+  // (see calculateHeatResults), so group the ranked list the same way.
+  const liveHeatHasDistinctRoles = !!liveHeat && liveHeat.role === "Mixed" && !liveHeatIsFinals;
+  const liveHeatRankedLeads = liveHeatHasDistinctRoles
+    ? [...liveHeatResults].filter(r => r.competitor.role === "Lead").sort((a, b) => a.rank - b.rank)
+    : [];
+  const liveHeatRankedFollows = liveHeatHasDistinctRoles
+    ? [...liveHeatResults].filter(r => r.competitor.role === "Follow").sort((a, b) => a.rank - b.rank)
+    : [];
+  const liveHeatRankedFlat = liveHeatHasDistinctRoles
+    ? []
+    : [...liveHeatResults].sort((a, b) => a.rank - b.rank);
+
+  const nextPhaseOptions = liveHeat ? getNextPhaseOptions(liveHeat.heatType) : [];
+
+  // One row of the live rankings preview: rank, bib, name, points, and a clear
+  // pass/fail cut -- green for qualified, amber for alternate, grey for cut.
+  const renderLiveRankRow = (r: (typeof liveHeatResults)[number]) => (
+    <tr
+      key={r.competitor.bib}
+      className={`border-b last:border-0 ${isDarkMode ? "border-slate-800/50" : "border-slate-100"} ${
+        r.qualified
+          ? "bg-green-500/10 dark:bg-green-500/[0.06]"
+          : r.isAlternate
+            ? "bg-amber-500/10 dark:bg-amber-500/[0.06]"
+            : isDarkMode ? "bg-slate-800/30 text-slate-500" : "bg-slate-100/60 text-slate-400"
+      }`}
+    >
+      <td className={`p-2 text-center font-mono font-bold ${r.qualified ? "text-green-500" : r.isAlternate ? "text-amber-500" : "text-slate-400"}`}>
+        {r.rank}
+      </td>
+      <td className="p-2 text-center font-mono font-bold text-violet-500">#{r.competitor.bib}</td>
+      <td className={`p-2 font-medium ${r.qualified ? "" : "opacity-70"}`}>{r.competitor.name}</td>
+      <td className="p-2 text-right font-mono font-semibold">
+        {(settings.judgingStyle || "raw") === "raw" ? r.averageScore.toFixed(2) : `${(r.prelimPoints || 0).toFixed(1)} pts`}
+      </td>
+      <td className="p-2 text-right">
+        <span className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-bold ${
+          r.qualified
+            ? "bg-green-500/15 text-green-500"
+            : r.isAlternate
+              ? "bg-amber-500/15 text-amber-500"
+              : "bg-slate-500/15 text-slate-400"
+        }`}>
+          {r.qualified ? "Callback" : r.isAlternate ? `Alt ${r.alternateRank}` : "Cut"}
+        </span>
+      </td>
+    </tr>
+  );
+
   // Current / Next Contest Parameters States
   const [contestType, setContestType] = useState<"Jack & Jill" | "Strictly Swing" | "Routine">(settings.contestType || "Jack & Jill");
   const [division, setDivision] = useState<string>(settings.division || "Novice");
@@ -833,6 +927,80 @@ export default function AdminPanel({
       ...prev,
       contestConfig: true,
     }));
+  };
+
+  // Auto-creates the next round's heat pre-populated with ONLY the just-completed
+  // live heat's qualified (callback-cut) competitors, and queues it as the Next
+  // Contest -- the quick alternative to manually rebuilding the roster in the
+  // Next tab. Finals targets pair qualified Leads/Follows into couples the same
+  // way Auto-fill Next Heat already does for Finals/Routine heats.
+  const handleCreateNextContestFromFinalists = async (targetHeatType: "Prelim" | "Semi-Final" | "Quarter Final" | "Finals") => {
+    if (!liveHeat) return;
+    setCreateNextPhaseBusy(targetHeatType);
+    try {
+      const contestTypeForNext = liveHeat.contestType || settings.contestType || "Jack & Jill";
+      const divisionForNext = liveHeat.division;
+      const isCouplesTarget = targetHeatType === "Finals";
+
+      let finalBibs: string[] = [];
+      let finalCouples: { id: string; leadBib: string; followBib: string }[] = [];
+
+      if (liveHeatHasDistinctRoles) {
+        const qualifiedLeadBibs = liveHeatRankedLeads.filter(r => r.qualified).map(r => r.competitor.bib);
+        const qualifiedFollowBibs = liveHeatRankedFollows.filter(r => r.qualified).map(r => r.competitor.bib);
+        if (isCouplesTarget) {
+          const couplesCount = Math.max(qualifiedLeadBibs.length, qualifiedFollowBibs.length);
+          for (let i = 0; i < couplesCount; i++) {
+            const lead = qualifiedLeadBibs[i] || "";
+            const follow = qualifiedFollowBibs[i] || "";
+            finalCouples.push({ id: `${lead}_${follow}`, leadBib: lead, followBib: follow });
+          }
+          finalBibs = finalCouples.map(c => c.id);
+        } else {
+          finalBibs = [...qualifiedLeadBibs, ...qualifiedFollowBibs];
+        }
+      } else if (isCouplesTarget) {
+        alert("Can't create a Finals (couples) round directly from this heat: it isn't a Mixed Leaders+Followers heat, so there's no way to pair qualifiers into couples automatically. Build the Finals heat manually in the Next tab instead.");
+        return;
+      } else {
+        finalBibs = liveHeatRankedFlat.filter(r => r.qualified).map(r => r.competitor.bib);
+      }
+
+      if (finalBibs.length === 0) {
+        alert("No qualified competitors were found to carry forward. Check the callback/alternate quotas before creating the next round.");
+        return;
+      }
+
+      const formattedName = `${divisionForNext} ${contestTypeForNext} - ${targetHeatType}`;
+
+      await onCreateHeat({
+        name: formattedName,
+        division: divisionForNext,
+        role: "Mixed",
+        competitorBibs: finalBibs,
+        couples: finalCouples.length > 0 ? finalCouples : undefined,
+        heatType: targetHeatType,
+        contestType: contestTypeForNext
+      }, "next");
+
+      await onUpdateSettings({
+        nextContestType: contestTypeForNext,
+        nextDivision: divisionForNext,
+        nextHeatType: targetHeatType,
+        nextJudgingStyle: targetHeatType === "Finals" ? "placement" : "raw",
+        nextContestConfigLocked: true
+      } as any);
+
+      setActiveHeatControlTab("next");
+      const totalFinalists = isCouplesTarget ? finalCouples.length * 2 : finalBibs.length;
+      const entryNoun = isCouplesTarget ? `${finalBibs.length} couple${finalBibs.length === 1 ? "" : "s"}` : `${finalBibs.length} competitor${finalBibs.length === 1 ? "" : "s"}`;
+      alert(`${targetHeatType} heat created from ${totalFinalists} finalist${totalFinalists === 1 ? "" : "s"} (${entryNoun}) and queued as the Next Contest.`);
+    } catch (err) {
+      console.error("Failed to create next contest from finalists:", err);
+      alert("Failed to create the next contest from finalists.");
+    } finally {
+      setCreateNextPhaseBusy(null);
+    }
   };
 
   // Wipes the Live Contest's slot back to a blank state: deletes its current
@@ -4110,6 +4278,97 @@ export default function AdminPanel({
           </div>
         )}
       </div>
+
+    {/* Live Heat Rankings & Advancement (non-Finals only) */}
+    {liveHeat && !liveHeatIsFinals && canCompleteHeat && (
+      <div className={`p-6 rounded-2xl border transition-all ${isDarkMode ? "bg-slate-900 border-slate-800 text-slate-100" : "bg-white border-slate-200 shadow-sm text-slate-800"}`}>
+        <h2 className="text-sm font-bold tracking-tight mb-1 flex items-center gap-1.5">
+          <Trophy className="w-4 h-4 text-violet-500" />
+          Live Heat Rankings
+        </h2>
+        <p className="text-[11px] text-slate-400 mb-4 leading-relaxed">
+          Every judge has submitted and finalized. Ranked highest to lowest below —{" "}
+          <span className="text-green-500 font-semibold">green</span> rows made the callback cut,{" "}
+          <span className="text-amber-500 font-semibold">amber</span> rows are alternates, and{" "}
+          <span className="text-slate-400 font-semibold">grey</span> rows did not pass.
+        </p>
+
+        {liveHeatHasDistinctRoles ? (
+          <div className="space-y-5">
+            <div>
+              <p className="text-[10px] font-semibold text-slate-400 font-mono uppercase tracking-wider mb-2">Leaders</p>
+              <div className="overflow-x-auto rounded-xl border border-slate-200 dark:border-slate-800">
+                <table className="w-full text-left border-collapse text-xs">
+                  <thead>
+                    <tr className={`${isDarkMode ? "bg-slate-800/50 text-slate-300" : "bg-slate-50 text-slate-500"} text-[10px] font-semibold font-mono border-b border-slate-200 dark:border-slate-800`}>
+                      <th className="p-2 w-14 text-center">Rank</th>
+                      <th className="p-2 w-16 text-center">Bib</th>
+                      <th className="p-2">Name</th>
+                      <th className="p-2 text-right">{(settings.judgingStyle || "raw") === "raw" ? "Avg Score" : "Points"}</th>
+                      <th className="p-2 text-right">Cut</th>
+                    </tr>
+                  </thead>
+                  <tbody>{liveHeatRankedLeads.map(renderLiveRankRow)}</tbody>
+                </table>
+              </div>
+            </div>
+            <div>
+              <p className="text-[10px] font-semibold text-slate-400 font-mono uppercase tracking-wider mb-2">Followers</p>
+              <div className="overflow-x-auto rounded-xl border border-slate-200 dark:border-slate-800">
+                <table className="w-full text-left border-collapse text-xs">
+                  <thead>
+                    <tr className={`${isDarkMode ? "bg-slate-800/50 text-slate-300" : "bg-slate-50 text-slate-500"} text-[10px] font-semibold font-mono border-b border-slate-200 dark:border-slate-800`}>
+                      <th className="p-2 w-14 text-center">Rank</th>
+                      <th className="p-2 w-16 text-center">Bib</th>
+                      <th className="p-2">Name</th>
+                      <th className="p-2 text-right">{(settings.judgingStyle || "raw") === "raw" ? "Avg Score" : "Points"}</th>
+                      <th className="p-2 text-right">Cut</th>
+                    </tr>
+                  </thead>
+                  <tbody>{liveHeatRankedFollows.map(renderLiveRankRow)}</tbody>
+                </table>
+              </div>
+            </div>
+          </div>
+        ) : (
+          <div className="overflow-x-auto rounded-xl border border-slate-200 dark:border-slate-800">
+            <table className="w-full text-left border-collapse text-xs">
+              <thead>
+                <tr className={`${isDarkMode ? "bg-slate-800/50 text-slate-300" : "bg-slate-50 text-slate-500"} text-[10px] font-semibold font-mono border-b border-slate-200 dark:border-slate-800`}>
+                  <th className="p-2 w-14 text-center">Rank</th>
+                  <th className="p-2 w-16 text-center">Bib</th>
+                  <th className="p-2">Name</th>
+                  <th className="p-2 text-right">{(settings.judgingStyle || "raw") === "raw" ? "Avg Score" : "Points"}</th>
+                  <th className="p-2 text-right">Cut</th>
+                </tr>
+              </thead>
+              <tbody>{liveHeatRankedFlat.map(renderLiveRankRow)}</tbody>
+            </table>
+          </div>
+        )}
+
+        {nextPhaseOptions.length > 0 && (
+          <div className="mt-5 pt-4 border-t border-slate-100 dark:border-slate-800">
+            <p className="text-[10px] font-semibold text-slate-400 font-mono uppercase tracking-wider mb-2">Create Next Contest With Finalists</p>
+            <div className="flex flex-wrap gap-2">
+              {nextPhaseOptions.map((phase) => (
+                <button
+                  key={phase}
+                  type="button"
+                  id={`create-next-${phase.replace(/\s+/g, "-").toLowerCase()}-btn`}
+                  disabled={createNextPhaseBusy !== null}
+                  onClick={() => handleCreateNextContestFromFinalists(phase)}
+                  className="px-3 py-2 rounded-xl text-xs font-bold bg-violet-600 hover:bg-violet-700 text-white shadow-md transition-all flex items-center gap-1.5 disabled:opacity-50 cursor-pointer"
+                >
+                  <Sparkles className="w-3.5 h-3.5" />
+                  {createNextPhaseBusy === phase ? "Creating..." : `Create ${phase} Heat`}
+                </button>
+              ))}
+            </div>
+          </div>
+        )}
+      </div>
+    )}
 
     {/* Standalone Complete Heat Action Card */}
     <div className={`p-6 rounded-2xl border transition-all ${

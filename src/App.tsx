@@ -235,7 +235,7 @@ export default function App() {
   };
 
   const handleCreateHeat = async (
-    heatData: { name: string; division: string; role: "Lead" | "Follow" | "Mixed"; competitorBibs: string[] },
+    heatData: { name: string; division: string; role: "Lead" | "Follow" | "Mixed"; competitorBibs: string[]; couples?: { id: string; leadBib: string; followBib: string }[]; heatType?: "Prelim" | "Semi-Final" | "Quarter Final" | "Finals"; contestType?: "Jack & Jill" | "Strictly Swing" | "Routine" },
     target: "live" | "next" = "live"
   ) => {
     const res = await fetch("/api/heats/create", {

@@ -40,23 +40,38 @@ export function calculateHeatResults(
 ): CompetitorResult[] {
   // If Mixed heat and NOT Finals, calculate results separately for Leaders and Followers
   if (heat.role === "Mixed" && heat.heatType !== "Finals") {
-    const leadHeat: Heat = {
-      ...heat,
-      role: "Lead",
-      competitorBibs: (heat.couples || []).map(couple => couple.leadBib).filter(Boolean)
-    };
-    if (leadHeat.competitorBibs.length === 0) {
-      leadHeat.competitorBibs = heat.competitorBibs.map(bibOrId => bibOrId.split("_")[0]).filter(Boolean);
+    // Split the heat's bibs into Leads and Follows. The normal case (created by
+    // Auto-fill Next Heat / Apply Contest Parameters for any non-Finals Mixed
+    // heat) is a FLAT list of individual bibs with no couples pairing at all --
+    // so split those by each competitor's own registered role. Only fall back
+    // to treating an entry as a "lead_follow" paired id (via heat.couples, or
+    // splitting on "_" for legacy data with no couples array) when it doesn't
+    // match a real competitor bib directly -- splitting on "_" unconditionally
+    // previously misparsed plain numeric bibs (no underscore), which silently
+    // dumped every competitor -- leads and follows alike -- into "leadHeat" and
+    // left followHeat empty, corrupting the callback ranking for the followers.
+    const coupleList = heat.couples || [];
+    let leadBibs: string[] = [];
+    let followBibs: string[] = [];
+    if (coupleList.length > 0) {
+      leadBibs = coupleList.map(couple => couple.leadBib).filter(Boolean);
+      followBibs = coupleList.map(couple => couple.followBib).filter(Boolean);
+    } else {
+      heat.competitorBibs.forEach((bibOrId) => {
+        const directMatch = competitors.find((c) => c.bib === bibOrId);
+        if (directMatch) {
+          if (directMatch.role === "Lead") leadBibs.push(bibOrId);
+          else if (directMatch.role === "Follow") followBibs.push(bibOrId);
+        } else if (bibOrId.includes("_")) {
+          const [leadBib, followBib] = bibOrId.split("_");
+          if (leadBib) leadBibs.push(leadBib);
+          if (followBib) followBibs.push(followBib);
+        }
+      });
     }
 
-    const followHeat: Heat = {
-      ...heat,
-      role: "Follow",
-      competitorBibs: (heat.couples || []).map(couple => couple.followBib).filter(Boolean)
-    };
-    if (followHeat.competitorBibs.length === 0) {
-      followHeat.competitorBibs = heat.competitorBibs.map(bibOrId => bibOrId.split("_")[1]).filter(Boolean);
-    }
+    const leadHeat: Heat = { ...heat, role: "Lead", competitorBibs: leadBibs };
+    const followHeat: Heat = { ...heat, role: "Follow", competitorBibs: followBibs };
 
     const leadCB = callbackCountLeaders !== undefined ? callbackCountLeaders : callbackCount;
     const followCB = callbackCountFollowers !== undefined ? callbackCountFollowers : callbackCount;
@@ -255,6 +270,25 @@ export function calculateHeatResults(
     return resObj;
   });
 
+  // Section 5: the outcome for callbacks is the sum of point values across
+  // judges; only once that's tied does the Chief Judge's own (raw) score break
+  // the tie. Shared by both the "callback" style's own sort and the
+  // callback-cut ranking computed below regardless of style.
+  const chiefJudgeNameForTiebreak = settings?.chiefJudgeName || "Chief Judge";
+  const compareByCallbackPoints = (a: CompetitorResult, b: CompetitorResult): number => {
+    const ptsA = a.prelimPoints || 0;
+    const ptsB = b.prelimPoints || 0;
+    if (ptsB !== ptsA) {
+      return ptsB - ptsA;
+    }
+    const chiefScoreA = a.scoresByJudge[chiefJudgeNameForTiebreak]?.score || 0;
+    const chiefScoreB = b.scoresByJudge[chiefJudgeNameForTiebreak]?.score || 0;
+    if (chiefScoreB !== chiefScoreA) {
+      return chiefScoreB - chiefScoreA;
+    }
+    return a.competitor.bib.localeCompare(b.competitor.bib, undefined, { numeric: true });
+  };
+
   // 4. Sort results based on the chosen judging style
   if (judgingStyle === "placement") {
     // Placements: WSDC Relative Placement (Majority) ranking system
@@ -278,21 +312,8 @@ export function calculateHeatResults(
       return a.competitor.bib.localeCompare(b.competitor.bib, undefined, { numeric: true });
     });
   } else if (judgingStyle === "callback") {
-    // Callbacks: rank by prelim points descending, then by yesCount descending, then by noCount ascending, then by bib
-    results.sort((a, b) => {
-      const ptsA = a.prelimPoints || 0;
-      const ptsB = b.prelimPoints || 0;
-      if (ptsB !== ptsA) {
-        return ptsB - ptsA;
-      }
-      if (b.yesCount !== a.yesCount) {
-        return b.yesCount - a.yesCount;
-      }
-      if (a.noCount !== b.noCount) {
-        return a.noCount - b.noCount;
-      }
-      return a.competitor.bib.localeCompare(b.competitor.bib, undefined, { numeric: true });
-    });
+    // Callbacks: rank by point total, Chief Judge score breaks ties (Section 5)
+    results.sort(compareByCallbackPoints);
   } else {
     // Raw scores: higher average is better (e.g. 95.5 is best)
     results.sort((a, b) => {
@@ -314,20 +335,7 @@ export function calculateHeatResults(
   });
 
   // 5. Calculate Callback Rankings (for prelim rounds) using point-based ranking
-  const callbackRankedResults = [...results].sort((a, b) => {
-    const ptsA = a.prelimPoints || 0;
-    const ptsB = b.prelimPoints || 0;
-    if (ptsB !== ptsA) {
-      return ptsB - ptsA;
-    }
-    if (b.yesCount !== a.yesCount) {
-      return b.yesCount - a.yesCount;
-    }
-    if (a.noCount !== b.noCount) {
-      return a.noCount - b.noCount;
-    }
-    return a.competitor.bib.localeCompare(b.competitor.bib, undefined, { numeric: true });
-  });
+  const callbackRankedResults = [...results].sort(compareByCallbackPoints);
 
   // Mark qualified competitors based on callback settings
   callbackRankedResults.forEach((res, index) => {
@@ -428,16 +436,19 @@ export function getJudgeHeatCompetitors(
   });
 }
 
+// Official WSCA Section 5 callback point values (Yes=10, Alt1=4.5, Alt2=4.3,
+// Alt3=4.2, No=0) -- see the "Callback System for Preliminary Competitions"
+// reference. The outcome for callbacks is the sum of these values across judges.
 export function getPrelimPoints(res: Partial<CompetitorResult>): number {
   if (!res.scoresByJudge) return 0;
   let totalPoints = 0;
   Object.keys(res.scoresByJudge).forEach((judgeId) => {
     const val = res.scoresByJudge[judgeId].isCallback;
-    if (val === "Yes") totalPoints += 2.0;
-    else if (val === "Alt 1" || val === "Alternate") totalPoints += 1.2;
-    else if (val === "Alt 2") totalPoints += 1.1;
-    else if (val === "Alt 3") totalPoints += 1.0;
-    else if (val === "No") totalPoints += 0.0;
+    if (val === "Yes") totalPoints += 10;
+    else if (val === "Alt 1" || val === "Alternate") totalPoints += 4.5;
+    else if (val === "Alt 2") totalPoints += 4.3;
+    else if (val === "Alt 3") totalPoints += 4.2;
+    else if (val === "No") totalPoints += 0;
   });
   return totalPoints;
 }

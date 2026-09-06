@@ -148,6 +148,16 @@ export default function JudgePortal({
     }
   }
 
+  // A plain-language statement of what this judge is scoring, shown prominently
+  // on the sheet itself so there's no ambiguity about which competitors they're
+  // responsible for.
+  const judgeRoleDescription: string =
+    judgeRole === "Both" ? "Judging Leaders & Followers (Both Sides)"
+    : judgeRole === "Leaders" ? "Judging Leaders Only"
+    : judgeRole === "Followers" ? "Judging Followers Only"
+    : judgeRole === "Finals" ? "Judging Finals (Couples)"
+    : "No Role Assigned";
+
   const activeHeat = heats.find((h) => h.id === activeHeatId);
   const targetCallbackCount = activeHeat && activeHeat.role === "Lead"
     ? (settings.callbackCountLeaders !== undefined ? settings.callbackCountLeaders : settings.callbackCount)
@@ -383,7 +393,7 @@ export default function JudgePortal({
           <div className="flex items-center gap-2">
             <span className="w-2.5 h-2.5 rounded-full bg-red-500 animate-pulse" />
             <span className="text-xs font-mono font-bold text-slate-300">
-              Logged in as: <strong className="text-violet-400">{judgeId}</strong> ({judgeRole})
+              Logged in as: <strong className="text-violet-400">{judgeId}</strong> ({judgeRoleDescription})
             </span>
           </div>
           <button
@@ -757,7 +767,7 @@ export default function JudgePortal({
           <div className="flex items-center gap-2">
             <span className="w-2.5 h-2.5 rounded-full bg-green-500 animate-pulse" />
             <span className="text-xs font-mono font-bold text-slate-300">
-              Logged in as: <strong className="text-violet-400">{judgeId}</strong> ({judgeRole})
+              Logged in as: <strong className="text-violet-400">{judgeId}</strong> ({judgeRoleDescription})
             </span>
           </div>
           <button
@@ -802,7 +812,7 @@ export default function JudgePortal({
           <div className="flex items-center gap-2">
             <span className="w-2.5 h-2.5 rounded-full bg-amber-500 animate-pulse" />
             <span className="text-xs font-mono font-bold text-slate-300">
-              Logged in as: <strong className="text-violet-400">{judgeId}</strong> ({judgeRole})
+              Logged in as: <strong className="text-violet-400">{judgeId}</strong> ({judgeRoleDescription})
             </span>
           </div>
           <button
@@ -849,7 +859,7 @@ export default function JudgePortal({
           <div className="flex items-center gap-2">
             <span className="w-2.5 h-2.5 rounded-full bg-amber-500 animate-pulse" />
             <span className="text-xs font-mono font-bold text-slate-300">
-              Logged in as: <strong className="text-violet-400">{judgeId}</strong> ({judgeRole})
+              Logged in as: <strong className="text-violet-400">{judgeId}</strong> ({judgeRoleDescription})
             </span>
           </div>
           <button
@@ -954,9 +964,19 @@ export default function JudgePortal({
     if (!canFinalize || !activeHeatId) return;
     const key = `${activeHeatId}:${judgeId}`;
     const currentFinalized = settings.finalizedSheets || [];
+    const payload: Partial<AppSettings> = {};
     if (!currentFinalized.includes(key)) {
-      const updated = [...currentFinalized, key];
-      await onUpdateSettings({ finalizedSheets: updated });
+      payload.finalizedSheets = [...currentFinalized, key];
+    }
+    // Release this judge's claimed-name slot as soon as they finalize, so the
+    // name is immediately available again (e.g. for the next round, or for
+    // someone else at a shared station) without forcing this browser's own
+    // view away from the "Finalized & Locked" confirmation below.
+    if (judgeId && (settings.claimedJudges || []).includes(judgeId)) {
+      payload.claimedJudges = (settings.claimedJudges || []).filter((name) => name !== judgeId);
+    }
+    if (Object.keys(payload).length > 0) {
+      await onUpdateSettings(payload);
     }
   };
 
@@ -985,13 +1005,16 @@ export default function JudgePortal({
       )}
 
       {/* Active Judge Status & Profile Switcher */}
-      <div className={`p-4 rounded-2xl border flex justify-between items-center transition-all ${
+      <div className={`p-4 rounded-2xl border flex flex-col sm:flex-row justify-between sm:items-center gap-3 transition-all ${
         isDarkMode ? "bg-slate-900 border-slate-800" : "bg-white border-slate-100 shadow-sm"
       }`}>
-        <div className="flex items-center gap-2">
-          <span className="w-2.5 h-2.5 rounded-full bg-green-500 animate-pulse" />
+        <div className="flex items-center gap-2 flex-wrap">
+          <span className="w-2.5 h-2.5 rounded-full bg-green-500 animate-pulse flex-shrink-0" />
           <span className="text-xs font-mono font-bold text-slate-300">
-            Adjudicator Profile: <strong className="text-violet-400">{judgeId}</strong> ({judgeRole} Engine Active)
+            Adjudicator Profile: <strong className="text-violet-400">{judgeId}</strong>
+          </span>
+          <span className="text-[10px] font-bold uppercase tracking-wider px-2.5 py-1 rounded-full bg-violet-600/15 text-violet-500 border border-violet-500/25">
+            {judgeRoleDescription}
           </span>
         </div>
         <button
