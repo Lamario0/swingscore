@@ -9,3 +9,6 @@ coverage/
 
 # JetBrains / Android Studio
 .idea/
+
+# Local runtime persistence file (server.ts) -- never commit the live contest data
+data.json

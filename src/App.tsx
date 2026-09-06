@@ -157,7 +157,16 @@ export default function App() {
   }, [fetchState]);
 
   // If the currently selected judge profile becomes disabled (role set to "None"), switch to the first enabled judge profile.
+  // Guarded on !loading: settings starts out as a hardcoded placeholder (no judgeNames/
+  // judgeRoles/chiefJudgeRole at all) until the initial fetchState() resolves. Without this
+  // guard, this effect ran against that placeholder immediately after a judge picked their
+  // profile, saw every role fall back to "None", and force-switched them to the Chief Judge
+  // profile before the real settings ever loaded -- while the judge's own name stayed marked
+  // claimed/locked from the picker's own claim update. That is why logging a judge out and
+  // picking them back in from the picker appeared to log into a different profile and
+  // re-lock the one that was just freed.
   useEffect(() => {
+    if (loading) return;
     if (!selectedJudgeId) return;
 
     const defaultNames = ["Judge A", "Judge B", "Judge C", "Judge D", "Judge E"];
@@ -183,7 +192,7 @@ export default function App() {
         setSelectedJudgeId(names[firstEnabledIdx]);
       }
     }
-  }, [settings, selectedJudgeId]);
+  }, [settings, selectedJudgeId, loading]);
 
   // Actions
   const handleRegisterCompetitor = async (competitor: { bib: string; name: string; email: string; division: string; role: "Lead" | "Follow" }) => {
