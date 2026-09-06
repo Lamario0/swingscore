@@ -57,6 +57,12 @@ export default function JudgePortal({
   const [pullProgress, setPullProgress] = useState(0);
   const [isPulling, setIsPulling] = useState(false);
   const startYRef = React.useRef(0);
+  // Tracks the last heat/judge/style/role context this component initialized local
+  // state for, so the sync effect below can tell "the judge (or someone) opened a
+  // genuinely different heat/session" apart from "the scores array just changed
+  // because a save (possibly this judge's own) round-tripped." Only the former should
+  // ever wipe local input state -- see the merge-not-overwrite fix a few lines down.
+  const lastJudgeContextRef = React.useRef<string>("");
 
   useEffect(() => {
     setTempSelectedJudge(judgeId || "");
@@ -218,31 +224,67 @@ export default function JudgePortal({
   // Serialize competitor list for this heat to safely track changes
   const competitorBibsKey = activeHeat ? activeHeat.competitorBibs.join(",") : "";
 
-  // Initialize local states when active heat or scores update
+  // Initialize local states when active heat or scores update.
+  //
+  // IMPORTANT: relevantScoresKey/competitorBibsKey change on every poll that reflects a
+  // score save -- including this judge's OWN save, since triggerSave posts the score and
+  // then the app refetches state. If this effect unconditionally reinitialized every
+  // bib's local score/callback/raw-score/status from server data on every such change, it
+  // would stomp any in-progress, not-yet-saved edit on a DIFFERENT row the instant any one
+  // row's save round-tripped -- a real "the judge's sheet refreshes / my input vanished"
+  // bug, and a violation of "never change a judge's inputs." So: only fully reinitialize
+  // when the judge actually switched to a different heat/judge/judging-style/role (a real
+  // context switch); otherwise, merge in defaults for any bib we haven't seen yet without
+  // touching bibs whose local state already exists.
   useEffect(() => {
     if (!activeHeat) return;
 
-    const initialScores: { [bib: string]: number } = {};
-    const initialCallbacks: { [bib: string]: CallbackValue } = {};
-    const initialRawScores: { [bib: string]: string } = {};
-    const initialStatus: { [bib: string]: "idle" } = {};
+    const contextKey = `${activeHeatId}::${judgeId}::${judgingStyle}::${judgeRole}`;
+    const isNewContext = contextKey !== lastJudgeContextRef.current;
+    lastJudgeContextRef.current = contextKey;
 
-    heatCompetitors.forEach((c) => {
-      // Find existing score
-      const existing = scores.find(
-        (s) => s.judgeId === judgeId && s.heatId === activeHeat.id && s.competitorBib === c.bib
-      );
+    const buildExisting = (bib: string) =>
+      scores.find((s) => s.judgeId === judgeId && s.heatId === activeHeat.id && s.competitorBib === bib);
 
-      initialScores[c.bib] = existing ? existing.score : 0;
-      initialCallbacks[c.bib] = existing ? existing.isCallback : "No";
-      initialRawScores[c.bib] = (judgingStyle === "placement" && existing && existing.isCallback !== "No") ? existing.isCallback : "";
-      initialStatus[c.bib] = "idle";
+    setLocalScores((prev) => {
+      const next = isNewContext ? {} : { ...prev };
+      heatCompetitors.forEach((c) => {
+        if (isNewContext || !(c.bib in next)) {
+          const existing = buildExisting(c.bib);
+          next[c.bib] = existing ? existing.score : 0;
+        }
+      });
+      return next;
     });
-
-    setLocalScores(initialScores);
-    setLocalCallbacks(initialCallbacks);
-    setLocalRawScores(initialRawScores);
-    setSavedStatus(initialStatus);
+    setLocalCallbacks((prev) => {
+      const next = isNewContext ? {} : { ...prev };
+      heatCompetitors.forEach((c) => {
+        if (isNewContext || !(c.bib in next)) {
+          const existing = buildExisting(c.bib);
+          next[c.bib] = existing ? existing.isCallback : "No";
+        }
+      });
+      return next;
+    });
+    setLocalRawScores((prev) => {
+      const next = isNewContext ? {} : { ...prev };
+      heatCompetitors.forEach((c) => {
+        if (isNewContext || !(c.bib in next)) {
+          const existing = buildExisting(c.bib);
+          next[c.bib] = (judgingStyle === "placement" && existing && existing.isCallback !== "No") ? existing.isCallback : "";
+        }
+      });
+      return next;
+    });
+    setSavedStatus((prev) => {
+      const next = isNewContext ? {} : { ...prev };
+      heatCompetitors.forEach((c) => {
+        if (isNewContext || !(c.bib in next)) {
+          next[c.bib] = "idle";
+        }
+      });
+      return next;
+    });
   }, [activeHeatId, judgeId, judgingStyle, relevantScoresKey, competitorBibsKey, judgeRole]);
 
   // Identity Select Screen
