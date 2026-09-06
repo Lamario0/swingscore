@@ -1003,6 +1003,36 @@ export default function AdminPanel({
   // and queues the next round's heat from a pre-computed set of qualified
   // bibs. Finals targets pair qualified Leads/Follows into couples the same
   // way Auto-fill Next Heat already does for Finals/Routine heats.
+  // Promotes the already-queued Next Contest into the Live slot, exactly the
+  // way "Complete Heat" does when a queued heat exists -- but without touching
+  // completedResults, since no contest is being completed here. Only called
+  // when there's no Live Contest to protect (guarded by the caller), so this
+  // never displaces an in-progress round.
+  const promoteQueuedToLive = async () => {
+    const promotePayload: any = {
+      currentHeatId: settings.queuedHeatId,
+      queuedHeatId: null,
+      checkInFinalized: false,
+      finalizedSheets: [],
+      nextContestConfigLocked: false,
+      ...(settings.nextContestType ? { contestType: settings.nextContestType, nextContestType: null } : {}),
+      ...(settings.nextDivision ? { division: settings.nextDivision, nextDivision: null } : {}),
+      ...(settings.nextHeatType ? { heatType: settings.nextHeatType, nextHeatType: null } : {}),
+      ...(settings.nextJudgingStyle ? { judgingStyle: settings.nextJudgingStyle, nextJudgingStyle: null } : {}),
+      ...(settings.nextCallbackCount ? { callbackCount: settings.nextCallbackCount, nextCallbackCount: null } : {}),
+      ...(settings.nextAlternateCount !== undefined ? { alternateCount: settings.nextAlternateCount, nextAlternateCount: null } : {}),
+      ...(settings.nextCallbackCountLeaders ? { callbackCountLeaders: settings.nextCallbackCountLeaders, nextCallbackCountLeaders: null } : {}),
+      ...(settings.nextCallbackCountFollowers ? { callbackCountFollowers: settings.nextCallbackCountFollowers, nextCallbackCountFollowers: null } : {}),
+      ...(settings.nextAlternateCountLeaders !== undefined ? { alternateCountLeaders: settings.nextAlternateCountLeaders, nextAlternateCountLeaders: null } : {}),
+      ...(settings.nextAlternateCountFollowers !== undefined ? { alternateCountFollowers: settings.nextAlternateCountFollowers, nextAlternateCountFollowers: null } : {}),
+      ...(settings.nextJudgeNames ? { judgeNames: settings.nextJudgeNames, nextJudgeNames: null } : {}),
+      ...(settings.nextJudgeRoles ? { judgeRoles: settings.nextJudgeRoles, nextJudgeRoles: null } : {}),
+      ...(settings.nextChiefJudgeName ? { chiefJudgeName: settings.nextChiefJudgeName, nextChiefJudgeName: null } : {}),
+      ...(settings.nextChiefJudgeRole ? { chiefJudgeRole: settings.nextChiefJudgeRole, nextChiefJudgeRole: null } : {}),
+    };
+    await onUpdateSettings(promotePayload);
+  };
+
   const createAdvancementHeat = async (
     targetHeatType: "Prelim" | "Semi-Final" | "Quarter Final" | "Finals",
     opts: {
@@ -1043,6 +1073,31 @@ export default function AdminPanel({
       return false;
     }
 
+    // Decide where the new heat lands. Read once, up front, so the decision
+    // is based on state as it was when the button was clicked:
+    //  - Nothing live or queued -> the new heat becomes Live directly, so it
+    //    doesn't sit around queued for no reason with nothing ahead of it.
+    //  - A contest is already queued (and nothing's currently Live to protect)
+    //    -> promote that queued contest to Live first, then queue this new
+    //    one behind it -- instead of silently overwriting the queued slot.
+    //  - A Live Contest is already running -> queue the new heat as before
+    //    (unchanged, existing behavior); this is the normal "prep the next
+    //    round while judges finish the current one" case.
+    //  - Both slots are already full -> refuse rather than silently bumping
+    //    whichever one would otherwise get clobbered.
+    const hasLive = !!settings.currentHeatId;
+    const hasQueued = !!settings.queuedHeatId;
+
+    if (hasLive && hasQueued) {
+      alert("Both a Live Contest and a Next Contest are already set up. Complete the Live Contest (or promote/clear the Next Contest) before creating another round.");
+      return false;
+    }
+
+    if (!hasLive && hasQueued) {
+      await promoteQueuedToLive();
+    }
+
+    const createAsLive = !hasLive && !hasQueued;
     const formattedName = `${opts.divisionForNext} ${opts.contestTypeForNext} - ${targetHeatType}`;
 
     await onCreateHeat({
@@ -1053,20 +1108,35 @@ export default function AdminPanel({
       couples: finalCouples.length > 0 ? finalCouples : undefined,
       heatType: targetHeatType,
       contestType: opts.contestTypeForNext
-    }, "next");
+    }, createAsLive ? "live" : "next");
 
-    await onUpdateSettings({
-      nextContestType: opts.contestTypeForNext,
-      nextDivision: opts.divisionForNext,
-      nextHeatType: targetHeatType,
-      nextJudgingStyle: targetHeatType === "Finals" ? "placement" : "raw",
-      nextContestConfigLocked: true
-    } as any);
+    if (createAsLive) {
+      await onUpdateSettings({
+        contestType: opts.contestTypeForNext,
+        division: opts.divisionForNext,
+        heatType: targetHeatType,
+        judgingStyle: targetHeatType === "Finals" ? "placement" : "raw",
+        contestConfigLocked: true,
+        checkInFinalized: false,
+        finalizedSheets: []
+      } as any);
+      setActiveHeatControlTab("live");
+    } else {
+      await onUpdateSettings({
+        nextContestType: opts.contestTypeForNext,
+        nextDivision: opts.divisionForNext,
+        nextHeatType: targetHeatType,
+        nextJudgingStyle: targetHeatType === "Finals" ? "placement" : "raw",
+        nextContestConfigLocked: true
+      } as any);
+      setActiveHeatControlTab("next");
+    }
 
-    setActiveHeatControlTab("next");
     const totalFinalists = isCouplesTarget ? finalCouples.length * 2 : finalBibs.length;
     const entryNoun = isCouplesTarget ? `${finalBibs.length} couple${finalBibs.length === 1 ? "" : "s"}` : `${finalBibs.length} competitor${finalBibs.length === 1 ? "" : "s"}`;
-    alert(`${targetHeatType} heat created from ${totalFinalists} finalist${totalFinalists === 1 ? "" : "s"} (${entryNoun}) and queued as the Next Contest.`);
+    const destinationNoun = createAsLive ? "made the Live Contest" : "queued as the Next Contest";
+    const promotionNote = (!hasLive && hasQueued) ? " The previously queued contest is now Live." : "";
+    alert(`${targetHeatType} heat created from ${totalFinalists} finalist${totalFinalists === 1 ? "" : "s"} (${entryNoun}) and ${destinationNoun}.${promotionNote}`);
     return true;
   };
 
