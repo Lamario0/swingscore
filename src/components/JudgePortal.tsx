@@ -593,25 +593,20 @@ export default function JudgePortal({
   };
 
   const handleCallbackChange = async (bib: string, cbVal: CallbackValue) => {
-    setLocalCallbacks((prev) => {
-      const updated = { ...prev };
-      
-      // If cbVal is an Alt rank (e.g. "Alt 1", "Alt 2", "Alt 3"),
-      // check if another competitor has that value, and reset them to "No"
-      if (cbVal !== "Yes" && cbVal !== "No") {
-        Object.keys(updated).forEach((otherBib) => {
-          if (otherBib !== bib && updated[otherBib] === cbVal) {
-            updated[otherBib] = "No";
-            triggerSave(otherBib, localScores[otherBib] || 0, "No");
-          }
-        });
-      }
-      
-      updated[bib] = cbVal;
-      return updated;
-    });
-    
+    // A judge's existing selections are never altered as a side effect of this change.
+    // If this creates a conflict (e.g. two competitors both marked "Alt 1"), that conflict
+    // is surfaced to the judge (red quota + inline indicators) rather than silently resolved.
+    setLocalCallbacks((prev) => ({ ...prev, [bib]: cbVal }));
     await triggerSave(bib, localScores[bib] || 0, cbVal);
+  };
+
+  // Returns the other competitors in this heat who currently share the same Alt N
+  // slot as `bib` — used to flag callback conflicts inline without ever mutating
+  // any judge's stored selection.
+  const getAltConflicts = (bib: string): Competitor[] => {
+    const val = localCallbacks[bib];
+    if (!val || val === "Yes" || val === "No") return [];
+    return heatCompetitors.filter((c) => c.bib !== bib && localCallbacks[c.bib] === val);
   };
 
   const triggerSave = async (bib: string, scoreVal: number, cbVal: CallbackValue) => {
@@ -1008,9 +1003,11 @@ export default function JudgePortal({
                 <span className={`text-xs font-bold font-mono block ${isQuotaReady && isQuotaSatisfied ? "text-green-500" : "text-red-500"}`}>
                   Alts: {currentAltCount}/{targetAlternateCount}
                 </span>
-                {targetAlternateCount > 1 && !areAltsSatisfied && (
+                {!areAltsSatisfied && (
                   <span className="block text-[9px] text-rose-500 font-mono mt-0.5 font-bold animate-pulse">
-                    Must assign exactly one of each: {Array.from({ length: targetAlternateCount }).map((_, i) => `Alt ${i + 1}`).join(", ")}
+                    {targetAlternateCount > 1
+                      ? `Must assign exactly one of each: ${Array.from({ length: targetAlternateCount }).map((_, i) => `Alt ${i + 1}`).join(", ")}`
+                      : "Alt conflict — see indicator(s) below"}
                   </span>
                 )}
               </div>
@@ -1118,6 +1115,13 @@ export default function JudgePortal({
             // Raw Score Format
             return (
               <React.Fragment key={c.bib}>
+              {isSplitActive && (
+                <div className="my-4 py-2.5 px-6 rounded-2xl bg-violet-600/5 dark:bg-violet-600/15 border border-dashed border-violet-500/30 text-center font-mono text-xs uppercase tracking-widest text-violet-500 font-bold flex flex-col items-center justify-center gap-1.5 print:break-before-page">
+                  <div className="h-3 w-px bg-violet-500/30 mb-0.5" />
+                  <span>GAP: HEAT {nextHeatNum} STARTING HERE</span>
+                  <div className="h-3 w-px bg-violet-500/30 mt-0.5" />
+                </div>
+              )}
                 <div
                   className={`p-5 rounded-2xl border transition-all relative ${
                     isTied
@@ -1223,14 +1227,7 @@ export default function JudgePortal({
                   </div>
                 </div>
               </div>
-              {isSplitActive && (
-                <div className="my-4 py-2.5 px-6 rounded-2xl bg-violet-600/5 dark:bg-violet-600/15 border border-dashed border-violet-500/30 text-center font-mono text-xs uppercase tracking-widest text-violet-500 font-bold flex flex-col items-center justify-center gap-1.5 print:break-before-page">
-                  <div className="h-3 w-px bg-violet-500/30 mb-0.5" />
-                  <span>GAP: HEAT {nextHeatNum} STARTING HERE</span>
-                  <div className="h-3 w-px bg-violet-500/30 mt-0.5" />
-                </div>
-              )}
-            </React.Fragment>
+              </React.Fragment>
             );
           }
 
@@ -1238,6 +1235,13 @@ export default function JudgePortal({
             // Callback Format
             return (
               <React.Fragment key={c.bib}>
+              {isSplitActive && (
+                <div className="my-4 py-2.5 px-6 rounded-2xl bg-violet-600/5 dark:bg-violet-600/15 border border-dashed border-violet-500/30 text-center font-mono text-xs uppercase tracking-widest text-violet-500 font-bold flex flex-col items-center justify-center gap-1.5 print:break-before-page">
+                  <div className="h-3 w-px bg-violet-500/30 mb-0.5" />
+                  <span>GAP: HEAT {nextHeatNum} STARTING HERE</span>
+                  <div className="h-3 w-px bg-violet-500/30 mt-0.5" />
+                </div>
+              )}
                 <div
                   className={`p-5 rounded-2xl border transition-all relative ${
                     isDarkMode
@@ -1260,23 +1264,38 @@ export default function JudgePortal({
                   </div>
 
                   {/* Yes/No/Alt 1, Alt 2, Alt 3 select dropdown */}
-                  <div className="min-w-[140px]">
-                    <span className="block text-[9px] font-semibold text-slate-400 font-mono uppercase tracking-wider mb-1">Callback Selection</span>
-                    <select
-                      value={callbackVal}
-                      onChange={(e) => handleCallbackChange(c.bib, e.target.value as CallbackValue)}
-                      className={`text-xs px-3 py-2 rounded-xl border focus:outline-none focus:ring-2 focus:ring-violet-500 font-mono w-full ${
-                        isDarkMode
-                          ? "bg-slate-800 border-slate-700 text-slate-100"
-                          : "bg-slate-50 border-slate-200 text-slate-800"
-                      }`}
-                    >
-                      <option value="No">No (Unselected)</option>
-                      <option value="Yes">Yes (Callback)</option>
-                      {targetAlternateCount >= 1 && <option value="Alt 1">Alt 1 (Alternate 1)</option>}
-                      {targetAlternateCount >= 2 && <option value="Alt 2">Alt 2 (Alternate 2)</option>}
-                      {targetAlternateCount >= 3 && <option value="Alt 3">Alt 3 (Alternate 3)</option>}
-                    </select>
+                  <div className="min-w-[140px] flex items-center gap-2">
+                    <div>
+                      <span className="block text-[9px] font-semibold text-slate-400 font-mono uppercase tracking-wider mb-1">Callback Selection</span>
+                      <select
+                        value={callbackVal}
+                        onChange={(e) => handleCallbackChange(c.bib, e.target.value as CallbackValue)}
+                        className={`text-xs px-3 py-2 rounded-xl border focus:outline-none focus:ring-2 focus:ring-violet-500 font-mono w-full ${
+                          isDarkMode
+                            ? "bg-slate-800 border-slate-700 text-slate-100"
+                            : "bg-slate-50 border-slate-200 text-slate-800"
+                        }`}
+                      >
+                        <option value="No">No (Unselected)</option>
+                        <option value="Yes">Yes (Callback)</option>
+                        {targetAlternateCount >= 1 && <option value="Alt 1">Alt 1 (Alternate 1)</option>}
+                        {targetAlternateCount >= 2 && <option value="Alt 2">Alt 2 (Alternate 2)</option>}
+                        {targetAlternateCount >= 3 && <option value="Alt 3">Alt 3 (Alternate 3)</option>}
+                      </select>
+                    </div>
+                    {(() => {
+                      const conflicts = getAltConflicts(c.bib);
+                      if (conflicts.length === 0) return null;
+                      return (
+                        <span
+                          className="flex items-center gap-1 text-[9px] font-mono font-bold text-red-500 whitespace-nowrap self-end mb-2"
+                          title={`Also assigned to ${conflicts.map((cc) => `#${cc.bib} ${cc.name}`).join(", ")}`}
+                        >
+                          <AlertTriangle className="w-3.5 h-3.5 shrink-0" />
+                          Conflict: {conflicts.map((cc) => `#${cc.bib}`).join(", ")}
+                        </span>
+                      );
+                    })()}
                   </div>
 
                   {/* placement based off other competitors scored */}
@@ -1303,14 +1322,7 @@ export default function JudgePortal({
                   </div>
                 </div>
               </div>
-              {isSplitActive && (
-                <div className="my-4 py-2.5 px-6 rounded-2xl bg-violet-600/5 dark:bg-violet-600/15 border border-dashed border-violet-500/30 text-center font-mono text-xs uppercase tracking-widest text-violet-500 font-bold flex flex-col items-center justify-center gap-1.5 print:break-before-page">
-                  <div className="h-3 w-px bg-violet-500/30 mb-0.5" />
-                  <span>GAP: HEAT {nextHeatNum} STARTING HERE</span>
-                  <div className="h-3 w-px bg-violet-500/30 mt-0.5" />
-                </div>
-              )}
-            </React.Fragment>
+              </React.Fragment>
             );
           }
 
@@ -1326,6 +1338,13 @@ export default function JudgePortal({
 
             return (
               <React.Fragment key={c.bib}>
+              {isSplitActive && (
+                <div className="my-4 py-2.5 px-6 rounded-2xl bg-violet-600/5 dark:bg-violet-600/15 border border-dashed border-violet-500/30 text-center font-mono text-xs uppercase tracking-widest text-violet-500 font-bold flex flex-col items-center justify-center gap-1.5 print:break-before-page">
+                  <div className="h-3 w-px bg-violet-500/30 mb-0.5" />
+                  <span>GAP: HEAT {nextHeatNum} STARTING HERE</span>
+                  <div className="h-3 w-px bg-violet-500/30 mt-0.5" />
+                </div>
+              )}
                 <div
                   className={`p-5 rounded-2xl border transition-all relative ${
                     isTied
@@ -1417,14 +1436,7 @@ export default function JudgePortal({
                   </div>
                 </div>
               </div>
-              {isSplitActive && (
-                <div className="my-4 py-2.5 px-6 rounded-2xl bg-violet-600/5 dark:bg-violet-600/15 border border-dashed border-violet-500/30 text-center font-mono text-xs uppercase tracking-widest text-violet-500 font-bold flex flex-col items-center justify-center gap-1.5 print:break-before-page">
-                  <div className="h-3 w-px bg-violet-500/30 mb-0.5" />
-                  <span>GAP: HEAT {nextHeatNum} STARTING HERE</span>
-                  <div className="h-3 w-px bg-violet-500/30 mt-0.5" />
-                </div>
-              )}
-            </React.Fragment>
+              </React.Fragment>
             );
           }
 
