@@ -447,12 +447,20 @@ export default function App() {
   const handleResetDatabase = async () => {
     const res = await fetch("/api/reset", { method: "POST" });
     if (!res.ok) throw new Error("Failed to reset database");
+    // The server already clears settings.claimedJudges on reset, freeing every
+    // judge name up for anyone to pick -- but THIS browser's own remembered
+    // claim (swingscore_judge_claim) survives a server reset on its own, and
+    // would otherwise silently resume the old judge identity next time this
+    // browser opens the Judge domain. Clear it here too so a reset always
+    // means every judge picks fresh.
+    setSelectedJudgeId("");
     await fetchState();
   };
 
   const handleClearAllDatabase = async () => {
     const res = await fetch("/api/clear-all", { method: "POST" });
     if (!res.ok) throw new Error("Failed to clear database");
+    setSelectedJudgeId("");
     await fetchState();
   };
 
@@ -518,6 +526,15 @@ export default function App() {
                 // Persist the session so a page refresh doesn't force the passcode again
                 if (currentRole !== "portal") {
                   localStorage.setItem(`swingscore_auth_${currentRole}`, "true");
+                }
+                // Entering a passcode to get into the Judge domain means this
+                // browser wasn't already recognized (a fresh device, a cleared
+                // session, or someone new sitting down at this station) -- so
+                // never let it silently resume whichever judge name it may have
+                // claimed in a past session. Clear the local claim so the judge
+                // picker always shows and they choose explicitly.
+                if (currentRole === "judge") {
+                  setSelectedJudgeId("");
                 }
                 setIsAuthenticated(true);
               }}
