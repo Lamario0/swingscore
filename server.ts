@@ -2,6 +2,7 @@ import express from "express";
 import path from "path";
 import fs from "fs";
 import { createServer as createViteServer } from "vite";
+import { buildRegisteredCouples, getDivisionLockKey, isPartneredContest, validatePartnerFields } from "./src/utils/partners";
 
 interface Competitor {
   bib: string;
@@ -12,6 +13,32 @@ interface Competitor {
   checkedIn: boolean;
   scratched?: boolean;
   registryPoints?: number;
+  strictlySwing?: boolean;
+  strictlyPartner?: string;
+  strictlyDivision?: string;
+  routine?: boolean;
+  routinePartner?: string;
+  routineDivision?: string;
+}
+
+const PARTNER_FIELDS = ["strictlySwing", "strictlyPartner", "strictlyDivision", "routine", "routinePartner", "routineDivision"] as const;
+
+// Copies only the partner-contest fields present on `source`, clearing a
+// contest's partner/division whenever it's unchecked.
+function applyPartnerFields(target: Competitor, source: any) {
+  PARTNER_FIELDS.forEach((key) => {
+    if (source[key] !== undefined) {
+      (target as any)[key] = typeof source[key] === "string" ? source[key].trim() : source[key];
+    }
+  });
+  if (!target.strictlySwing) {
+    delete target.strictlyPartner;
+    delete target.strictlyDivision;
+  }
+  if (!target.routine) {
+    delete target.routinePartner;
+    delete target.routineDivision;
+  }
 }
 
 interface Heat {
@@ -231,6 +258,16 @@ function autoPopulateHeats(state: AppState) {
     if (heat.isCustom) return; // Skip custom heats to preserve manual admin modifications
 
     const div = heat.division;
+
+    // Partnered contests are always danced with the registered partner.
+    if (isPartneredContest(heat.contestType)) {
+      const { couples } = buildRegisteredCouples(state.competitors, heat.contestType!, div, (c) => c.checkedIn && !c.scratched);
+      heat.role = "Mixed";
+      heat.couples = couples;
+      heat.competitorBibs = couples.map((c) => c.id);
+      return;
+    }
+
     const leads = leadsByDiv[div] || [];
     const follows = followsByDiv[div] || [];
 
@@ -299,6 +336,21 @@ async function startServer() {
       return;
     }
 
+    const partnerError = validatePartnerFields(req.body);
+    if (partnerError) {
+      res.status(400).json({ error: partnerError });
+      return;
+    }
+
+    const lockedPartnered = [
+      req.body.strictlySwing ? ["Strictly Swing", req.body.strictlyDivision] : null,
+      req.body.routine ? ["Routine", req.body.routineDivision] : null
+    ].find((entry) => entry && (state.settings.lockedDivisions || []).includes(getDivisionLockKey(entry[0], entry[1])));
+    if (lockedPartnered) {
+      res.status(403).json({ error: `Registration for ${lockedPartnered[1]} ${lockedPartnered[0]} is closed — check-in has already been created for it` });
+      return;
+    }
+
     // Check if bib already exists
     const exists = state.competitors.some((c) => c.bib === bib);
     if (exists) {
@@ -314,6 +366,7 @@ async function startServer() {
       role,
       checkedIn: false
     };
+    applyPartnerFields(newCompetitor, req.body);
 
     state.competitors.push(newCompetitor);
     writeState(state);
@@ -349,6 +402,12 @@ async function startServer() {
       return;
     }
 
+    const partnerError = validatePartnerFields(req.body);
+    if (partnerError) {
+      res.status(400).json({ error: partnerError });
+      return;
+    }
+
     const state = readState();
 
     if (oldBib !== newBib) {
@@ -372,6 +431,7 @@ async function startServer() {
     competitor.division = division;
     if (checkedIn !== undefined) competitor.checkedIn = checkedIn;
     if (scratched !== undefined) competitor.scratched = scratched;
+    applyPartnerFields(competitor, req.body);
 
     if (oldBib !== newBib) {
       state.heats.forEach((heat) => {

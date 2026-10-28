@@ -12,7 +12,20 @@ export interface Competitor {
   checkedIn: boolean;
   scratched?: boolean;
   registryPoints?: number;
+  // Partnered contests: entered with a named partner and that contest's own
+  // division. Couples are only ever formed from these pairings (utils/partners).
+  strictlySwing?: boolean;
+  strictlyPartner?: string;
+  strictlyDivision?: string;
+  routine?: boolean;
+  routinePartner?: string;
+  routineDivision?: string;
 }
+
+export type PartnerRegistrationFields = Pick<
+  Competitor,
+  "strictlySwing" | "strictlyPartner" | "strictlyDivision" | "routine" | "routinePartner" | "routineDivision"
+>;
 
 export interface Heat {
   id: string;

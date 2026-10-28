@@ -1,6 +1,8 @@
 import React, { useState } from "react";
 import { UserCheck, Search, Users, ShieldAlert, CheckSquare, Square, Trash2, Award, Slash, Ban, Lock, X, Edit } from "lucide-react";
-import { Competitor, AppSettings, Heat } from "../types";
+import { Competitor, AppSettings, Heat, PartnerRegistrationFields } from "../types";
+import { findRegisteredPartner, isPartneredContest, isRegisteredFor, validatePartnerFields } from "../utils/partners";
+import PartnerContestFields, { emptyPartnerFields, partnerFieldsFrom } from "./PartnerContestFields";
 
 interface CoordinatorCheckInProps {
   competitors: Competitor[];
@@ -9,7 +11,7 @@ interface CoordinatorCheckInProps {
   isDarkMode: boolean;
   settings: AppSettings;
   onUpdateSettings?: (newSettings: Partial<AppSettings>) => Promise<void>;
-  onUpdateCompetitor?: (oldBib: string, updates: { bib: string; name: string; email?: string; division: string; role: "Lead" | "Follow"; checkedIn?: boolean; scratched?: boolean }) => Promise<void>;
+  onUpdateCompetitor?: (oldBib: string, updates: { bib: string; name: string; email?: string; division: string; role: "Lead" | "Follow"; checkedIn?: boolean; scratched?: boolean } & PartnerRegistrationFields) => Promise<void>;
 }
 
 type CheckInTab = "master" | "leaders" | "followers" | "activeHeat";
@@ -37,11 +39,16 @@ export default function CoordinatorCheckIn({
   const [editDivision, setEditDivision] = useState("");
   const [editCheckedIn, setEditCheckedIn] = useState(false);
   const [editScratched, setEditScratched] = useState(false);
+  const [editPartnerFields, setEditPartnerFields] = useState<PartnerRegistrationFields>(emptyPartnerFields());
   const [editError, setEditError] = useState("");
   const [isSavingEdit, setIsSavingEdit] = useState(false);
 
-  const handleOpenEditModal = (c: Competitor) => {
+  const handleOpenEditModal = (sheetEntry: Competitor) => {
+    // Sheet rows for couples carry the heat's division, so edit the stored
+    // registration instead of the row copy.
+    const c = competitors.find((x) => x.bib === sheetEntry.bib) || sheetEntry;
     setEditingCompetitor(c);
+    setEditPartnerFields(partnerFieldsFrom(c));
     setEditBib(c.bib);
     setEditName(c.name);
     setEditEmail(c.email || "");
@@ -69,6 +76,11 @@ export default function CoordinatorCheckIn({
       setEditError("Division is required.");
       return;
     }
+    const partnerError = validatePartnerFields(editPartnerFields);
+    if (partnerError) {
+      setEditError(partnerError);
+      return;
+    }
     
     setIsSavingEdit(true);
     setEditError("");
@@ -81,7 +93,8 @@ export default function CoordinatorCheckIn({
           division: editDivision,
           role: editRole,
           checkedIn: editCheckedIn,
-          scratched: editScratched
+          scratched: editScratched,
+          ...editPartnerFields
         });
         setEditingCompetitor(null);
       }
@@ -93,15 +106,24 @@ export default function CoordinatorCheckIn({
   };
 
   const activeHeat = heats.find(h => h.id === settings.currentHeatId);
+  const activeContestType = activeHeat?.contestType || "Jack & Jill";
+  const isActiveHeatPartnered = isPartneredContest(activeContestType);
+  // Only dancers registered for this heat's contest and division appear on the
+  // sheet; placeholder entries for unknown bibs are kept so gaps stay visible.
+  const isEntrant = (c: Competitor | undefined) =>
+    !!c && !!activeHeat && isRegisteredFor(c, activeContestType, activeHeat.division);
   const activeHeatCompetitors = activeHeat
     ? activeHeat.competitorBibs
         .flatMap((bib) => {
           const comp = competitors.find((c) => c.bib === bib);
-          if (comp) return [comp];
+          if (comp) return isEntrant(comp) ? [comp] : [];
           if (bib.includes("_")) {
             const [leadBib, followBib] = bib.split("_");
-            const lead = competitors.find((c) => c.bib === leadBib);
-            const follow = competitors.find((c) => c.bib === followBib);
+            const foundLead = competitors.find((c) => c.bib === leadBib);
+            const foundFollow = competitors.find((c) => c.bib === followBib);
+            if ((foundLead && !isEntrant(foundLead)) || (foundFollow && !isEntrant(foundFollow))) return [];
+            const lead = foundLead;
+            const follow = foundFollow;
             
             const result: Competitor[] = [];
             if (lead) {
@@ -224,6 +246,25 @@ export default function CoordinatorCheckIn({
       </div>
     );
   }
+
+  // Partnered contests always dance with the registered partner, so show who
+  // that is (and flag anyone whose partner can't be found).
+  const renderPartnerLine = (c: Competitor) => {
+    if (!activeHeat || !isActiveHeatPartnered) return null;
+    const record = competitors.find((x) => x.bib === c.bib);
+    if (!record) return null;
+    const partner = findRegisteredPartner(record, competitors, activeContestType, activeHeat.division);
+    const namedPartner = activeContestType === "Strictly Swing" ? record.strictlyPartner : record.routinePartner;
+    return partner ? (
+      <div className="text-[11px] text-slate-400 mt-1.5">
+        Partner: <span className="font-semibold text-violet-500">#{partner.bib} {partner.name}</span>
+      </div>
+    ) : (
+      <div className="text-[11px] text-amber-500 mt-1.5 font-semibold">
+        Partner "{namedPartner || "—"}" is not registered for {activeHeat.division} {activeContestType}
+      </div>
+    );
+  };
 
   // Filter lists
   const getFilteredCompetitors = () => {
@@ -641,6 +682,7 @@ export default function CoordinatorCheckIn({
                                         {getRoleBadge(c.role)}
                                         {getCheckInStatusBadge(c)}
                                       </div>
+                                      {renderPartnerLine(c)}
                                       
                                       {/* Quick actions on Master Sheet */}
                                       <div className="flex items-center gap-1.5 mt-3 pt-2 border-t border-slate-100 dark:border-slate-800/40 flex-wrap">
@@ -750,6 +792,7 @@ export default function CoordinatorCheckIn({
                                         {getRoleBadge(c.role)}
                                         {getCheckInStatusBadge(c)}
                                       </div>
+                                      {renderPartnerLine(c)}
                                       
                                       {/* Quick actions on Master Sheet */}
                                       <div className="flex items-center gap-1.5 mt-3 pt-2 border-t border-slate-100 dark:border-slate-800/40 flex-wrap">
@@ -1251,6 +1294,15 @@ export default function CoordinatorCheckIn({
                     <option value="Follow">Follower (Follow)</option>
                   </select>
                 </div>
+              </div>
+
+              <div className="pt-2 border-t border-slate-200 dark:border-slate-850">
+                <label className="block text-[10px] uppercase font-bold tracking-wider text-slate-400 mb-2">Partnered Contests</label>
+                <PartnerContestFields
+                  value={editPartnerFields}
+                  onChange={setEditPartnerFields}
+                  isDarkMode={isDarkMode}
+                />
               </div>
 
               {/* Status checkboxes */}

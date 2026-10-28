@@ -1,4 +1,5 @@
 import { Competitor, ScoreRecord, Heat, AppSettings } from "../types";
+import { isCouplesHeat } from "./partners";
 
 export interface CompetitorResult {
   competitor: Competitor;
@@ -38,8 +39,9 @@ export function calculateHeatResults(
   alternateCountFollowers?: number,
   settings?: AppSettings
 ): CompetitorResult[] {
-  // If Mixed heat and NOT Finals, calculate results separately for Leaders and Followers
-  if (heat.role === "Mixed" && heat.heatType !== "Finals") {
+  // If Mixed heat and not judged as couples (Finals, or any partnered-contest
+  // round), calculate results separately for Leaders and Followers
+  if (heat.role === "Mixed" && !isCouplesHeat(heat)) {
     // Split the heat's bibs into Leads and Follows. The normal case (created by
     // Auto-fill Next Heat / Apply Contest Parameters for any non-Finals Mixed
     // heat) is a FLAT list of individual bibs with no couples pairing at all --
@@ -385,9 +387,7 @@ export function getJudgeHeatCompetitors(
           return undefined;
         }
 
-        const isFinals = heat.heatType === "Finals" || heat.name.includes("Finals");
-
-        if (isFinals || judgeRole === "Both") {
+        if (isCouplesHeat(heat) || judgeRole === "Both") {
           const leadName = lead ? lead.name : `Lead #${leadBib}`;
           const followName = follow ? follow.name : `Follow #${followBib}`;
           return {
@@ -417,7 +417,7 @@ export function getJudgeHeatCompetitors(
     })
     .filter((c): c is Competitor => !!c);
 
-  const isHeatFinals = heat.heatType === "Finals" || heat.name.includes("Finals");
+  const isHeatFinals = isCouplesHeat(heat);
   // Preserve the heat's own competitor order (matches the Floor Coordinator check-in sheet)
   // instead of re-sorting by bib, so a heat split lines up identically on both sheets.
   const baseHeatCompetitors = rawHeatCompetitors;

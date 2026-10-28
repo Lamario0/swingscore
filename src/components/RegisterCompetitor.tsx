@@ -1,20 +1,28 @@
 import React, { useState } from "react";
-import { UserPlus, Search, ListFilter, Users, PlusCircle, Sparkles } from "lucide-react";
-import { Competitor, Division, AppSettings } from "../types";
+import { UserPlus, Search, ListFilter, Users, PlusCircle, Sparkles, Edit, Save } from "lucide-react";
+import { Competitor, Division, AppSettings, PartnerRegistrationFields } from "../types";
+import { validatePartnerFields } from "../utils/partners";
+import PartnerContestFields, { emptyPartnerFields, partnerFieldsFrom } from "./PartnerContestFields";
+
+type CompetitorDetails = { bib: string; name: string; email: string; division: string; role: "Lead" | "Follow" } & PartnerRegistrationFields;
 
 interface RegisterCompetitorProps {
   competitors: Competitor[];
-  onRegister: (competitor: { bib: string; name: string; email: string; division: string; role: "Lead" | "Follow" }) => Promise<void>;
+  onRegister: (competitor: CompetitorDetails) => Promise<void>;
+  onUpdateCompetitor?: (oldBib: string, updates: CompetitorDetails) => Promise<void>;
   isDarkMode: boolean;
   settings: AppSettings;
 }
 
-export default function RegisterCompetitor({ competitors, onRegister, isDarkMode, settings }: RegisterCompetitorProps) {
+export default function RegisterCompetitor({ competitors, onRegister, onUpdateCompetitor, isDarkMode, settings }: RegisterCompetitorProps) {
   const [bib, setBib] = useState("");
   const [name, setName] = useState("");
   const [email, setEmail] = useState("");
   const [division, setDivision] = useState<Division>("Novice");
   const [role, setRole] = useState<"Lead" | "Follow">("Lead");
+  const [partnerFields, setPartnerFields] = useState<PartnerRegistrationFields>(emptyPartnerFields());
+  // When set, the sign-up form is editing this already-registered dancer.
+  const [editingCompetitor, setEditingCompetitor] = useState<Competitor | null>(null);
   const [search, setSearch] = useState("");
   const [filterDivision, setFilterDivision] = useState<string>("All");
   const [error, setError] = useState("");
@@ -42,6 +50,26 @@ export default function RegisterCompetitor({ competitors, onRegister, isDarkMode
     );
   }
 
+  const resetForm = () => {
+    setBib("");
+    setName("");
+    setEmail("");
+    setPartnerFields(emptyPartnerFields());
+    setEditingCompetitor(null);
+  };
+
+  const handleStartEdit = (c: Competitor) => {
+    setEditingCompetitor(c);
+    setBib(c.bib);
+    setName(c.name);
+    setEmail(c.email || "");
+    setDivision(c.division as Division);
+    setRole(c.role);
+    setPartnerFields(partnerFieldsFrom(c));
+    setError("");
+    setSuccess("");
+  };
+
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setError("");
@@ -57,26 +85,39 @@ export default function RegisterCompetitor({ competitors, onRegister, isDarkMode
       return;
     }
 
-    if ((settings.lockedDivisions || []).includes(division)) {
+    const isKeepingDivision = editingCompetitor?.division === division;
+    if (!isKeepingDivision && (settings.lockedDivisions || []).includes(division)) {
       setError(`Registration for the ${division} division is closed — check-in has already been created.`);
       return;
     }
 
+    const partnerError = validatePartnerFields(partnerFields);
+    if (partnerError) {
+      setError(partnerError);
+      return;
+    }
+
+    const details: CompetitorDetails = {
+      bib: bib.trim(),
+      name: name.trim(),
+      email: email.trim(),
+      division,
+      role,
+      ...partnerFields
+    };
+
     setLoading(true);
     try {
-      await onRegister({
-        bib: bib.trim(),
-        name: name.trim(),
-        email: email.trim(),
-        division,
-        role
-      });
-      setSuccess(`Dancer ${name} (Bib ${bib}) registered successfully!`);
-      setBib("");
-      setName("");
-      setEmail("");
+      if (editingCompetitor && onUpdateCompetitor) {
+        await onUpdateCompetitor(editingCompetitor.bib, details);
+        setSuccess(`Registration for ${details.name} (Bib ${details.bib}) updated.`);
+      } else {
+        await onRegister(details);
+        setSuccess(`Dancer ${name} (Bib ${bib}) registered successfully!`);
+      }
+      resetForm();
     } catch (err: any) {
-      setError(err.message || "Failed to register competitor.");
+      setError(err.message || (editingCompetitor ? "Failed to update registration." : "Failed to register competitor."));
     } finally {
       setLoading(false);
     }
@@ -179,7 +220,9 @@ export default function RegisterCompetitor({ competitors, onRegister, isDarkMode
                   <th className="p-3">Email</th>
                   <th className="p-3">Division</th>
                   <th className="p-3">Role</th>
+                  <th className="p-3">Strictly / Routine</th>
                   <th className="p-3">Check-In Status</th>
+                  {onUpdateCompetitor && <th className="p-3 text-right">Edit</th>}
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-200 dark:divide-slate-800 text-xs">
@@ -208,6 +251,11 @@ export default function RegisterCompetitor({ competitors, onRegister, isDarkMode
                           {c.role}
                         </span>
                       </td>
+                      <td className="p-3 text-[10px] text-slate-400 space-y-0.5">
+                        {c.strictlySwing && <div><span className="font-semibold text-violet-500">Strictly</span> {c.strictlyDivision} · w/ {c.strictlyPartner}</div>}
+                        {c.routine && <div><span className="font-semibold text-violet-500">Routine</span> {c.routineDivision} · w/ {c.routinePartner}</div>}
+                        {!c.strictlySwing && !c.routine && "—"}
+                      </td>
                       <td className="p-3">
                         <span className={`inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full text-[10px] font-semibold ${
                           c.checkedIn ? "bg-green-500/10 text-green-500" : "bg-yellow-500/10 text-yellow-500"
@@ -216,11 +264,23 @@ export default function RegisterCompetitor({ competitors, onRegister, isDarkMode
                           {c.checkedIn ? "Checked In" : "Pending Check-In"}
                         </span>
                       </td>
+                      {onUpdateCompetitor && (
+                        <td className="p-3 text-right">
+                          <button
+                            type="button"
+                            onClick={() => handleStartEdit(c)}
+                            className="inline-flex items-center gap-1 px-2 py-1 rounded-lg text-[10px] font-bold border border-slate-200 dark:border-slate-700 text-slate-500 hover:text-violet-500 hover:border-violet-500/40 transition-all"
+                          >
+                            <Edit className="w-3 h-3" />
+                            Edit
+                          </button>
+                        </td>
+                      )}
                     </tr>
                   ))
                 ) : (
                   <tr>
-                    <td colSpan={6} className="p-6 text-center text-slate-500">
+                    <td colSpan={onUpdateCompetitor ? 8 : 7} className="p-6 text-center text-slate-500">
                       No competitors found. Use the form to register new dancers.
                     </td>
                   </tr>
@@ -235,11 +295,13 @@ export default function RegisterCompetitor({ competitors, onRegister, isDarkMode
       <div className="space-y-6">
         <div className={`p-6 rounded-2xl border transition-all ${isDarkMode ? "bg-slate-900 border-slate-800 text-slate-100" : "bg-white border-slate-200 shadow-sm text-slate-800"}`}>
           <div className="flex items-center gap-2 mb-4">
-            <UserPlus className="w-5 h-5 text-violet-500" />
-            <h2 className="text-lg font-bold tracking-tight">Competitor Sign-Up</h2>
+            {editingCompetitor ? <Edit className="w-5 h-5 text-violet-500" /> : <UserPlus className="w-5 h-5 text-violet-500" />}
+            <h2 className="text-lg font-bold tracking-tight">{editingCompetitor ? "Edit Registration" : "Competitor Sign-Up"}</h2>
           </div>
           <p className="text-xs text-slate-400 mb-6">
-            Register a competitor into the WCS database to assign them bib numbers and division heats.
+            {editingCompetitor
+              ? `Correcting registration details for ${editingCompetitor.name} (Bib ${editingCompetitor.bib}).`
+              : "Register a competitor into the WCS database to assign them bib numbers and division heats."}
           </p>
 
           <form onSubmit={handleSubmit} className="space-y-4">
@@ -307,7 +369,7 @@ export default function RegisterCompetitor({ competitors, onRegister, isDarkMode
               <label className="block text-xs font-medium text-slate-400 mb-1.5">Division</label>
               <div className="grid grid-cols-2 gap-2">
                 {(["Newcomer", "Novice", "Intermediate", "Advance", "All-Star", "Pro", "Open"] as Division[]).map((div) => {
-                  const isLocked = (settings.lockedDivisions || []).includes(div);
+                  const isLocked = (settings.lockedDivisions || []).includes(div) && editingCompetitor?.division !== div;
                   return (
                     <button
                       key={div}
@@ -368,15 +430,38 @@ export default function RegisterCompetitor({ competitors, onRegister, isDarkMode
               </div>
             </div>
 
+            {/* Partnered contests */}
+            <div>
+              <label className="block text-xs font-medium text-slate-400 mb-1.5">Partnered Contests</label>
+              <PartnerContestFields
+                value={partnerFields}
+                onChange={setPartnerFields}
+                isDarkMode={isDarkMode}
+                lockedDivisions={settings.lockedDivisions}
+                initialValue={editingCompetitor ? partnerFieldsFrom(editingCompetitor) : undefined}
+              />
+            </div>
+
             <button
               id="competitor-submit-btn"
               type="submit"
               disabled={loading}
               className="w-full mt-2 py-2.5 rounded-xl bg-violet-600 hover:bg-violet-750 text-white text-xs font-bold shadow-md shadow-violet-600/15 flex items-center justify-center gap-2 transition-all disabled:opacity-50 disabled:cursor-not-allowed"
             >
-              <PlusCircle className="w-4 h-4" />
-              {loading ? "Registering..." : "Add Competitor to Roster"}
+              {editingCompetitor ? <Save className="w-4 h-4" /> : <PlusCircle className="w-4 h-4" />}
+              {editingCompetitor
+                ? (loading ? "Saving..." : "Save Changes")
+                : (loading ? "Registering..." : "Add Competitor to Roster")}
             </button>
+            {editingCompetitor && (
+              <button
+                type="button"
+                onClick={() => { resetForm(); setError(""); }}
+                className="w-full py-2 rounded-xl border border-slate-200 dark:border-slate-700 text-xs font-semibold text-slate-500 hover:text-slate-300 transition-all"
+              >
+                Cancel Editing
+              </button>
+            )}
           </form>
         </div>
       </div>

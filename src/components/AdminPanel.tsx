@@ -1,7 +1,9 @@
 import React, { useState, useEffect, useRef } from "react";
 import { Shield, Sparkles, RefreshCw, Trash2, PlusCircle, CheckSquare, Settings, AlertTriangle, Play, Eye, EyeOff, Lock, Unlock, Trophy, Calendar, ArrowUp, ArrowDown, Plus, ChevronDown, ChevronUp, SortAsc, Scissors, Edit, X, FileText, Award, ExternalLink } from "lucide-react";
-import { Competitor, Heat, JudgingStyle, AppSettings, ScoreRecord, CallbackValue, CompletedContestResult } from "../types";
+import { Competitor, Heat, JudgingStyle, AppSettings, ScoreRecord, CallbackValue, CompletedContestResult, PartnerRegistrationFields } from "../types";
 import { calculateHeatResults, getJudgeHeatCompetitors } from "../utils/calculations";
+import { buildRegisteredCouples, findRegisteredPartner, getDivisionLockKey, isCouplesHeat, isPartneredContest, isRegisteredFor, validatePartnerFields } from "../utils/partners";
+import PartnerContestFields, { emptyPartnerFields, partnerFieldsFrom } from "./PartnerContestFields";
 
 // Which phase(s) a completed non-Finals round can advance to, per the
 // contest's own progression rules. Finals is terminal (no further round).
@@ -20,7 +22,7 @@ interface AdminPanelProps {
   onUpdateSettings: (newSettings: Partial<AppSettings>) => Promise<void>;
   onCreateHeat: (heat: { name: string; division: string; role: "Lead" | "Follow" | "Mixed"; competitorBibs: string[]; couples?: { id: string; leadBib: string; followBib: string }[]; heatType?: "Prelim" | "Semi-Final" | "Quarter Final" | "Finals"; contestType?: "Jack & Jill" | "Strictly Swing" | "Routine" }, target?: "live" | "next") => Promise<void>;
   onDeleteHeat: (heatId: string) => Promise<void>;
-  onUpdateHeat: (heatId: string, updates: { name?: string; division?: string; role?: "Lead" | "Follow" | "Mixed"; competitorBibs?: string[]; couples?: any[]; isCustom?: boolean; splits?: number[] }) => Promise<void>;
+  onUpdateHeat: (heatId: string, updates: { name?: string; division?: string; role?: "Lead" | "Follow" | "Mixed"; competitorBibs?: string[]; couples?: any[]; isCustom?: boolean; splits?: number[]; heatType?: "Prelim" | "Semi-Final" | "Quarter Final" | "Finals"; contestType?: "Jack & Jill" | "Strictly Swing" | "Routine" }) => Promise<void>;
   onSimulateScores: (heatId: string) => Promise<void>;
   onResetDatabase: () => Promise<void>;
   onClearAllDatabase?: () => Promise<void>;
@@ -32,7 +34,7 @@ interface AdminPanelProps {
     isCallback: CallbackValue;
   }) => Promise<void>;
   isDarkMode: boolean;
-  onUpdateCompetitor?: (oldBib: string, updates: { bib: string; name: string; email?: string; division: string; role: "Lead" | "Follow"; checkedIn?: boolean; scratched?: boolean }) => Promise<void>;
+  onUpdateCompetitor?: (oldBib: string, updates: { bib: string; name: string; email?: string; division: string; role: "Lead" | "Follow"; checkedIn?: boolean; scratched?: boolean } & PartnerRegistrationFields) => Promise<void>;
 }
 
 export default function AdminPanel({
@@ -69,11 +71,16 @@ export default function AdminPanel({
   const [editDivision, setEditDivision] = useState("");
   const [editCheckedIn, setEditCheckedIn] = useState(false);
   const [editScratched, setEditScratched] = useState(false);
+  const [editPartnerFields, setEditPartnerFields] = useState<PartnerRegistrationFields>(emptyPartnerFields());
   const [editError, setEditError] = useState("");
   const [isSavingEdit, setIsSavingEdit] = useState(false);
 
-  const handleOpenEditModal = (c: Competitor) => {
+  const handleOpenEditModal = (sheetEntry: Competitor) => {
+    // Sheet rows can be copies stamped with the heat's division; always edit
+    // the stored registration.
+    const c = competitors.find((x) => x.bib === sheetEntry.bib) || sheetEntry;
     setEditingCompetitor(c);
+    setEditPartnerFields(partnerFieldsFrom(c));
     setEditBib(c.bib);
     setEditName(c.name);
     setEditEmail(c.email || "");
@@ -101,6 +108,11 @@ export default function AdminPanel({
       setEditError("Division is required.");
       return;
     }
+    const partnerError = validatePartnerFields(editPartnerFields);
+    if (partnerError) {
+      setEditError(partnerError);
+      return;
+    }
     
     setIsSavingEdit(true);
     setEditError("");
@@ -113,7 +125,8 @@ export default function AdminPanel({
           division: editDivision,
           role: editRole,
           checkedIn: editCheckedIn,
-          scratched: editScratched
+          scratched: editScratched,
+          ...editPartnerFields
         });
         setEditingCompetitor(null);
       }
@@ -263,7 +276,7 @@ export default function AdminPanel({
     // Leaders/Followers/Both answer for this specific heat. Finals heats are
     // always judged as couples, so the indicator is redundant there and is
     // suppressed entirely ("N/A"), as is the case whenever there is no active heat.
-    const isHeatFinalsForBadge = activeHeat ? (activeHeat.heatType === "Finals" || activeHeat.name.includes("Finals")) : false;
+    const isHeatFinalsForBadge = activeHeat ? isCouplesHeat(activeHeat) : false;
     const rolesSeen = new Set(heatCompetitorsForJudge.map((c) => c.role));
     const judgingSide: "Leaders" | "Followers" | "Both" | "N/A" =
       !activeHeat || isHeatFinalsForBadge || heatCompetitorsForJudge.length === 0
@@ -526,7 +539,7 @@ export default function AdminPanel({
       }
     }
 
-    const isHeatFinals = heat.heatType === "Finals" || heat.name.includes("Finals");
+    const isHeatFinals = isCouplesHeat(heat);
     const rawHeatCompetitors = heat.competitorBibs
       .map((bib) => {
         const comp = competitors.find((c) => c.bib === bib);
@@ -548,9 +561,7 @@ export default function AdminPanel({
             return undefined;
           }
 
-          const isFinals = heat.heatType === "Finals" || heat.name.includes("Finals");
-
-          if (isFinals || judgeRole === "Both") {
+          if (isHeatFinals || judgeRole === "Both") {
             const leadName = lead ? lead.name : `Lead #${leadBib}`;
             const followName = follow ? follow.name : `Follow #${followBib}`;
             return {
@@ -601,7 +612,11 @@ export default function AdminPanel({
   // Once the respective Contest Configuration button has been pressed for this
   // slot (live vs queued), its type/division/phase fields are locked until the
   // matching Reset button clears that slot.
-  const isContestConfigLocked = isNextTab ? !!settings.nextContestConfigLocked : !!settings.contestConfigLocked;
+  // On the Live tab the same fields also feed "Prepare Next", so they stay
+  // editable until both the Live slot is configured and a Next is queued.
+  const isLiveConfigLocked = !!settings.contestConfigLocked;
+  const isNextContestQueued = !!settings.queuedHeatId || !!settings.nextContestConfigLocked;
+  const isContestConfigLocked = isNextTab ? !!settings.nextContestConfigLocked : (isLiveConfigLocked && isNextContestQueued);
 
   const isAllJudgesComplete = !!(
     activeHeat && 
@@ -679,7 +694,7 @@ export default function AdminPanel({
 
   // Mixed, non-Finals heats are computed as separate Leader/Follower fields
   // (see calculateHeatResults), so group the ranked list the same way.
-  const liveHeatHasDistinctRoles = !!liveHeat && liveHeat.role === "Mixed" && !liveHeatIsFinals;
+  const liveHeatHasDistinctRoles = !!liveHeat && liveHeat.role === "Mixed" && !isCouplesHeat(liveHeat);
   const liveHeatRankedLeads = liveHeatHasDistinctRoles
     ? [...liveHeatResults].filter(r => r.competitor.role === "Lead").sort((a, b) => a.rank - b.rank)
     : [];
@@ -742,7 +757,7 @@ export default function AdminPanel({
         lastCompletedSettingsForCalc
       )
     : [];
-  const lastCompletedIsMixed = !!lastCompletedHeat && lastCompletedHeat.role === "Mixed" && lastCompletedResult?.heatType !== "Finals";
+  const lastCompletedIsMixed = !!lastCompletedHeat && lastCompletedHeat.role === "Mixed" && lastCompletedResult?.heatType !== "Finals" && !isCouplesHeat(lastCompletedHeat);
   const lastCompletedRankedLeads = lastCompletedIsMixed
     ? lastCompletedResults.filter((r) => r.competitor.role === "Lead").sort((a, b) => a.rank - b.rank)
     : [];
@@ -846,23 +861,23 @@ export default function AdminPanel({
 
   // Auto-sync the Create Heat Sheet division and pre-populate selected dancers matching the division from registration
   useEffect(() => {
-    const isNewDivOrRole = division !== lastPopulatedDivRef.current || newHeatRole !== lastPopulatedRoleRef.current;
+    const isNewDivOrRole = `${contestType}:${division}` !== lastPopulatedDivRef.current || newHeatRole !== lastPopulatedRoleRef.current;
     const initialLoadOccurred = competitors.length > 0 && !hasPopulatedRef.current;
 
     if (isNewDivOrRole || initialLoadOccurred) {
       const matching = competitors.filter((c) => {
-        const matchesDiv = c.division === division;
+        const matchesDiv = isRegisteredFor(c, contestType, division);
         const matchesRole = newHeatRole === "Mixed" || c.role === newHeatRole;
         return matchesDiv && matchesRole;
       });
       setSelectedBibs(matching.map((c) => c.bib));
-      lastPopulatedDivRef.current = division;
+      lastPopulatedDivRef.current = `${contestType}:${division}`;
       lastPopulatedRoleRef.current = newHeatRole;
       if (competitors.length > 0) {
         hasPopulatedRef.current = true;
       }
     }
-  }, [division, competitors, newHeatRole]);
+  }, [division, contestType, competitors, newHeatRole]);
 
   const getDivisionsForContest = (contest: string) => {
     if (contest === "Routine") {
@@ -898,18 +913,21 @@ export default function AdminPanel({
         if (settings.currentHeatId && !settings.checkInFinalized) {
           const formattedName = `${division} ${contestType} - ${heatType}`;
           const computedRole = "Mixed";
-          const isCouplesHeat = (contestType === "Routine" || heatType === "Finals");
-          
+          const isCouplesContest = isCouplesHeat({ contestType, heatType });
+
           const matchingBibs = competitors
             .filter((c) => {
-              const matchesDiv = c.division === division;
+              const matchesDiv = isRegisteredFor(c, contestType, division);
               return matchesDiv && c.checkedIn && !c.scratched;
             })
             .map((c) => c.bib);
 
-          // Build couples only if it's a couples heat (Routine or Finals)
+          // Build couples only if it's a couples heat. Partnered contests use
+          // the registered pairings; Jack & Jill Finals keeps its draw order.
           let matchingCouples: any[] = [];
-          if (isCouplesHeat) {
+          if (isPartneredContest(contestType)) {
+            matchingCouples = buildRegisteredCouples(competitors, contestType, division, (c) => c.checkedIn && !c.scratched).couples;
+          } else if (isCouplesContest) {
             const leads = competitors.filter(c => c.division === division && c.role === "Lead" && c.checkedIn && !c.scratched).map(c => c.bib);
             const follows = competitors.filter(c => c.division === division && c.role === "Follow" && c.checkedIn && !c.scratched).map(c => c.bib);
             const couplesCount = Math.max(leads.length, follows.length);
@@ -924,8 +942,10 @@ export default function AdminPanel({
             name: formattedName,
             division: division,
             role: computedRole,
-            competitorBibs: isCouplesHeat ? matchingCouples.map(c => c.id) : matchingBibs,
+            competitorBibs: isCouplesContest ? matchingCouples.map(c => c.id) : matchingBibs,
             couples: matchingCouples,
+            heatType,
+            contestType,
             isCustom: false
           });
         }
@@ -956,11 +976,15 @@ export default function AdminPanel({
     const computedRole = "Mixed";
     setNewHeatRole(computedRole);
 
-    const isCouplesHeat = (contestType === "Routine" || heatType === "Finals");
+    const isCouplesContest = isCouplesHeat({ contestType, heatType });
 
     try {
       let finalBibs: string[] = [];
-      if (isCouplesHeat) {
+      let finalCouples: { id: string; leadBib: string; followBib: string }[] = [];
+      if (isPartneredContest(contestType)) {
+        finalCouples = buildRegisteredCouples(competitors, contestType, division, (c) => c.checkedIn && !c.scratched).couples;
+        finalBibs = finalCouples.map((c) => c.id);
+      } else if (isCouplesContest) {
         const leads = competitors.filter(c => c.division === division && c.role === "Lead" && c.checkedIn && !c.scratched).map(c => c.bib);
         const follows = competitors.filter(c => c.division === division && c.role === "Follow" && c.checkedIn && !c.scratched).map(c => c.bib);
         const couplesCount = Math.max(leads.length, follows.length);
@@ -968,6 +992,7 @@ export default function AdminPanel({
           const lead = leads[i] || "";
           const follow = follows[i] || "";
           finalBibs.push(`${lead}_${follow}`);
+          finalCouples.push({ id: `${lead}_${follow}`, leadBib: lead, followBib: follow });
         }
       } else {
         finalBibs = competitors
@@ -980,11 +1005,18 @@ export default function AdminPanel({
         division: division,
         role: computedRole,
         competitorBibs: finalBibs,
+        couples: finalCouples.length > 0 ? finalCouples : undefined,
         heatType: heatType,
         contestType: contestType
       }, "next");
 
-      await onUpdateSettings({ nextContestConfigLocked: true } as any);
+      await onUpdateSettings({
+        nextContestType: contestType,
+        nextDivision: division,
+        nextHeatType: heatType,
+        nextJudgingStyle: heatType === "Finals" ? "placement" : "raw",
+        nextContestConfigLocked: true
+      } as any);
 
       setActiveHeatControlTab("next");
     } catch (err) {
@@ -1044,12 +1076,23 @@ export default function AdminPanel({
       divisionForNext: string;
     }
   ): Promise<boolean> => {
-    const isCouplesTarget = targetHeatType === "Finals";
+    const isPartneredNext = isPartneredContest(opts.contestTypeForNext);
+    const isCouplesTarget = targetHeatType === "Finals" || isPartneredNext;
 
     let finalBibs: string[] = [];
     let finalCouples: { id: string; leadBib: string; followBib: string }[] = [];
 
-    if (opts.isMixed) {
+    if (isPartneredNext) {
+      // Partnered contests were judged as couple units, so the qualifiers are
+      // already "lead_follow" couple ids -- carry those exact pairings forward.
+      finalCouples = opts.qualifiedFlatBibs
+        .filter((id) => id.includes("_"))
+        .map((id) => {
+          const [leadBib, followBib] = id.split("_");
+          return { id, leadBib, followBib };
+        });
+      finalBibs = finalCouples.map(c => c.id);
+    } else if (opts.isMixed) {
       if (isCouplesTarget) {
         const couplesCount = Math.max(opts.qualifiedLeadBibs.length, opts.qualifiedFollowBibs.length);
         for (let i = 0; i < couplesCount; i++) {
@@ -1305,25 +1348,45 @@ export default function AdminPanel({
       return;
     }
 
+    // Partnered contests are entered as couples: every selected dancer must be
+    // selected together with their registered partner.
+    let sheetBibs = selectedBibs;
+    let sheetCouples: { id: string; leadBib: string; followBib: string }[] | undefined;
+    if (isPartneredContest(contestType)) {
+      const { couples, unpaired } = buildRegisteredCouples(
+        competitors.filter((c) => selectedBibs.includes(c.bib)),
+        contestType,
+        division
+      );
+      if (unpaired.length > 0) {
+        setFormError(`Each ${contestType} dancer must be selected with their registered partner. Unpaired: ${unpaired.map((c) => `#${c.bib} ${c.name}`).join(", ")}.`);
+        return;
+      }
+      sheetCouples = couples;
+      sheetBibs = couples.map((c) => c.id);
+    }
+
     setLoading(true);
     try {
       await onCreateHeat({
         name: newHeatName.trim(),
         division: division,
-        role: newHeatRole,
-        competitorBibs: selectedBibs,
+        role: sheetCouples ? "Mixed" : newHeatRole,
+        competitorBibs: sheetBibs,
+        couples: sheetCouples,
         heatType: heatType,
         contestType: contestType
       }, activeHeatControlTab);
 
-      // Once a check-in sheet has been created for this division, close registration
-      // for that division (regardless of contest phase) so the roster can't shift underneath it.
+      // Once a check-in sheet has been created for this contest+division, close
+      // registration for it (regardless of contest phase) so the roster can't shift underneath it.
       const alreadyLocked = settings.lockedDivisions || [];
-      if (!alreadyLocked.includes(division)) {
-        await onUpdateSettings({ lockedDivisions: [...alreadyLocked, division] });
+      const lockKey = getDivisionLockKey(contestType, division);
+      if (!alreadyLocked.includes(lockKey)) {
+        await onUpdateSettings({ lockedDivisions: [...alreadyLocked, lockKey] });
       }
 
-      setFormSuccess(`Heat "${newHeatName}" created successfully with ${selectedBibs.length} dancers! Registration for ${division} is now closed.`);
+      setFormSuccess(`Heat "${newHeatName}" created successfully with ${selectedBibs.length} dancers! Registration for ${division} ${contestType} is now closed.`);
       setNewHeatName("");
       setSelectedBibs([]);
       setCollapsedCards((prev) => ({
@@ -1349,7 +1412,7 @@ export default function AdminPanel({
   const handleSelectAllCheckedIn = () => {
     // Select all competitors that match the chosen division & role
     const matching = competitors.filter((c) => {
-      const matchesDiv = c.division === division;
+      const matchesDiv = isRegisteredFor(c, contestType, division);
       const matchesRole = newHeatRole === "Mixed" || c.role === newHeatRole;
       return matchesDiv && matchesRole;
     });
@@ -1405,7 +1468,7 @@ export default function AdminPanel({
 
   // Competitors matching chosen form division & role
   const formMatchingCompetitors = competitors.filter((c) => {
-    const matchesDiv = c.division === division;
+    const matchesDiv = isRegisteredFor(c, contestType, division);
     const matchesRole = newHeatRole === "Mixed" || c.role === newHeatRole;
     return matchesDiv && matchesRole;
   });
@@ -1639,6 +1702,11 @@ export default function AdminPanel({
                       setHeatType(newHeatType);
                       const isNext = activeHeatControlTab === "next";
                       const judgingStyleForPhase = newHeatType === "Finals" ? "placement" : "raw";
+                      if (!isNext && isLiveConfigLocked) {
+                        // Live slot is locked; this edit is only staging values
+                        // for "Prepare Next", which saves them itself.
+                        return;
+                      }
                       if (isNext) {
                         onUpdateSettings({
                           nextHeatType: newHeatType,
@@ -1675,6 +1743,12 @@ export default function AdminPanel({
                       Locked — use the reset button to make changes.
                     </p>
                   )}
+                  {!isNextTab && isLiveConfigLocked && !isNextContestQueued && (
+                    <p className="text-[10px] text-violet-400 mt-1.5 flex items-center gap-1 font-semibold">
+                      <Lock className="w-3 h-3" />
+                      Live Contest locked — these settings apply to Prepare Next.
+                    </p>
+                  )}
                 </div>
 
                 <div className="space-y-2 pt-1.5">
@@ -1682,9 +1756,9 @@ export default function AdminPanel({
                     <button
                       id="save-contest-params-btn"
                       onClick={handleApplyContestParameters}
-                      disabled={loading || (activeHeatControlTab === "next" && !settings.currentHeatId) || isContestConfigLocked}
+                      disabled={loading || (isNextTab ? (!settings.currentHeatId || isContestConfigLocked) : isLiveConfigLocked)}
                       className={`flex-1 py-2 text-white text-xs font-bold rounded-xl shadow-sm flex items-center justify-center gap-1.5 transition-all ${
-                        loading || (activeHeatControlTab === "next" && !settings.currentHeatId) || isContestConfigLocked
+                        loading || (isNextTab ? (!settings.currentHeatId || isContestConfigLocked) : isLiveConfigLocked)
                           ? "bg-slate-300 dark:bg-slate-800 text-slate-500 cursor-not-allowed opacity-50"
                           : "bg-violet-600 hover:bg-violet-700 cursor-pointer"
                       }`}
@@ -1714,10 +1788,10 @@ export default function AdminPanel({
                       <button
                         id="autofill-heat-builder-btn"
                         onClick={handleAutoFillHeatForm}
-                        disabled={!!settings.queuedHeatId || !settings.currentHeatId || !!settings.nextContestConfigLocked}
-                        title={!settings.currentHeatId ? "A Live Contest must be configured first" : (settings.queuedHeatId ? "A Next Contest is already queued" : undefined)}
+                        disabled={loading || isNextContestQueued || !settings.currentHeatId}
+                        title={!settings.currentHeatId ? "A Live Contest must be configured first" : (isNextContestQueued ? "A Next Contest is already queued" : undefined)}
                         className={`flex-1 py-2 text-xs font-semibold rounded-xl border flex items-center justify-center gap-1.5 transition-all ${
-                          (settings.queuedHeatId || !settings.currentHeatId || settings.nextContestConfigLocked)
+                          (loading || isNextContestQueued || !settings.currentHeatId)
                             ? "bg-slate-100 dark:bg-slate-800 text-slate-400 dark:text-slate-600 border-slate-200 dark:border-slate-800 cursor-not-allowed opacity-50"
                             : "bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 dark:hover:bg-slate-750 text-slate-700 dark:text-slate-300 border-slate-200 dark:border-slate-700 cursor-pointer"
                         }`}
@@ -1946,7 +2020,7 @@ export default function AdminPanel({
                 <div className="space-y-4">
                   <div className="flex items-center justify-between border-b border-slate-200 dark:border-slate-800 pb-2">
                     <h3 className="text-xs font-bold font-mono text-slate-400 uppercase tracking-wider">
-                      Separate Role Quotas (Leaders & Followers)
+                      {isPartneredContest(contestType) ? "Couple Quotas" : "Separate Role Quotas (Leaders & Followers)"}
                     </h3>
                     <span className="text-[10px] font-medium text-violet-400 font-mono">Real-time Individual Cuts</span>
                   </div>
@@ -1956,7 +2030,7 @@ export default function AdminPanel({
                     <div className={`p-3.5 rounded-xl border ${isDarkMode ? "bg-slate-900/50 border-slate-800/80" : "bg-slate-50 border-slate-200"}`}>
                       <div className="flex items-center gap-1.5 mb-2.5">
                         <span className="w-1.5 h-1.5 rounded-full bg-emerald-500" />
-                        <h4 className="text-xs font-bold text-slate-300">Leaders Quotas</h4>
+                        <h4 className="text-xs font-bold text-slate-300">{isPartneredContest(contestType) ? "Couples Quotas" : "Leaders Quotas"}</h4>
                       </div>
                       <div className="grid grid-cols-2 gap-2">
                         <div>
@@ -1978,7 +2052,7 @@ export default function AdminPanel({
                           >
                             {[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 12, 15, 20].map((num) => (
                               <option key={num} value={num}>
-                                {num} Lead{num > 1 ? "s" : ""}
+                                {num} {isPartneredContest(contestType) ? "Couple" : "Lead"}{num > 1 ? "s" : ""}
                               </option>
                             ))}
                           </select>
@@ -2011,6 +2085,7 @@ export default function AdminPanel({
                     </div>
 
                     {/* Followers Quota */}
+                    {!isPartneredContest(contestType) && (
                     <div className={`p-3.5 rounded-xl border ${isDarkMode ? "bg-slate-900/50 border-slate-800/80" : "bg-slate-50 border-slate-200"}`}>
                       <div className="flex items-center gap-1.5 mb-2.5">
                         <span className="w-1.5 h-1.5 rounded-full bg-rose-500" />
@@ -2067,6 +2142,7 @@ export default function AdminPanel({
                         </div>
                       </div>
                     </div>
+                    )}
                   </div>
 
                   <div className="text-[10px] text-slate-400 leading-tight">
@@ -2300,7 +2376,7 @@ export default function AdminPanel({
                 <div className="flex items-center justify-between gap-4 mb-3">
                   <div>
                     <h3 className="text-xs font-bold font-mono text-slate-400 uppercase tracking-wider">Select Dancers</h3>
-                    <p className="text-[10px] text-slate-400">Pulling names from registration for {division} ({newHeatRole})</p>
+                    <p className="text-[10px] text-slate-400">Pulling names registered for {division} {contestType} ({newHeatRole})</p>
                   </div>
                   <button
                     type="button"
@@ -2333,6 +2409,12 @@ export default function AdminPanel({
                             <div className="flex items-center gap-2">
                               <span className="font-mono bg-violet-600/10 text-violet-500 px-1.5 py-0.5 rounded text-[10px] font-bold">#{c.bib}</span>
                               <span className="truncate">{c.name}</span>
+                              {isPartneredContest(contestType) && (() => {
+                                const partner = findRegisteredPartner(c, competitors, contestType, division);
+                                return partner
+                                  ? <span className="text-[9px] text-slate-400 truncate">w/ #{partner.bib} {partner.name}</span>
+                                  : <span className="text-[9px] text-amber-500 font-semibold truncate">No registered partner</span>;
+                              })()}
                             </div>
                             <span className="text-[9px] px-1.5 py-0.5 rounded font-mono font-semibold bg-sky-500/10 text-sky-500 border-sky-500/10">
                               {isSelected ? "Leader" : "Not Selected"}
@@ -2366,6 +2448,12 @@ export default function AdminPanel({
                             <div className="flex items-center gap-2">
                               <span className="font-mono bg-violet-600/10 text-violet-500 px-1.5 py-0.5 rounded text-[10px] font-bold">#{c.bib}</span>
                               <span className="truncate">{c.name}</span>
+                              {isPartneredContest(contestType) && (() => {
+                                const partner = findRegisteredPartner(c, competitors, contestType, division);
+                                return partner
+                                  ? <span className="text-[9px] text-slate-400 truncate">w/ #{partner.bib} {partner.name}</span>
+                                  : <span className="text-[9px] text-amber-500 font-semibold truncate">No registered partner</span>;
+                              })()}
                             </div>
                             <span className="text-[9px] px-1.5 py-0.5 rounded font-mono font-semibold bg-pink-500/10 text-pink-500 border-pink-500/10">
                               {isSelected ? "Follower" : "Not Selected"}
@@ -2615,7 +2703,7 @@ export default function AdminPanel({
                                               .filter(s => s.heatId === h.id && s.judgeId === reviewJudgeForHeat[h.id])
                                               .map((record) => {
                                                 let competitorName = "—";
-                                                if (h.role === "Mixed" && h.heatType === "Finals") {
+                                                if (h.role === "Mixed" && isCouplesHeat(h)) {
                                                   const [leadBib, followBib] = record.competitorBib.split("_");
                                                   const lead = competitors.find(c => c.bib === leadBib);
                                                   const follow = competitors.find(c => c.bib === followBib);
@@ -2779,7 +2867,7 @@ export default function AdminPanel({
                                       );
                                     };
 
-                                    const isMixedSplit = h.role === "Mixed" && h.heatType !== "Finals";
+                                    const isMixedSplit = h.role === "Mixed" && !isCouplesHeat(h);
                                     if (isMixedSplit) {
                                       const leadResults = results.filter(res => res.competitor.role === "Lead");
                                       const followResults = results.filter(res => res.competitor.role === "Follow");
@@ -2942,7 +3030,7 @@ export default function AdminPanel({
               // Decoupled Mixed Heat (Leaders & Followers Lists)
               <div className="space-y-6">
                 {/* Finals Partnering Controls if heatType is Finals */}
-                {activeHeat.heatType === "Finals" && (
+                {activeHeat.heatType === "Finals" && !isPartneredContest(activeHeat.contestType) && (
                   <div className={`p-4 rounded-xl border ${isDarkMode ? "bg-slate-950 border-slate-800" : "bg-slate-50 border-slate-200"}`}>
                     <h3 className="text-xs font-bold font-mono uppercase tracking-wider text-slate-400 mb-3 flex items-center gap-1.5">
                       <Sparkles className="w-4 h-4 text-violet-500" />
@@ -2981,7 +3069,7 @@ export default function AdminPanel({
                               <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse" />
                               Leaders (Leads)
                             </h3>
-                            {activeHeat.heatType === "Finals" && (
+                            {activeHeat.heatType === "Finals" && !isPartneredContest(activeHeat.contestType) && (
                               <button
                                 type="button"
                                 id="rand-leads-direct-btn"
@@ -3233,7 +3321,7 @@ export default function AdminPanel({
                               <span className="w-2 h-2 rounded-full bg-rose-500 animate-pulse" />
                               Followers (Follows)
                             </h3>
-                            {activeHeat.heatType === "Finals" && (
+                            {activeHeat.heatType === "Finals" && !isPartneredContest(activeHeat.contestType) && (
                               <button
                                 type="button"
                                 id="rand-follows-direct-btn"
@@ -3689,7 +3777,7 @@ export default function AdminPanel({
               )}
             </div>
           ) : (
-            activeHeat && activeHeat.role === "Mixed" && activeHeat.heatType !== "Finals" ? (
+            activeHeat && activeHeat.role === "Mixed" && !isCouplesHeat(activeHeat) ? (
                 <div className="grid grid-cols-2 gap-4 sm:gap-6">
                   {/* Leaders List (Leads) */}
                   <div className="space-y-3">
@@ -5012,6 +5100,15 @@ export default function AdminPanel({
                   <option value="Follow">Follower (Follow)</option>
                 </select>
               </div>
+            </div>
+
+            <div className="pt-2 border-t border-slate-200 dark:border-slate-850">
+              <label className="block text-[10px] uppercase font-bold tracking-wider text-slate-400 mb-2">Partnered Contests</label>
+              <PartnerContestFields
+                value={editPartnerFields}
+                onChange={setEditPartnerFields}
+                isDarkMode={isDarkMode}
+              />
             </div>
 
             {/* Status checkboxes */}

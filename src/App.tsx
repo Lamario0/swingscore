@@ -9,7 +9,8 @@ import ResultsDashboard from "./components/ResultsDashboard";
 import ScoringDashboard from "./components/ScoringDashboard";
 import PlatformPortal from "./components/PlatformPortal";
 import RoleLogin from "./components/RoleLogin";
-import { Competitor, Heat, ScoreRecord, AppSettings, ViewRole, CallbackValue } from "./types";
+import { Competitor, Heat, ScoreRecord, AppSettings, ViewRole, CallbackValue, PartnerRegistrationFields } from "./types";
+import { isCouplesHeat } from "./utils/partners";
 
 export default function App() {
   // Navigation & Preferences (Dynamically detected via URL slug, query string, or subdomains)
@@ -195,7 +196,7 @@ export default function App() {
   }, [settings, selectedJudgeId, loading]);
 
   // Actions
-  const handleRegisterCompetitor = async (competitor: { bib: string; name: string; email: string; division: string; role: "Lead" | "Follow" }) => {
+  const handleRegisterCompetitor = async (competitor: { bib: string; name: string; email: string; division: string; role: "Lead" | "Follow" } & PartnerRegistrationFields) => {
     const res = await fetch("/api/register", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -220,7 +221,7 @@ export default function App() {
 
   const handleUpdateCompetitor = async (
     oldBib: string,
-    updates: { bib: string; name: string; email?: string; division: string; role: "Lead" | "Follow"; checkedIn?: boolean; scratched?: boolean }
+    updates: { bib: string; name: string; email?: string; division: string; role: "Lead" | "Follow"; checkedIn?: boolean; scratched?: boolean } & PartnerRegistrationFields
   ) => {
     const res = await fetch("/api/competitor/update", {
       method: "POST",
@@ -266,7 +267,7 @@ export default function App() {
     await fetchState();
   };
 
-  const handleUpdateHeat = async (heatId: string, updates: { name?: string; division?: string; role?: "Lead" | "Follow" | "Mixed"; competitorBibs?: string[]; couples?: any[]; isCustom?: boolean; splits?: number[] }) => {
+  const handleUpdateHeat = async (heatId: string, updates: { name?: string; division?: string; role?: "Lead" | "Follow" | "Mixed"; competitorBibs?: string[]; couples?: any[]; isCustom?: boolean; splits?: number[]; heatType?: "Prelim" | "Semi-Final" | "Quarter Final" | "Finals"; contestType?: "Jack & Jill" | "Strictly Swing" | "Routine" }) => {
     const res = await fetch("/api/heats/update", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -352,7 +353,7 @@ export default function App() {
         }
       }
 
-      const isHeatFinals = heat.heatType === "Finals" || heat.name.includes("Finals");
+      const isHeatFinals = isCouplesHeat(heat);
       const rawHeatCompetitors = heat.competitorBibs
         .map((bib) => {
           const comp = competitors.find((c) => c.bib === bib);
@@ -360,9 +361,7 @@ export default function App() {
 
           if (bib.includes("_")) {
             const [leadBib, followBib] = bib.split("_");
-            const isFinals = heat.heatType === "Finals" || heat.name.includes("Finals");
-
-            if (isFinals || judgeRole === "Both") {
+            if (isHeatFinals || judgeRole === "Both") {
               const lead = competitors.find((c) => c.bib === leadBib);
               const follow = competitors.find((c) => c.bib === followBib);
               const leadName = lead ? lead.name : `Lead #${leadBib}`;
@@ -576,6 +575,7 @@ export default function App() {
                 <RegisterCompetitor
                   competitors={competitors}
                   onRegister={handleRegisterCompetitor}
+                  onUpdateCompetitor={handleUpdateCompetitor}
                   isDarkMode={isDarkMode}
                   settings={settings}
                 />

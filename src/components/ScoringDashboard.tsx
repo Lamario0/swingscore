@@ -2,6 +2,7 @@ import React, { useState, useMemo } from "react";
 import { Trophy, RefreshCw, ChevronDown, ChevronUp, BarChart3, ListOrdered, CheckCircle2, Filter, ArrowDownAZ, ArrowDownWideNarrow, EyeOff } from "lucide-react";
 import { AppSettings, Competitor, Heat, ScoreRecord, CompletedContestResult } from "../types";
 import { calculateHeatResults } from "../utils/calculations";
+import { isCouplesHeat } from "../utils/partners";
 
 interface ScoringDashboardProps {
   settings: AppSettings;
@@ -67,7 +68,7 @@ function buildMatrix(
   // not the "Lead" placeholder used for couple units on Finals/Routine heats.
   // That lets this matrix group/filter by side using the real role, and skip
   // grouping entirely for heats judged as couples.
-  const hasDistinctRoles = heat.role === "Mixed" && heat.heatType !== "Finals";
+  const hasDistinctRoles = heat.role === "Mixed" && !isCouplesHeat(heat);
 
   if (hasDistinctRoles && sideFilter !== "all") {
     results = results.filter((r) =>
