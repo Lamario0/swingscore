@@ -2,9 +2,10 @@ import express from "express";
 import path from "path";
 import fs from "fs";
 import { createServer as createViteServer } from "vite";
-import { buildRegisteredCouples, getDivisionLockKey, isPartneredContest, validatePartnerFields } from "./src/utils/partners";
+import { buildRegisteredCouples, getAllContestEntries, getContestEntry, getContestRole, getDivisionLockKey, getEntrantSides, isActiveInHeat, isPartneredContest, oppositeRole, validateContestEntries, withAddedEntry, withEntryPartner } from "./src/utils/partners";
+import { CONTEST_ENTRY_KEYS, type ContestEntryFields, type HeatEntryStatus } from "./src/types";
 
-interface Competitor {
+interface Competitor extends ContestEntryFields {
   bib: string;
   name: string;
   email?: string;
@@ -12,28 +13,32 @@ interface Competitor {
   role: "Lead" | "Follow";
   checkedIn: boolean;
   scratched?: boolean;
+  heatStatus?: Record<string, HeatEntryStatus>;
   registryPoints?: number;
-  strictlySwing?: boolean;
-  strictlyPartner?: string;
-  strictlyDivision?: string;
-  routine?: boolean;
-  routinePartner?: string;
-  routineDivision?: string;
 }
 
-const PARTNER_FIELDS = ["strictlySwing", "strictlyPartner", "strictlyDivision", "routine", "routinePartner", "routineDivision"] as const;
-
-// Copies only the partner-contest fields present on `source`, clearing a
-// contest's partner/division whenever it's unchecked.
-function applyPartnerFields(target: Competitor, source: any) {
-  PARTNER_FIELDS.forEach((key) => {
+// Copies only the contest-entry fields present on `source`, clearing an
+// entry's details whenever it's unchecked.
+function applyContestEntryFields(target: Competitor, source: any) {
+  CONTEST_ENTRY_KEYS.forEach((key) => {
     if (source[key] !== undefined) {
       (target as any)[key] = typeof source[key] === "string" ? source[key].trim() : source[key];
     }
   });
+  if (!target.jjSecond) {
+    delete target.jjSecondDivision;
+    delete target.jjSecondRole;
+  }
   if (!target.strictlySwing) {
     delete target.strictlyPartner;
     delete target.strictlyDivision;
+    delete target.strictlyRole;
+    delete target.strictlySecond;
+  }
+  if (!target.strictlySecond) {
+    delete target.strictlySecondPartner;
+    delete target.strictlySecondDivision;
+    delete target.strictlySecondRole;
   }
   if (!target.routine) {
     delete target.routinePartner;
@@ -48,6 +53,8 @@ interface Heat {
   role: "Lead" | "Follow" | "Mixed";
   competitorBibs: string[];
   couples?: { id: string; leadBib: string; followBib: string }[];
+  unpairedBibs?: string[];
+  finalistBibs?: string[];
   isCustom?: boolean;
   contestType?: "Jack & Jill" | "Strictly Swing" | "Routine";
   heatType?: "Prelim" | "Semi-Final" | "Quarter Final" | "Finals";
@@ -237,39 +244,48 @@ const DEFAULT_STATE: AppState = {
   }
 };
 
-function autoPopulateHeats(state: AppState) {
-  const leadsByDiv: { [div: string]: string[] } = {};
-  const followsByDiv: { [div: string]: string[] } = {};
+function setHeatStatus(c: Competitor, heatId: string, change: HeatEntryStatus) {
+  const status = { ...(c.heatStatus?.[heatId] || {}) };
+  if (change.checkedIn !== undefined) status.checkedIn = !!change.checkedIn;
+  if (change.scratched !== undefined) status.scratched = !!change.scratched;
+  c.heatStatus = { ...(c.heatStatus || {}), [heatId]: status };
+}
 
+// Data saved before check-in became per contest kept one status per dancer
+// that applied to whichever heat was live; carry it onto every existing heat.
+function migrateHeatStatus(state: AppState) {
   state.competitors.forEach((c) => {
-    if (c.checkedIn && !c.scratched) {
-      const div = c.division;
-      if (c.role === "Lead") {
-        if (!leadsByDiv[div]) leadsByDiv[div] = [];
-        leadsByDiv[div].push(c.bib);
-      } else {
-        if (!followsByDiv[div]) followsByDiv[div] = [];
-        followsByDiv[div].push(c.bib);
-      }
+    if (c.heatStatus) return;
+    c.heatStatus = {};
+    if (c.checkedIn || c.scratched) {
+      state.heats.forEach((h) => {
+        c.heatStatus![h.id] = { checkedIn: !!c.checkedIn, scratched: !!c.scratched };
+      });
     }
   });
+}
 
+function autoPopulateHeats(state: AppState) {
   state.heats.forEach((heat) => {
     if (heat.isCustom) return; // Skip custom heats to preserve manual admin modifications
+    const isActive = (c: Competitor) => isActiveInHeat(c, heat.id);
 
     const div = heat.division;
 
     // Partnered contests are always danced with the registered partner.
     if (isPartneredContest(heat.contestType)) {
-      const { couples } = buildRegisteredCouples(state.competitors, heat.contestType!, div, (c) => c.checkedIn && !c.scratched);
+      const { couples } = buildRegisteredCouples(state.competitors, heat.contestType!, div, isActive);
       heat.role = "Mixed";
       heat.couples = couples;
       heat.competitorBibs = couples.map((c) => c.id);
       return;
     }
 
-    const leads = leadsByDiv[div] || [];
-    const follows = followsByDiv[div] || [];
+    // Jack & Jill: everyone with an entry (first or second) in this division,
+    // on the side they entered it.
+    const sides = getEntrantSides(state.competitors.filter(isActive), "Jack & Jill", div);
+    const leads = [...sides].filter(([, side]) => side === "Lead").map(([bib]) => bib);
+    const follows = [...sides].filter(([, side]) => side === "Follow").map(([bib]) => bib);
 
     if (heat.role === "Lead") {
       heat.competitorBibs = leads;
@@ -287,6 +303,7 @@ function readState(): AppState {
     if (fs.existsSync(DATA_FILE)) {
       const content = fs.readFileSync(DATA_FILE, "utf-8");
       const state = JSON.parse(content);
+      migrateHeatStatus(state);
       autoPopulateHeats(state);
       return state;
     }
@@ -294,6 +311,7 @@ function readState(): AppState {
     console.error("Error reading state file, using default state", error);
   }
   const defaultStateCopy = JSON.parse(JSON.stringify(DEFAULT_STATE));
+  migrateHeatStatus(defaultStateCopy);
   autoPopulateHeats(defaultStateCopy);
   return defaultStateCopy;
 }
@@ -331,23 +349,26 @@ async function startServer() {
       return;
     }
 
-    if ((state.settings.lockedDivisions || []).includes(division)) {
-      res.status(403).json({ error: `Registration for the ${division} division is closed — check-in has already been created for this division` });
+    const newCompetitor: Competitor = {
+      bib,
+      name,
+      email,
+      division,
+      role,
+      checkedIn: false
+    };
+    applyContestEntryFields(newCompetitor, req.body);
+
+    const entryError = validateContestEntries(newCompetitor);
+    if (entryError) {
+      res.status(400).json({ error: entryError });
       return;
     }
 
-    const partnerError = validatePartnerFields(req.body);
-    if (partnerError) {
-      res.status(400).json({ error: partnerError });
-      return;
-    }
-
-    const lockedPartnered = [
-      req.body.strictlySwing ? ["Strictly Swing", req.body.strictlyDivision] : null,
-      req.body.routine ? ["Routine", req.body.routineDivision] : null
-    ].find((entry) => entry && (state.settings.lockedDivisions || []).includes(getDivisionLockKey(entry[0], entry[1])));
-    if (lockedPartnered) {
-      res.status(403).json({ error: `Registration for ${lockedPartnered[1]} ${lockedPartnered[0]} is closed — check-in has already been created for it` });
+    const lockedEntry = getAllContestEntries(newCompetitor)
+      .find((entry) => (state.settings.lockedDivisions || []).includes(getDivisionLockKey(entry.contestType, entry.division)));
+    if (lockedEntry) {
+      res.status(403).json({ error: `Registration for ${lockedEntry.division} ${lockedEntry.contestType} is closed — check-in has already been created for it` });
       return;
     }
 
@@ -358,25 +379,20 @@ async function startServer() {
       return;
     }
 
-    const newCompetitor: Competitor = {
-      bib,
-      name,
-      email,
-      division,
-      role,
-      checkedIn: false
-    };
-    applyPartnerFields(newCompetitor, req.body);
-
     state.competitors.push(newCompetitor);
     writeState(state);
     res.json({ success: true, competitor: newCompetitor });
   });
 
   app.post("/api/check-in", (req, res) => {
-    const { bib, checkedIn, scratched, registryPoints } = req.body;
+    const { bib, heatId, checkedIn, scratched, registryPoints } = req.body;
     if (bib === undefined) {
       res.status(400).json({ error: "Missing bib parameter" });
+      return;
+    }
+    // Check-in and scratch belong to one contest (heat); registry points don't.
+    if ((checkedIn !== undefined || scratched !== undefined) && !heatId) {
+      res.status(400).json({ error: "Missing heatId for the check-in status" });
       return;
     }
 
@@ -387,8 +403,7 @@ async function startServer() {
       return;
     }
 
-    if (checkedIn !== undefined) competitor.checkedIn = checkedIn;
-    if (scratched !== undefined) competitor.scratched = scratched;
+    if (heatId) setHeatStatus(competitor, heatId, { checkedIn, scratched });
     if (registryPoints !== undefined) competitor.registryPoints = Number(registryPoints);
 
     writeState(state);
@@ -396,15 +411,9 @@ async function startServer() {
   });
 
   app.post("/api/competitor/update", (req, res) => {
-    const { oldBib, newBib, name, email, role, division, checkedIn, scratched } = req.body;
+    const { oldBib, newBib, name, email, role, division, checkedIn, scratched, heatId } = req.body;
     if (!oldBib || !newBib || !role || !division) {
       res.status(400).json({ error: "Missing required competitor update fields" });
-      return;
-    }
-
-    const partnerError = validatePartnerFields(req.body);
-    if (partnerError) {
-      res.status(400).json({ error: partnerError });
       return;
     }
 
@@ -424,14 +433,23 @@ async function startServer() {
       return;
     }
 
+    // Validate the registration as it will be saved (edits may send only
+    // some fields, e.g. a single entry's role) before touching the stored one.
+    const updated: Competitor = { ...competitor, role, division };
+    applyContestEntryFields(updated, req.body);
+    const entryError = validateContestEntries(updated);
+    if (entryError) {
+      res.status(400).json({ error: entryError });
+      return;
+    }
+
+    Object.keys(competitor).forEach((key) => delete (competitor as any)[key]);
+    Object.assign(competitor, updated);
     competitor.bib = newBib;
     if (name !== undefined) competitor.name = name;
     if (email !== undefined) competitor.email = email;
-    competitor.role = role;
-    competitor.division = division;
-    if (checkedIn !== undefined) competitor.checkedIn = checkedIn;
-    if (scratched !== undefined) competitor.scratched = scratched;
-    applyPartnerFields(competitor, req.body);
+    // Status edits come from a contest's check-in sheet and apply to that contest only.
+    if (heatId) setHeatStatus(competitor, heatId, { checkedIn, scratched });
 
     if (oldBib !== newBib) {
       state.heats.forEach((heat) => {
@@ -466,7 +484,7 @@ async function startServer() {
   });
 
   app.post("/api/heats/create", (req, res) => {
-    const { name, division, role, competitorBibs, couples, target, heatType, contestType } = req.body;
+    const { name, division, role, competitorBibs, couples, unpairedBibs, finalistBibs, target, heatType, contestType } = req.body;
     if (!name || !division || !role || !competitorBibs) {
       res.status(400).json({ error: "Missing required heat fields" });
       return;
@@ -483,6 +501,8 @@ async function startServer() {
       role,
       competitorBibs,
       couples: finalCouples,
+      ...(Array.isArray(unpairedBibs) && unpairedBibs.length > 0 ? { unpairedBibs } : {}),
+      ...(Array.isArray(finalistBibs) ? { finalistBibs } : {}),
       isCustom: true,
       heatType: heatType || (name.includes("Finals") ? "Finals" : name.includes("Semi-Final") ? "Semi-Final" : name.includes("Quarter Final") ? "Quarter Final" : "Prelim"),
       contestType: contestType || (name.includes("Routine") ? "Routine" : name.includes("Strictly") ? "Strictly Swing" : "Jack & Jill")
@@ -494,6 +514,68 @@ async function startServer() {
     }
     writeState(state);
     res.json({ success: true, heat: newHeat });
+  });
+
+  // Floor Coordinator pairs a dancer left unpaired on a partnered check-in
+  // sheet: both registrations are updated to name each other (entering the
+  // partner into this contest+division if needed) and the couple joins the sheet.
+  app.post("/api/heats/assign-partner", (req, res) => {
+    const { heatId, bib, partnerBib } = req.body;
+    const state = readState();
+    const heat = state.heats.find((h) => h.id === heatId);
+    if (!heat || !isPartneredContest(heat.contestType)) {
+      res.status(400).json({ error: "Partners can only be assigned on a Strictly Swing or Routine check-in sheet" });
+      return;
+    }
+    const contestType = heat.contestType!;
+    const division = heat.division;
+    const isPaired = (b: string) => (heat.couples || []).some((c) => c.leadBib === b || c.followBib === b);
+    if (!(heat.unpairedBibs || []).includes(bib)) {
+      res.status(400).json({ error: "That dancer is not waiting for a partner on this sheet" });
+      return;
+    }
+    if (!partnerBib || partnerBib === bib || isPaired(partnerBib)) {
+      res.status(400).json({ error: "Choose a partner who is not already partnered on this sheet" });
+      return;
+    }
+    const dancer = state.competitors.find((c) => c.bib === bib);
+    const partner = state.competitors.find((c) => c.bib === partnerBib);
+    const dancerEntry = dancer && getContestEntry(dancer, contestType, division);
+    if (!dancer || !partner || !dancerEntry) {
+      res.status(404).json({ error: "Dancer or partner not found" });
+      return;
+    }
+
+    const partnerRole = dancerEntry.role ? oppositeRole(dancerEntry.role) : null;
+    const updatedPartner = getContestEntry(partner, contestType, division)
+      ? withEntryPartner(partner, contestType, division, dancer.name)
+      : withAddedEntry(partner, contestType, division, partnerRole, dancer.name);
+    if (!updatedPartner) {
+      res.status(400).json({ error: `${partner.name} is already entered in ${contestType} in as many divisions as allowed` });
+      return;
+    }
+    if (dancerEntry.role && getContestRole(updatedPartner, contestType, division) === dancerEntry.role) {
+      res.status(400).json({ error: `${dancer.name} and ${partner.name} are both registered as ${dancerEntry.role === "Lead" ? "Leaders" : "Followers"} for ${division} ${contestType}` });
+      return;
+    }
+    const entryError = validateContestEntries(updatedPartner);
+    if (entryError) {
+      res.status(400).json({ error: `${partner.name}: ${entryError}` });
+      return;
+    }
+    Object.assign(dancer, withEntryPartner(dancer, contestType, division, partner.name));
+    Object.assign(partner, updatedPartner);
+
+    // Routines have no roles: the waiting dancer simply takes the couple's first slot.
+    const dancerLeads = dancerEntry.role ? dancerEntry.role === "Lead" : true;
+    const [lead, follow] = dancerLeads ? [dancer, partner] : [partner, dancer];
+    const couple = { id: `${lead.bib}_${follow.bib}`, leadBib: lead.bib, followBib: follow.bib };
+    heat.unpairedBibs = (heat.unpairedBibs || []).filter((b) => b !== bib && b !== partnerBib);
+    heat.couples = [...(heat.couples || []), couple];
+    heat.competitorBibs = [...heat.competitorBibs, couple.id];
+
+    writeState(state);
+    res.json({ success: true, couple });
   });
 
   app.post("/api/heats/update", (req, res) => {
@@ -563,6 +645,7 @@ async function startServer() {
     
     if (state.settings.queuedHeatId === heatId) {
       state.settings.queuedHeatId = null;
+      state.settings.queuedCheckInFinalized = false;
     }
 
     if (state.settings.currentHeatId === heatId) {
@@ -580,8 +663,9 @@ async function startServer() {
     const newHeatId = req.body.currentHeatId;
     const isNewHeatActivated = newHeatId !== undefined && newHeatId !== oldHeatId && newHeatId !== null;
 
-    // Check if finalizing check-in
-    const finalized = req.body.checkInFinalized === true && state.settings.checkInFinalized !== true;
+    // Check if finalizing check-in (not when a promoted contest arrives with
+    // its own check-in already finalized: its sheet must stay as it is)
+    const finalized = !isNewHeatActivated && req.body.checkInFinalized === true && state.settings.checkInFinalized !== true;
     
     state.settings = {
       ...state.settings,
@@ -589,12 +673,10 @@ async function startServer() {
     };
 
     if (isNewHeatActivated) {
-      // Reset all competitor check-in and scratch statuses by default for the new contest!
-      state.competitors.forEach((c) => {
-        c.checkedIn = false;
-        c.scratched = false;
-      });
-      state.settings.checkInFinalized = false;
+      // Check-in status is kept per contest, so the new contest starts from its
+      // own statuses without touching any other contest's. A contest promoted
+      // from Next keeps the check-in finalization it was promoted with.
+      state.settings.checkInFinalized = req.body.checkInFinalized === true;
       state.settings.finalizedSheets = [];
       
       // Keep activeHeat custom so its admin-created competitor list (check-in sheet) is preserved
@@ -771,6 +853,9 @@ async function startServer() {
     const vite = await createViteServer({
       server: { middlewareMode: true },
       appType: "spa",
+      // Import vite.config.ts directly (tsx can load it) rather than bundling
+      // it to a temp file, whose deletion would restart `tsx watch` endlessly.
+      configLoader: "native",
     });
     app.use(vite.middlewares);
   } else {

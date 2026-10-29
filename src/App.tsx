@@ -9,8 +9,8 @@ import ResultsDashboard from "./components/ResultsDashboard";
 import ScoringDashboard from "./components/ScoringDashboard";
 import PlatformPortal from "./components/PlatformPortal";
 import RoleLogin from "./components/RoleLogin";
-import { Competitor, Heat, ScoreRecord, AppSettings, ViewRole, CallbackValue, PartnerRegistrationFields } from "./types";
-import { isCouplesHeat } from "./utils/partners";
+import { Competitor, Heat, ScoreRecord, AppSettings, ViewRole, CallbackValue, ContestEntryFields } from "./types";
+import { isCouplesHeat, projectCompetitorsForHeat } from "./utils/partners";
 
 export default function App() {
   // Navigation & Preferences (Dynamically detected via URL slug, query string, or subdomains)
@@ -196,7 +196,7 @@ export default function App() {
   }, [settings, selectedJudgeId, loading]);
 
   // Actions
-  const handleRegisterCompetitor = async (competitor: { bib: string; name: string; email: string; division: string; role: "Lead" | "Follow" } & PartnerRegistrationFields) => {
+  const handleRegisterCompetitor = async (competitor: { bib: string; name: string; email: string; division: string; role: "Lead" | "Follow" } & ContestEntryFields) => {
     const res = await fetch("/api/register", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -209,19 +209,33 @@ export default function App() {
     await fetchState();
   };
 
-  const handleCheckInToggle = async (bib: string, checkedIn: boolean, scratched?: boolean, registryPoints?: number) => {
+  // Check-in and scratch apply to one contest (heat); registry points are global.
+  const handleCheckInToggle = async (bib: string, heatId: string, checkedIn: boolean, scratched?: boolean, registryPoints?: number) => {
     const res = await fetch("/api/check-in", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ bib, checkedIn, scratched, registryPoints })
+      body: JSON.stringify({ bib, heatId, checkedIn, scratched, registryPoints })
     });
     if (!res.ok) throw new Error("Failed to toggle check-in");
     await fetchState();
   };
 
+  const handleAssignPartner = async (heatId: string, bib: string, partnerBib: string) => {
+    const res = await fetch("/api/heats/assign-partner", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ heatId, bib, partnerBib })
+    });
+    if (!res.ok) {
+      const data = await res.json().catch(() => ({}));
+      throw new Error(data.error || "Failed to assign partner");
+    }
+    await fetchState();
+  };
+
   const handleUpdateCompetitor = async (
     oldBib: string,
-    updates: { bib: string; name: string; email?: string; division: string; role: "Lead" | "Follow"; checkedIn?: boolean; scratched?: boolean } & PartnerRegistrationFields
+    updates: { bib: string; name: string; email?: string; division: string; role: "Lead" | "Follow"; checkedIn?: boolean; scratched?: boolean; heatId?: string } & ContestEntryFields
   ) => {
     const res = await fetch("/api/competitor/update", {
       method: "POST",
@@ -236,7 +250,7 @@ export default function App() {
   };
 
   const handleCreateHeat = async (
-    heatData: { name: string; division: string; role: "Lead" | "Follow" | "Mixed"; competitorBibs: string[]; couples?: { id: string; leadBib: string; followBib: string }[]; heatType?: "Prelim" | "Semi-Final" | "Quarter Final" | "Finals"; contestType?: "Jack & Jill" | "Strictly Swing" | "Routine" },
+    heatData: { name: string; division: string; role: "Lead" | "Follow" | "Mixed"; competitorBibs: string[]; couples?: { id: string; leadBib: string; followBib: string }[]; unpairedBibs?: string[]; finalistBibs?: string[]; heatType?: "Prelim" | "Semi-Final" | "Quarter Final" | "Finals"; contestType?: "Jack & Jill" | "Strictly Swing" | "Routine" },
     target: "live" | "next" = "live"
   ) => {
     const res = await fetch("/api/heats/create", {
@@ -248,7 +262,7 @@ export default function App() {
     const data = await res.json();
     if (data.heat && data.heat.id) {
       if (target === "next") {
-        await handleUpdateSettings({ queuedHeatId: data.heat.id });
+        await handleUpdateSettings({ queuedHeatId: data.heat.id, queuedCheckInFinalized: false });
       } else {
         await handleUpdateSettings({ currentHeatId: data.heat.id });
       }
@@ -307,6 +321,8 @@ export default function App() {
   const handleSimulateScores = async (heatId: string) => {
     const heat = heats.find((h) => h.id === heatId);
     if (!heat) return;
+    // Dancers as this heat sees them (their entry for its contest+division).
+    const heatCompetitors = projectCompetitorsForHeat(competitors, heat);
 
     const defaultNames = ["Judge A", "Judge B", "Judge C", "Judge D", "Judge E"];
     const defaultRoles = ["None", "None", "None", "None", "None"];
@@ -356,14 +372,14 @@ export default function App() {
       const isHeatFinals = isCouplesHeat(heat);
       const rawHeatCompetitors = heat.competitorBibs
         .map((bib) => {
-          const comp = competitors.find((c) => c.bib === bib);
+          const comp = heatCompetitors.find((c) => c.bib === bib);
           if (comp) return comp;
 
           if (bib.includes("_")) {
             const [leadBib, followBib] = bib.split("_");
             if (isHeatFinals || judgeRole === "Both") {
-              const lead = competitors.find((c) => c.bib === leadBib);
-              const follow = competitors.find((c) => c.bib === followBib);
+              const lead = heatCompetitors.find((c) => c.bib === leadBib);
+              const follow = heatCompetitors.find((c) => c.bib === followBib);
               const leadName = lead ? lead.name : `Lead #${leadBib}`;
               const followName = follow ? follow.name : `Follow #${followBib}`;
               return {
@@ -374,12 +390,12 @@ export default function App() {
                 checkedIn: true
               } as Competitor;
             } else if (judgeRole === "Leaders") {
-              return competitors.find((c) => c.bib === leadBib);
+              return heatCompetitors.find((c) => c.bib === leadBib);
             } else if (judgeRole === "Followers") {
-              return competitors.find((c) => c.bib === followBib);
+              return heatCompetitors.find((c) => c.bib === followBib);
             } else {
-              const lead = competitors.find((c) => c.bib === leadBib);
-              const follow = competitors.find((c) => c.bib === followBib);
+              const lead = heatCompetitors.find((c) => c.bib === leadBib);
+              const follow = heatCompetitors.find((c) => c.bib === followBib);
               const leadName = lead ? lead.name : `Lead #${leadBib}`;
               const followName = follow ? follow.name : `Follow #${followBib}`;
               return {
@@ -586,6 +602,7 @@ export default function App() {
                   competitors={competitors}
                   heats={heats}
                   onCheckInToggle={handleCheckInToggle}
+                  onAssignPartner={handleAssignPartner}
                   isDarkMode={isDarkMode}
                   settings={settings}
                   onUpdateSettings={handleUpdateSettings}

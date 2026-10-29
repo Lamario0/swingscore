@@ -1,10 +1,10 @@
 import React, { useState } from "react";
 import { UserPlus, Search, ListFilter, Users, PlusCircle, Sparkles, Edit, Save } from "lucide-react";
-import { Competitor, Division, AppSettings, PartnerRegistrationFields } from "../types";
-import { validatePartnerFields } from "../utils/partners";
-import PartnerContestFields, { emptyPartnerFields, partnerFieldsFrom } from "./PartnerContestFields";
+import { Competitor, Division, AppSettings, ContestEntryFields } from "../types";
+import { getAllContestEntries, getDivisionLockKey, getEntryLockKeys, validateContestEntries } from "../utils/partners";
+import ContestEntryInputs, { emptyContestEntries, contestEntriesFrom } from "./ContestEntryInputs";
 
-type CompetitorDetails = { bib: string; name: string; email: string; division: string; role: "Lead" | "Follow" } & PartnerRegistrationFields;
+type CompetitorDetails = { bib: string; name: string; email: string; division: string; role: "Lead" | "Follow" } & ContestEntryFields;
 
 interface RegisterCompetitorProps {
   competitors: Competitor[];
@@ -20,7 +20,7 @@ export default function RegisterCompetitor({ competitors, onRegister, onUpdateCo
   const [email, setEmail] = useState("");
   const [division, setDivision] = useState<Division>("Novice");
   const [role, setRole] = useState<"Lead" | "Follow">("Lead");
-  const [partnerFields, setPartnerFields] = useState<PartnerRegistrationFields>(emptyPartnerFields());
+  const [entryFields, setEntryFields] = useState<ContestEntryFields>(emptyContestEntries());
   // When set, the sign-up form is editing this already-registered dancer.
   const [editingCompetitor, setEditingCompetitor] = useState<Competitor | null>(null);
   const [search, setSearch] = useState("");
@@ -54,7 +54,7 @@ export default function RegisterCompetitor({ competitors, onRegister, onUpdateCo
     setBib("");
     setName("");
     setEmail("");
-    setPartnerFields(emptyPartnerFields());
+    setEntryFields(emptyContestEntries());
     setEditingCompetitor(null);
   };
 
@@ -65,7 +65,7 @@ export default function RegisterCompetitor({ competitors, onRegister, onUpdateCo
     setEmail(c.email || "");
     setDivision(c.division as Division);
     setRole(c.role);
-    setPartnerFields(partnerFieldsFrom(c));
+    setEntryFields(contestEntriesFrom(c));
     setError("");
     setSuccess("");
   };
@@ -91,9 +91,18 @@ export default function RegisterCompetitor({ competitors, onRegister, onUpdateCo
       return;
     }
 
-    const partnerError = validatePartnerFields(partnerFields);
-    if (partnerError) {
-      setError(partnerError);
+    const entryError = validateContestEntries({ ...entryFields, division: division, role: role });
+    if (entryError) {
+      setError(entryError);
+      return;
+    }
+
+    // Any newly entered contest+division whose check-in sheet already exists is closed.
+    const keptLockKeys = editingCompetitor ? getEntryLockKeys(editingCompetitor) : [];
+    const closedEntry = getAllContestEntries({ bib, name, division, role, ...entryFields })
+      .find((e) => !keptLockKeys.includes(getDivisionLockKey(e.contestType, e.division)) && (settings.lockedDivisions || []).includes(getDivisionLockKey(e.contestType, e.division)));
+    if (closedEntry) {
+      setError(`Registration for ${closedEntry.division} ${closedEntry.contestType} is closed — check-in has already been created.`);
       return;
     }
 
@@ -103,7 +112,7 @@ export default function RegisterCompetitor({ competitors, onRegister, onUpdateCo
       email: email.trim(),
       division,
       role,
-      ...partnerFields
+      ...entryFields
     };
 
     setLoading(true);
@@ -126,7 +135,7 @@ export default function RegisterCompetitor({ competitors, onRegister, onUpdateCo
   // Filtered list
   const filtered = competitors.filter((c) => {
     const matchesSearch = c.name.toLowerCase().includes(search.toLowerCase()) || c.bib.includes(search);
-    const matchesDiv = filterDivision === "All" || c.division === filterDivision;
+    const matchesDiv = filterDivision === "All" || c.division === filterDivision || (!!c.jjSecond && c.jjSecondDivision === filterDivision);
     return matchesSearch && matchesDiv;
   });
 
@@ -220,8 +229,7 @@ export default function RegisterCompetitor({ competitors, onRegister, onUpdateCo
                   <th className="p-3">Email</th>
                   <th className="p-3">Division</th>
                   <th className="p-3">Role</th>
-                  <th className="p-3">Strictly / Routine</th>
-                  <th className="p-3">Check-In Status</th>
+                  <th className="p-3">Other Entries</th>
                   {onUpdateCompetitor && <th className="p-3 text-right">Edit</th>}
                 </tr>
               </thead>
@@ -252,17 +260,11 @@ export default function RegisterCompetitor({ competitors, onRegister, onUpdateCo
                         </span>
                       </td>
                       <td className="p-3 text-[10px] text-slate-400 space-y-0.5">
-                        {c.strictlySwing && <div><span className="font-semibold text-violet-500">Strictly</span> {c.strictlyDivision} · w/ {c.strictlyPartner}</div>}
+                        {c.jjSecond && <div><span className="font-semibold text-violet-500">J&amp;J</span> {c.jjSecondDivision} {c.jjSecondRole}</div>}
+                        {c.strictlySwing && <div><span className="font-semibold text-violet-500">Strictly</span> {c.strictlyDivision} {c.strictlyRole || c.role} · w/ {c.strictlyPartner}</div>}
+                        {c.strictlySwing && c.strictlySecond && <div><span className="font-semibold text-violet-500">Strictly</span> {c.strictlySecondDivision} {c.strictlySecondRole} · w/ {c.strictlySecondPartner}</div>}
                         {c.routine && <div><span className="font-semibold text-violet-500">Routine</span> {c.routineDivision} · w/ {c.routinePartner}</div>}
-                        {!c.strictlySwing && !c.routine && "—"}
-                      </td>
-                      <td className="p-3">
-                        <span className={`inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full text-[10px] font-semibold ${
-                          c.checkedIn ? "bg-green-500/10 text-green-500" : "bg-yellow-500/10 text-yellow-500"
-                        }`}>
-                          <span className={`w-1.5 h-1.5 rounded-full ${c.checkedIn ? "bg-green-500" : "bg-yellow-500 animate-pulse"}`} />
-                          {c.checkedIn ? "Checked In" : "Pending Check-In"}
-                        </span>
+                        {!c.jjSecond && !c.strictlySwing && !c.routine && "—"}
                       </td>
                       {onUpdateCompetitor && (
                         <td className="p-3 text-right">
@@ -280,7 +282,7 @@ export default function RegisterCompetitor({ competitors, onRegister, onUpdateCo
                   ))
                 ) : (
                   <tr>
-                    <td colSpan={onUpdateCompetitor ? 8 : 7} className="p-6 text-center text-slate-500">
+                    <td colSpan={onUpdateCompetitor ? 7 : 6} className="p-6 text-center text-slate-500">
                       No competitors found. Use the form to register new dancers.
                     </td>
                   </tr>
@@ -366,7 +368,7 @@ export default function RegisterCompetitor({ competitors, onRegister, onUpdateCo
 
             {/* Division */}
             <div>
-              <label className="block text-xs font-medium text-slate-400 mb-1.5">Division</label>
+              <label className="block text-xs font-medium text-slate-400 mb-1.5">Jack &amp; Jill Division</label>
               <div className="grid grid-cols-2 gap-2">
                 {(["Newcomer", "Novice", "Intermediate", "Advance", "All-Star", "Pro", "Open"] as Division[]).map((div) => {
                   const isLocked = (settings.lockedDivisions || []).includes(div) && editingCompetitor?.division !== div;
@@ -396,7 +398,7 @@ export default function RegisterCompetitor({ competitors, onRegister, onUpdateCo
 
             {/* Role */}
             <div>
-              <label className="block text-xs font-medium text-slate-400 mb-1.5">Dance Role</label>
+              <label className="block text-xs font-medium text-slate-400 mb-1.5">Jack &amp; Jill Role</label>
               <div className="grid grid-cols-2 gap-3">
                 <button
                   type="button"
@@ -432,13 +434,16 @@ export default function RegisterCompetitor({ competitors, onRegister, onUpdateCo
 
             {/* Partnered contests */}
             <div>
-              <label className="block text-xs font-medium text-slate-400 mb-1.5">Partnered Contests</label>
-              <PartnerContestFields
-                value={partnerFields}
-                onChange={setPartnerFields}
+              <label className="block text-xs font-medium text-slate-400 mb-1.5">More Contest Entries</label>
+              <p className="text-[10px] text-slate-400 mb-2">Jack &amp; Jill and Strictly Swing can each be entered in up to 2 divisions, with a different role in each. Routines are entered once, as a couple, with no role.</p>
+              <ContestEntryInputs
+                value={entryFields}
+                onChange={setEntryFields}
                 isDarkMode={isDarkMode}
                 lockedDivisions={settings.lockedDivisions}
-                initialValue={editingCompetitor ? partnerFieldsFrom(editingCompetitor) : undefined}
+                initialValue={editingCompetitor ? contestEntriesFrom(editingCompetitor) : undefined}
+                mainDivision={division}
+                mainRole={role}
               />
             </div>
 

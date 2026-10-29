@@ -1,5 +1,5 @@
 import { Competitor, ScoreRecord, Heat, AppSettings } from "../types";
-import { isCouplesHeat } from "./partners";
+import { isCouplesHeat, projectCompetitorsForHeat } from "./partners";
 
 export interface CompetitorResult {
   competitor: Competitor;
@@ -28,7 +28,7 @@ export interface CompetitorResult {
 
 export function calculateHeatResults(
   heat: Heat,
-  competitors: Competitor[],
+  allCompetitors: Competitor[],
   scores: ScoreRecord[],
   judgingStyle: "raw" | "placement" | "callback",
   callbackCount: number,
@@ -39,6 +39,9 @@ export function calculateHeatResults(
   alternateCountFollowers?: number,
   settings?: AppSettings
 ): CompetitorResult[] {
+  // Read each dancer's entry for this heat's contest+division (role/division),
+  // so a second-division entry is ranked on the side it was entered on.
+  const competitors = projectCompetitorsForHeat(allCompetitors, heat);
   // If Mixed heat and not judged as couples (Finals, or any partnered-contest
   // round), calculate results separately for Leaders and Followers
   if (heat.role === "Mixed" && !isCouplesHeat(heat)) {
@@ -362,9 +365,10 @@ export function calculateHeatResults(
 // Judges tab (so the live "who has/hasn't submitted" view matches exactly).
 export function getJudgeHeatCompetitors(
   heat: Heat,
-  competitors: Competitor[],
+  allCompetitors: Competitor[],
   judgeRole: "Leaders" | "Followers" | "Finals" | "Both" | "None"
 ): Competitor[] {
+  const competitors = projectCompetitorsForHeat(allCompetitors, heat);
   const rawHeatCompetitors = heat.competitorBibs
     .map((bib) => {
       const comp = competitors.find((c) => c.bib === bib);

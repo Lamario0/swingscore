@@ -2,6 +2,7 @@ import React, { useState, useEffect } from "react";
 import { Award, Check, Save, User, Clock, AlertTriangle, ChevronUp, ChevronDown, RefreshCw } from "lucide-react";
 import { Competitor, Heat, ScoreRecord, JudgingStyle, CallbackValue, AppSettings } from "../types";
 import { getJudgeHeatCompetitors } from "../utils/calculations";
+import { projectCompetitorsForHeat } from "../utils/partners";
 
 interface JudgePortalProps {
   competitors: Competitor[];
@@ -178,6 +179,8 @@ export default function JudgePortal({
   const heatCompetitors = activeHeat
     ? getJudgeHeatCompetitors(activeHeat, competitors, judgeRole)
     : [];
+  // Each dancer's entry for this heat's contest+division (division and role).
+  const heatRoster = activeHeat ? projectCompetitorsForHeat(competitors, activeHeat) : competitors;
 
   // Same shared row-position split model as AdminPanel/CoordinatorCheckIn: a stored split
   // value is a local index within each role's own ordered subset, applied identically to
@@ -187,7 +190,7 @@ export default function JudgePortal({
     const sortedSplits = [...(activeHeat.splits || [])].sort((a, b) => a - b);
     if (sortedSplits.length === 0) return 1;
     const roleBibs = activeHeat.competitorBibs.filter(b => {
-      const comp = competitors.find(cc => cc.bib === b);
+      const comp = heatRoster.find(cc => cc.bib === b);
       return (comp?.role || "Lead") === (role || "Lead");
     });
     const roleSpecificIndex = roleBibs.indexOf(bib);
@@ -962,6 +965,14 @@ export default function JudgePortal({
 
   const handleFinalizeClick = async () => {
     if (!canFinalize || !activeHeatId) return;
+    // A callback sheet shows untouched dancers as "No" without saving anything
+    // for them; record that "No" so the submitted sheet is complete.
+    if (judgingStyle === "callback" && activeHeat) {
+      const savedBibs = new Set(scores.filter((s) => s.judgeId === judgeId && s.heatId === activeHeat.id).map((s) => s.competitorBib));
+      for (const c of heatCompetitors) {
+        if (!savedBibs.has(c.bib)) await triggerSave(c.bib, localScores[c.bib] || 0, localCallbacks[c.bib] || "No");
+      }
+    }
     const key = `${activeHeatId}:${judgeId}`;
     const currentFinalized = settings.finalizedSheets || [];
     const payload: Partial<AppSettings> = {};

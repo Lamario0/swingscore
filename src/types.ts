@@ -3,29 +3,57 @@ export type Role = "Lead" | "Follow" | "Mixed";
 export type CallbackValue = "Yes" | "No" | "Alt 1" | "Alt 2" | "Alt 3";
 export type JudgingStyle = "raw" | "placement" | "callback";
 
+export interface HeatEntryStatus {
+  checkedIn?: boolean;
+  scratched?: boolean;
+}
+
 export interface Competitor {
   bib: string;
   name: string;
   email?: string;
+  // Jack & Jill entry: the dancer's main division and the role they dance in it.
   division: string;
   role: "Lead" | "Follow";
+  // Check-in and scratch are tracked per contest (heat) in heatStatus, so a
+  // dancer can be checked in for one contest and scratched in another. These
+  // two fields hold the status for the heat being viewed, filled in by
+  // projectCompetitorsForHeat; on their own they're only a legacy fallback.
   checkedIn: boolean;
   scratched?: boolean;
+  heatStatus?: Record<string, HeatEntryStatus>;
   registryPoints?: number;
+  // Optional second Jack & Jill entry in another division, with its own role
+  // (e.g. lead in Advance and follow in Intermediate).
+  jjSecond?: boolean;
+  jjSecondDivision?: string;
+  jjSecondRole?: "Lead" | "Follow";
   // Partnered contests: entered with a named partner and that contest's own
   // division. Couples are only ever formed from these pairings (utils/partners).
+  // Strictly Swing has its own role and, like Jack & Jill, can be entered a
+  // second time in another division. Routines have one entry and no role.
   strictlySwing?: boolean;
   strictlyPartner?: string;
   strictlyDivision?: string;
+  strictlyRole?: "Lead" | "Follow";
+  strictlySecond?: boolean;
+  strictlySecondPartner?: string;
+  strictlySecondDivision?: string;
+  strictlySecondRole?: "Lead" | "Follow";
   routine?: boolean;
   routinePartner?: string;
   routineDivision?: string;
 }
 
-export type PartnerRegistrationFields = Pick<
-  Competitor,
-  "strictlySwing" | "strictlyPartner" | "strictlyDivision" | "routine" | "routinePartner" | "routineDivision"
->;
+// Every contest entry beyond the main Jack & Jill division/role.
+export const CONTEST_ENTRY_KEYS = [
+  "jjSecond", "jjSecondDivision", "jjSecondRole",
+  "strictlySwing", "strictlyPartner", "strictlyDivision", "strictlyRole",
+  "strictlySecond", "strictlySecondPartner", "strictlySecondDivision", "strictlySecondRole",
+  "routine", "routinePartner", "routineDivision"
+] as const;
+
+export type ContestEntryFields = Pick<Competitor, (typeof CONTEST_ENTRY_KEYS)[number]>;
 
 export interface Heat {
   id: string;
@@ -34,6 +62,13 @@ export interface Heat {
   role: "Lead" | "Follow" | "Mixed";
   competitorBibs: string[];
   couples?: { id: string; leadBib: string; followBib: string }[];
+  // Partnered contests only: dancers on the check-in sheet whose registered
+  // partner couldn't be matched. The Floor Coordinator assigns them a partner,
+  // which moves them into `couples`; judges only ever see couples.
+  unpairedBibs?: string[];
+  // Contests created from a previous round's finalists: the dancers who made
+  // the cut. The check-in sheet builder offers only these dancers.
+  finalistBibs?: string[];
   contestType?: "Jack & Jill" | "Strictly Swing" | "Routine";
   heatType?: "Prelim" | "Semi-Final" | "Quarter Final" | "Finals";
   isCustom?: boolean;
