@@ -1,7 +1,8 @@
 import React, { useState } from "react";
 import { Award, Medal, Landmark, Check, AlertCircle, TrendingUp, Users, RefreshCw, Lock, Key } from "lucide-react";
 import { Competitor, Heat, ScoreRecord, AppSettings } from "../types";
-import { calculateHeatResults, CompetitorResult } from "../utils/calculations";
+import { CompetitorResult, CUT_GROUP_LABELS, getContestOptions, getContestOutcome, getCutGroup, isResultNameHidden } from "../utils/calculations";
+import { isCouplesHeat } from "../utils/partners";
 
 interface ResultsDashboardProps {
   competitors: Competitor[];
@@ -21,6 +22,7 @@ export default function ResultsDashboard({
   onRefresh
 }: ResultsDashboardProps) {
   const [selectedHeatId, setSelectedHeatId] = useState<string | null>(null);
+  const [sideTab, setSideTab] = useState<"Lead" | "Follow">("Lead");
   const [syncing, setSyncing] = useState(false);
   const [bypassCode, setBypassCode] = useState("");
   const [bypassError, setBypassError] = useState("");
@@ -145,40 +147,39 @@ export default function ResultsDashboard({
     );
   }
 
-  // Define role-specific callback and alternate counts
-  const hCallbackCount = currentHeat.role === "Lead"
-    ? (settings.callbackCountLeaders !== undefined ? settings.callbackCountLeaders : settings.callbackCount)
-    : currentHeat.role === "Follow"
-      ? (settings.callbackCountFollowers !== undefined ? settings.callbackCountFollowers : settings.callbackCount)
-      : settings.callbackCount;
+  const outcome = getContestOutcome(currentHeat, competitors, scores, settings);
+  const { judgingStyle } = outcome;
+  const contestOptions = getContestOptions(settings, currentHeat.id);
 
-  const hAlternateCount = currentHeat.role === "Lead"
-    ? (settings.alternateCountLeaders !== undefined ? settings.alternateCountLeaders : (settings.alternateCount || 0))
-    : currentHeat.role === "Follow"
-      ? (settings.alternateCountFollowers !== undefined ? settings.alternateCountFollowers : (settings.alternateCount || 0))
-      : (settings.alternateCount || 0);
+  // Only Finals are ranked. Every other round lists who advanced in bib order,
+  // then the alternates, with the dancers who were cut at the bottom.
+  const isFinals = currentHeat.heatType === "Finals";
+  const isCallbackHeat = !isFinals;
+  const hasSideTabs = currentHeat.role === "Mixed" && !isCouplesHeat(currentHeat);
+  const sheetSide = hasSideTabs ? sideTab : currentHeat.role;
+  const sideResults = hasSideTabs
+    ? outcome.results.filter((r) => r.competitor.role === sideTab)
+    : outcome.results;
+  const results: CompetitorResult[] = isFinals
+    ? sideResults
+    : [...sideResults].sort((a, b) =>
+        getCutGroup(a) - getCutGroup(b) || a.competitor.bib.localeCompare(b.competitor.bib, undefined, { numeric: true })
+      );
 
-  // Calculate results
-  const results: CompetitorResult[] = calculateHeatResults(
-    currentHeat,
-    competitors,
-    scores,
-    settings.judgingStyle,
-    hCallbackCount,
-    hAlternateCount,
-    settings.callbackCountLeaders,
-    settings.callbackCountFollowers,
-    settings.alternateCountLeaders,
-    settings.alternateCountFollowers,
-    settings
-  );
+  // The quotas for the sheet being shown
+  const hCallbackCount = sheetSide === "Lead"
+    ? (outcome.callbackCountLeaders ?? outcome.callbackCount)
+    : sheetSide === "Follow"
+      ? (outcome.callbackCountFollowers ?? outcome.callbackCount)
+      : outcome.callbackCount;
+  const hAlternateCount = sheetSide === "Lead"
+    ? (outcome.alternateCountLeaders ?? outcome.alternateCount)
+    : sheetSide === "Follow"
+      ? (outcome.alternateCountFollowers ?? outcome.alternateCount)
+      : outcome.alternateCount;
 
-  // Find all judges who have scored in this heat
-  const heatScores = scores.filter((s) => s.heatId === currentHeat.id);
-  const judges = Array.from(new Set(heatScores.map((s) => s.judgeId))).sort();
-
-  // Callback mode vs Finals mode
-  const isCallbackHeat = currentHeat.role !== "Mixed" || settings.judgingStyle === "callback";
+  // Only the judges who scored the sheet being shown
+  const judges = outcome.judgeIds.filter((jId) => results.some((r) => r.scoresByJudge[jId]));
 
   return (
     <div className="space-y-6">
@@ -224,7 +225,7 @@ export default function ResultsDashboard({
           <div className="flex items-center gap-1.5 text-[11px] font-mono text-slate-400">
             <span>Style:</span>
             <span className="font-bold text-violet-500 bg-violet-600/10 px-2 py-0.5 rounded uppercase">
-              {settings.judgingStyle === "raw" ? "Raw Average" : settings.judgingStyle === "placement" ? "Placement Rank" : "Callback Select"}
+              {judgingStyle === "raw" ? "Raw Average" : judgingStyle === "placement" ? "Placement Rank" : "Callback Select"}
             </span>
           </div>
 
@@ -249,7 +250,7 @@ export default function ResultsDashboard({
           <div>
             <span className="text-[10px] font-semibold text-slate-400 font-mono uppercase tracking-wider block">Currently Auditing</span>
             <h2 className="text-xl font-bold tracking-tight text-violet-500 mt-0.5">{currentHeat.name}</h2>
-            <p className="text-xs text-slate-400 mt-1">{currentHeat.division} • {currentHeat.role === "Mixed" ? "Couples" : `${currentHeat.role}s`} • {currentHeat.competitorBibs.length} total dancers</p>
+            <p className="text-xs text-slate-400 mt-1">{currentHeat.division} • {hasSideTabs ? "Leaders & Followers" : currentHeat.role === "Mixed" ? "Couples" : `${currentHeat.role}s`} • {currentHeat.competitorBibs.length} total dancers</p>
           </div>
 
           <div className="flex flex-col justify-center border-t md:border-t-0 md:border-l border-slate-100 dark:border-slate-800 pt-4 md:pt-0 md:pl-6">
@@ -289,11 +290,30 @@ export default function ResultsDashboard({
           Scoring Matrix
         </h3>
 
+        {hasSideTabs && (
+          <div className="flex p-1 mb-4 w-fit rounded-xl bg-slate-100 dark:bg-slate-800 border border-slate-200 dark:border-slate-700">
+            {(["Lead", "Follow"] as const).map((side) => (
+              <button
+                key={side}
+                id={`results-tab-${side === "Lead" ? "leaders" : "followers"}`}
+                onClick={() => setSideTab(side)}
+                className={`px-3 py-1.5 rounded-lg text-xs font-medium transition-all ${
+                  sideTab === side
+                    ? `${side === "Lead" ? "bg-emerald-600" : "bg-rose-600"} text-white shadow-sm`
+                    : "text-slate-600 dark:text-slate-300 hover:bg-slate-250 dark:hover:bg-slate-700/50"
+                }`}
+              >
+                {side === "Lead" ? "Leaders" : "Followers"} ({outcome.results.filter((r) => r.competitor.role === side).length})
+              </button>
+            ))}
+          </div>
+        )}
+
         <div className="overflow-x-auto rounded-xl border border-slate-200 dark:border-slate-800">
           <table className="w-full text-left border-collapse">
             <thead>
               <tr className={`${isDarkMode ? "bg-slate-800/50 text-slate-300" : "bg-slate-50 text-slate-500"} text-xs font-semibold font-mono border-b border-slate-200 dark:border-slate-800`}>
-                <th className="p-3 w-16">Rank</th>
+                {isFinals && <th className="p-3 w-16">Rank</th>}
                 <th className="p-3 w-16">Bib</th>
                 <th className="p-3">Dancer Name</th>
                 
@@ -303,9 +323,9 @@ export default function ResultsDashboard({
                 ))}
                 
                 {/* Score stats depending on mode */}
-                {settings.judgingStyle === "raw" ? (
+                {judgingStyle === "raw" ? (
                   <th className="p-3 text-right">Avg Score</th>
-                ) : settings.judgingStyle === "placement" ? (
+                ) : judgingStyle === "placement" ? (
                   <th className="p-3 text-right">Avg Placement</th>
                 ) : (
                   <th className="p-3 text-right">Prelim Points</th>
@@ -321,36 +341,59 @@ export default function ResultsDashboard({
             </thead>
             <tbody className="divide-y divide-slate-200 dark:divide-slate-800 text-xs">
               {results.map((res, index) => {
+                const cutGroup = getCutGroup(res);
+                const showGroupHeading = isCallbackHeat && (index === 0 || getCutGroup(results[index - 1]) !== cutGroup);
+                const isNameHidden = isResultNameHidden(res, contestOptions, isFinals, judgingStyle);
                 const isWinner = res.rank === 1 && !isCallbackHeat;
                 const isSecond = res.rank === 2 && !isCallbackHeat;
                 const isThird = res.rank === 3 && !isCallbackHeat;
 
                 return (
+                  <React.Fragment key={res.competitor.bib}>
+                  {showGroupHeading && (
+                    <tr>
+                      <td
+                        colSpan={judges.length + 5}
+                        className={`px-3 pt-4 pb-1.5 text-[10px] font-bold uppercase tracking-wider font-mono ${
+                          cutGroup === 0 ? "text-green-500" : cutGroup === 1 ? "text-rose-500" : cutGroup === 2 ? "text-amber-500" : "text-slate-400"
+                        }`}
+                      >
+                        {CUT_GROUP_LABELS[cutGroup]}
+                      </td>
+                    </tr>
+                  )}
                   <tr
-                    key={res.competitor.bib}
                     className={`hover:bg-slate-50/50 dark:hover:bg-slate-800/20 transition-all ${
                       res.qualified && isCallbackHeat ? "bg-green-500/5 dark:bg-green-500/[0.02]" :
                       res.isAlternate && isCallbackHeat ? "bg-amber-500/5 dark:bg-amber-500/[0.02]" : ""
                     }`}
                   >
-                    <td className="p-3 font-mono font-bold">
-                      {isWinner ? (
-                        <span className="flex items-center gap-1 text-amber-500">
-                          🏆 1st
-                        </span>
-                      ) : isSecond ? (
-                        <span className="text-slate-400">🥈 2nd</span>
-                      ) : isThird ? (
-                        <span className="text-amber-700">🥉 3rd</span>
-                      ) : (
-                        <span className="text-slate-500 pl-6">{res.rank}th</span>
-                      )}
-                    </td>
+                    {isFinals && (
+                      <td className="p-3 font-mono font-bold">
+                        {isWinner ? (
+                          <span className="flex items-center gap-1 text-amber-500">
+                            🏆 1st
+                          </span>
+                        ) : isSecond ? (
+                          <span className="text-slate-400">🥈 2nd</span>
+                        ) : isThird ? (
+                          <span className="text-amber-700">🥉 3rd</span>
+                        ) : (
+                          <span className="text-slate-500 pl-6">{res.rank}th</span>
+                        )}
+                      </td>
+                    )}
                     <td className="p-3 font-mono font-bold text-violet-500">#{res.competitor.bib}</td>
                     <td className="p-3 font-medium">
                       <div>
-                        <span>{res.competitor.name}</span>
-                        <span className="text-[10px] text-slate-400 font-mono block sm:inline sm:ml-2">({res.competitor.division})</span>
+                        {isNameHidden ? (
+                          <span className="italic text-slate-400">Name hidden</span>
+                        ) : (
+                          <>
+                            <span>{res.competitor.name}</span>
+                            <span className="text-[10px] text-slate-400 font-mono block sm:inline sm:ml-2">({res.competitor.division})</span>
+                          </>
+                        )}
                       </div>
                     </td>
 
@@ -361,17 +404,17 @@ export default function ResultsDashboard({
                         <td key={jId} className="p-3 text-center font-mono border-l border-slate-200 dark:border-slate-800">
                           {details ? (
                             <div className="flex flex-col items-center justify-center">
-                              {settings.judgingStyle === "raw" && details.score > 0 && (
+                              {judgingStyle === "raw" && details.score > 0 && (
                                 <span className="font-bold text-slate-800 dark:text-slate-100 text-xs">
                                   {details.score.toFixed(1)}
                                 </span>
                               )}
-                              {settings.judgingStyle === "placement" && details.placement < 999 && (
+                              {judgingStyle === "placement" && details.placement < 999 && (
                                 <span className="text-[10px] text-violet-500 bg-violet-500/10 dark:bg-violet-500/20 px-1 py-0.5 rounded font-bold">
                                   {details.placement === 1 ? "1st" : details.placement === 2 ? "2nd" : details.placement === 3 ? "3rd" : `${details.placement}th`}
                                 </span>
                               )}
-                              {settings.judgingStyle === "callback" && details.isCallback !== "-" && (
+                              {judgingStyle === "callback" && details.isCallback !== "-" && (
                                 <span className={`text-[10px] font-bold px-1.5 py-0.5 rounded ${
                                   details.isCallback === "Yes" ? "bg-green-500/10 text-green-500" :
                                   details.isCallback.startsWith("Alt") ? "bg-amber-500/10 text-amber-500" :
@@ -380,7 +423,7 @@ export default function ResultsDashboard({
                                   {details.isCallback}
                                 </span>
                               )}
-                              {settings.judgingStyle !== "callback" && details.isCallback !== "-" && (
+                              {judgingStyle !== "callback" && details.isCallback !== "-" && (
                                 <span className={`text-[9px] font-bold mt-1 ${
                                   details.isCallback === "Yes" ? "text-green-500" :
                                   details.isCallback.startsWith("Alt") ? "text-amber-500" : "text-slate-500"
@@ -398,9 +441,9 @@ export default function ResultsDashboard({
 
                     {/* Final Average */}
                     <td className="p-3 text-right font-mono font-bold">
-                      {settings.judgingStyle === "raw" ? (
+                      {judgingStyle === "raw" ? (
                         <span className="text-violet-500">{res.averageScore.toFixed(2)}</span>
-                      ) : settings.judgingStyle === "placement" ? (
+                      ) : judgingStyle === "placement" ? (
                         <span className="text-violet-500">{res.averagePlacement === 999 ? "—" : res.averagePlacement.toFixed(2)}</span>
                       ) : (
                         <span className="text-emerald-500">{res.prelimPoints !== undefined ? `${res.prelimPoints.toFixed(1)} pts` : `${res.yesCount} Yes`}</span>
@@ -421,15 +464,19 @@ export default function ResultsDashboard({
                           <span className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-bold ${
                             res.qualified
                               ? "bg-green-500/10 text-green-500"
-                              : res.isAlternate
-                                ? "bg-amber-500/10 text-amber-500"
-                                : "bg-slate-500/10 text-slate-500"
+                              : res.tieGroup !== undefined
+                                ? "bg-rose-500/10 text-rose-500"
+                                : res.isAlternate
+                                  ? "bg-amber-500/10 text-amber-500"
+                                  : "bg-slate-500/10 text-slate-500"
                           }`}>
                             {res.qualified ? (
                               <>
                                 <Check className="w-3 h-3" />
-                                Callback Cut
+                                Callback
                               </>
+                            ) : res.tieGroup !== undefined ? (
+                              "Tied"
                             ) : res.isAlternate ? (
                               <>
                                 <span className="w-1.5 h-1.5 rounded-full bg-amber-500 animate-pulse" />
@@ -443,6 +490,7 @@ export default function ResultsDashboard({
                       </>
                     )}
                   </tr>
+                  </React.Fragment>
                 );
               })}
               {results.length === 0 && (
@@ -462,7 +510,7 @@ export default function ResultsDashboard({
             <div className="flex items-center gap-2">
               <AlertCircle className="w-4 h-4 text-green-500 flex-shrink-0" />
               <span>
-                The callback threshold is currently set to <strong>{hCallbackCount}</strong>. Dancers listed as <strong>"Callback Cut"</strong> have qualified for the next rounds.
+                The callback threshold is currently set to <strong>{hCallbackCount}</strong>. Dancers listed as <strong>"Callback"</strong> have qualified for the next rounds.
               </span>
             </div>
             {hAlternateCount > 0 && (

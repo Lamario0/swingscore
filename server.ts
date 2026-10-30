@@ -3,7 +3,7 @@ import path from "path";
 import fs from "fs";
 import { createServer as createViteServer } from "vite";
 import { buildRegisteredCouples, getAllContestEntries, getContestEntry, getContestRole, getDivisionLockKey, getEntrantSides, isActiveInHeat, isPartneredContest, oppositeRole, validateContestEntries, withAddedEntry, withEntryPartner } from "./src/utils/partners";
-import { CONTEST_ENTRY_KEYS, type ContestEntryFields, type HeatEntryStatus } from "./src/types";
+import { CONTEST_ENTRY_KEYS, type ContestEntryFields, type ContestOptions, type HeatEntryStatus } from "./src/types";
 
 interface Competitor extends ContestEntryFields {
   bib: string;
@@ -93,6 +93,7 @@ interface AppSettings {
   contestConfigLocked?: boolean;
   nextContestConfigLocked?: boolean;
   publishedHeatIds?: string[];
+  contestOptions?: Record<string, ContestOptions>;
   judgeNames?: string[];
   judgeRoles?: ("Leaders" | "Followers" | "Finals" | "None")[];
   chiefJudgeName?: string;
@@ -230,6 +231,7 @@ const DEFAULT_STATE: AppState = {
     // override this back to false for a genuinely blank slate.
     checkInFinalized: true,
     publishedHeatIds: [],
+    contestOptions: {},
     finalizedSheets: [],
     judgeNames: ["Judge A", "Judge B", "Judge C", "Judge D", "Judge E"],
     judgeRoles: ["None", "None", "None", "None", "None"],
@@ -643,6 +645,7 @@ async function startServer() {
     // Remove scores associated with this heat
     state.scores = state.scores.filter((s) => s.heatId !== heatId);
     
+    if (state.settings.contestOptions) delete state.settings.contestOptions[heatId];
     if (state.settings.queuedHeatId === heatId) {
       state.settings.queuedHeatId = null;
       state.settings.queuedCheckInFinalized = false;
@@ -793,6 +796,7 @@ async function startServer() {
         currentHeatId: null,
         queuedHeatId: null,
         publishedHeatIds: [],
+        contestOptions: {},
         checkInFinalized: false,
         queuedCheckInFinalized: false,
         finalizedSheets: [],
@@ -832,6 +836,7 @@ async function startServer() {
         queuedHeatId: null,
         checkInFinalized: false,
         publishedHeatIds: [],
+        contestOptions: {},
         judgeNames: ["Judge A", "Judge B", "Judge C", "Judge D", "Judge E"],
         judgeRoles: ["None", "None", "None", "None", "None"],
         chiefJudgeName: "Chief Judge",

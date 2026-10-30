@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useRef, useMemo } from "react";
 import { Shield, Sparkles, RefreshCw, Trash2, PlusCircle, CheckSquare, Settings, AlertTriangle, Play, Eye, EyeOff, Lock, Unlock, Trophy, Calendar, ArrowUp, ArrowDown, Plus, ChevronDown, ChevronUp, SortAsc, Scissors, Edit, X, FileText, Award, ExternalLink } from "lucide-react";
 import { Competitor, Heat, JudgingStyle, AppSettings, ScoreRecord, CallbackValue, CompletedContestResult, ContestEntryFields } from "../types";
-import { calculateHeatResults, getJudgeHeatCompetitors } from "../utils/calculations";
+import { calculateHeatResults, checkSheetQuota, getJudgeHeatCompetitors, getSheetQuotas } from "../utils/calculations";
 import { buildRegisteredCouples, findRegisteredPartner, getDivisionLockKey, getEntrantSides, isActiveInHeat, isCouplesHeat, isPartneredContest, isRegisteredFor, projectCompetitorsForHeat, roleUpdateForEntry, validateContestEntries } from "../utils/partners";
 import ContestEntryInputs, { emptyContestEntries, contestEntriesFrom } from "./ContestEntryInputs";
 
@@ -167,8 +167,8 @@ export default function AdminPanel({
   // Local states for Judging Configuration
   const [localJudgeNames, setLocalJudgeNames] = useState<string[]>([]);
   const [localJudgeRoles, setLocalJudgeRoles] = useState<("Leaders" | "Followers" | "Finals" | "None")[]>([]);
-  const [localChiefJudgeName, setLocalChiefJudgeName] = useState("");
   const [localChiefJudgeRole, setLocalChiefJudgeRole] = useState<"Leaders" | "Followers" | "Both" | "Finals" | "None">("Both");
+  const [localChiefJudgeName, setLocalChiefJudgeName] = useState("");
 
   const lastSyncedSettingsRef = useRef<string>("");
   const lastSyncedContestParamsRef = useRef<string>("");
@@ -260,18 +260,6 @@ export default function AdminPanel({
     expectedJudgesForActiveHeat.push({ name: chiefNameForStatus, role: chiefRoleForStatus });
   }
 
-  const judgeTargetCallbackCount = activeHeat && activeHeat.role === "Lead"
-    ? (settings.callbackCountLeaders !== undefined ? settings.callbackCountLeaders : settings.callbackCount)
-    : activeHeat && activeHeat.role === "Follow"
-      ? (settings.callbackCountFollowers !== undefined ? settings.callbackCountFollowers : settings.callbackCount)
-      : settings.callbackCount;
-
-  const judgeTargetAlternateCount = activeHeat && activeHeat.role === "Lead"
-    ? (settings.alternateCountLeaders !== undefined ? settings.alternateCountLeaders : (settings.alternateCount || 0))
-    : activeHeat && activeHeat.role === "Follow"
-      ? (settings.alternateCountFollowers !== undefined ? settings.alternateCountFollowers : (settings.alternateCount || 0))
-      : (settings.alternateCount || 0);
-
   // Independent of whether a heat is currently live -- the admin needs to be able to
   // see and unlock any judge slot at any time, not just while a heat is active.
   // Heat-specific stats (submitted count, judging side, quota, finalized) simply read
@@ -294,21 +282,8 @@ export default function AdminPanel({
       : heatCompetitorsForJudge.filter((c) => !!recordByBib[c.bib]).length;
     const totalCount = heatCompetitorsForJudge.length;
 
-    const yesCount = heatCompetitorsForJudge.filter((c) => recordByBib[c.bib]?.isCallback === "Yes").length;
-    const altCount = heatCompetitorsForJudge.filter((c) => {
-      const val = recordByBib[c.bib]?.isCallback;
-      return val && val !== "No" && val !== "Yes";
-    }).length;
-
-    let areAltsSatisfied = true;
-    for (let r = 1; r <= judgeTargetAlternateCount; r++) {
-      const cnt = heatCompetitorsForJudge.filter((c) => recordByBib[c.bib]?.isCallback === `Alt ${r}`).length;
-      if (cnt !== 1) areAltsSatisfied = false;
-    }
-    for (let r = judgeTargetAlternateCount + 1; r <= 3; r++) {
-      const cnt = heatCompetitorsForJudge.filter((c) => recordByBib[c.bib]?.isCallback === `Alt ${r}`).length;
-      if (cnt > 0) areAltsSatisfied = false;
-    }
+    const quotaStatuses = (activeHeat ? getSheetQuotas(activeHeat, heatCompetitorsForJudge, settings) : [])
+      .map((quota) => ({ quota, ...checkSheetQuota(quota, (bib) => recordByBib[bib]?.isCallback) }));
 
     // What this judge is ACTUALLY judging for the current heat, distinct from
     // their persistent config role (which may just say "Both" or "Finals") --
@@ -335,9 +310,8 @@ export default function AdminPanel({
       judgingSide,
       scoredCount,
       totalCount,
-      yesCount,
-      altCount,
-      isQuotaSatisfied: !!activeHeat && yesCount === judgeTargetCallbackCount && areAltsSatisfied,
+      quotaStatuses,
+      isQuotaSatisfied: quotaStatuses.length > 0 && quotaStatuses.every((status) => status.isMet),
       isFinalized: activeHeat ? (settings.finalizedSheets || []).includes(`${activeHeat.id}:${j.name}`) : false,
       isClaimed: (settings.claimedJudges || []).includes(j.name)
     };
@@ -943,7 +917,7 @@ export default function AdminPanel({
               ? "bg-amber-500/15 text-amber-500"
               : "bg-slate-500/15 text-slate-400"
         }`}>
-          {r.qualified ? "Callback" : r.isAlternate ? `Alt ${r.alternateRank}` : "Cut"}
+          {r.qualified ? "Callback" : r.tieGroup !== undefined ? "Tied" : r.isAlternate ? `Alt ${r.alternateRank}` : "Cut"}
         </span>
       </td>
     </tr>
@@ -1363,7 +1337,8 @@ export default function AdminPanel({
           prelimPoints: r.prelimPoints,
           qualified: r.qualified,
           isAlternate: r.isAlternate,
-          alternateRank: r.alternateRank
+          alternateRank: r.alternateRank,
+          tieGroup: r.tieGroup
         })),
         configSnapshot: {
           callbackCount: hCallbackCount,
@@ -1451,6 +1426,10 @@ export default function AdminPanel({
       alert("Every judge must submit and finalize their sheet before the Live Contest can be completed.");
       return;
     }
+    if (liveHeatResults.some((r) => r.tieGroup !== undefined)) {
+      alert("Scores don't separate some dancers at the cut. Run Complete Contest, settle the tie in the Scoring & Results Ledger, then create the next round from Advance Last Completed Contest.");
+      return;
+    }
     setCreateNextPhaseBusy(targetHeatType);
     try {
       // Read the finalists before completing: afterwards this round is no longer Live.
@@ -1485,6 +1464,10 @@ export default function AdminPanel({
   // entry in completedResults instead of live scores.
   const handleCreateNextContestFromCompleted = async (targetHeatType: "Prelim" | "Semi-Final" | "Quarter Final" | "Finals") => {
     if (!lastCompletedResult) return;
+    if (lastCompletedResults.some((r) => r.tieGroup !== undefined)) {
+      alert("Scores don't separate some dancers at the cut. Settle the tie in the Scoring & Results Ledger first.");
+      return;
+    }
     setCreateNextPhaseBusy(targetHeatType);
     try {
       await createAdvancementHeat(targetHeatType, {
@@ -2504,8 +2487,8 @@ export default function AdminPanel({
                         value={localChiefJudgeRole}
                         onChange={(e) => setLocalChiefJudgeRole(e.target.value as any)}
                         className={`w-36 px-2.5 py-1.5 text-xs font-semibold rounded-xl border focus:outline-none focus:ring-1 focus:ring-violet-500 transition-all cursor-pointer ${
-                          isDarkMode 
-                            ? "bg-slate-950 border-slate-800 text-slate-100" 
+                          isDarkMode
+                            ? "bg-slate-950 border-slate-800 text-slate-100"
                             : "bg-slate-50 border-slate-200 text-slate-800"
                         }`}
                       >
@@ -4553,12 +4536,12 @@ export default function AdminPanel({
                           <span className={`text-[9px] font-mono uppercase tracking-wider block ${row.isQuotaSatisfied ? "text-green-500" : "text-red-500"}`}>
                             Quota
                           </span>
-                          <span className={`text-xs font-bold font-mono block ${row.isQuotaSatisfied ? "text-green-500" : "text-red-500"}`}>
-                            Callbacks: {row.yesCount}/{judgeTargetCallbackCount}
-                          </span>
-                          <span className={`text-xs font-bold font-mono block ${row.isQuotaSatisfied ? "text-green-500" : "text-red-500"}`}>
-                            Alts: {row.altCount}/{judgeTargetAlternateCount}
-                          </span>
+                          {row.quotaStatuses.map(({ quota, yesCount, altCount, isMet }) => (
+                            <span key={quota.side || "all"} className={`text-xs font-bold font-mono block ${isMet ? "text-green-500" : "text-red-500"}`}>
+                              {quota.side && row.quotaStatuses.length > 1 ? `${quota.side === "Lead" ? "Leaders" : "Followers"}: ` : ""}
+                              Callbacks: {yesCount}/{quota.callbackCount} · Alts: {altCount}/{quota.alternateCount}
+                            </span>
+                          ))}
                         </div>
                       )}
 

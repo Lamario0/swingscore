@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from "react";
 import { Award, Check, Save, User, Clock, AlertTriangle, ChevronUp, ChevronDown, RefreshCw } from "lucide-react";
 import { Competitor, Heat, ScoreRecord, JudgingStyle, CallbackValue, AppSettings } from "../types";
-import { getJudgeHeatCompetitors } from "../utils/calculations";
+import { checkSheetQuota, getJudgeHeatCompetitors, getSheetQuotas } from "../utils/calculations";
 import { projectCompetitorsForHeat } from "../utils/partners";
 
 interface JudgePortalProps {
@@ -160,18 +160,6 @@ export default function JudgePortal({
     : "No Role Assigned";
 
   const activeHeat = heats.find((h) => h.id === activeHeatId);
-  const targetCallbackCount = activeHeat && activeHeat.role === "Lead"
-    ? (settings.callbackCountLeaders !== undefined ? settings.callbackCountLeaders : settings.callbackCount)
-    : activeHeat && activeHeat.role === "Follow"
-      ? (settings.callbackCountFollowers !== undefined ? settings.callbackCountFollowers : settings.callbackCount)
-      : settings.callbackCount;
-
-  const targetAlternateCount = activeHeat && activeHeat.role === "Lead"
-    ? (settings.alternateCountLeaders !== undefined ? settings.alternateCountLeaders : (settings.alternateCount || 0))
-    : activeHeat && activeHeat.role === "Follow"
-      ? (settings.alternateCountFollowers !== undefined ? settings.alternateCountFollowers : (settings.alternateCount || 0))
-      : (settings.alternateCount || 0);
-
   const isHeatFinals = activeHeat ? (activeHeat.heatType === "Finals" || activeHeat.name.includes("Finals")) : false;
 
   // Shared with AdminPanel's Judges tab so a judge's own sheet always lines up
@@ -179,6 +167,12 @@ export default function JudgePortal({
   const heatCompetitors = activeHeat
     ? getJudgeHeatCompetitors(activeHeat, competitors, judgeRole)
     : [];
+  // The Chief Judge scores both sides of a Leaders+Followers round on one
+  // sheet, so quotas and rankings on the sheet are worked out side by side.
+  const sheetQuotas = activeHeat ? getSheetQuotas(activeHeat, heatCompetitors, settings) : [];
+  const getSideQuota = (bib: string) =>
+    sheetQuotas.find((quota) => quota.competitors.some((c) => c.bib === bib)) ||
+    { side: null, competitors: heatCompetitors, callbackCount: 0, alternateCount: 0 };
   // Each dancer's entry for this heat's contest+division (division and role).
   const heatRoster = activeHeat ? projectCompetitorsForHeat(competitors, activeHeat) : competitors;
 
@@ -448,27 +442,29 @@ export default function JudgePortal({
     // Auto-calculate callbacks in raw mode
     const nextCallbacks = { ...localCallbacks };
     if (judgingStyle === "raw") {
-      const scored = [...heatCompetitors]
-        .map(c => ({ bib: c.bib, score: tempScores[c.bib] || 0 }))
-        .sort((a, b) => {
-          if (b.score !== a.score) return b.score - a.score;
-          return a.bib.localeCompare(b.bib, undefined, { numeric: true });
-        });
+      sheetQuotas.forEach(({ competitors: sideCompetitors, callbackCount, alternateCount }) => {
+        const scored = [...sideCompetitors]
+          .map(c => ({ bib: c.bib, score: tempScores[c.bib] || 0 }))
+          .sort((a, b) => {
+            if (b.score !== a.score) return b.score - a.score;
+            return a.bib.localeCompare(b.bib, undefined, { numeric: true });
+          });
 
-      scored.forEach((item, index) => {
-        let cbStatus: CallbackValue = "No";
-        if (item.score > 0) {
-          if (index < targetCallbackCount) {
-            cbStatus = "Yes";
-          } else if (index < targetCallbackCount + targetAlternateCount) {
-            const altIndex = index - targetCallbackCount;
-            if (altIndex === 0) cbStatus = "Alt 1";
-            else if (altIndex === 1) cbStatus = "Alt 2";
-            else if (altIndex === 2) cbStatus = "Alt 3";
-            else cbStatus = "Alt 1";
+        scored.forEach((item, index) => {
+          let cbStatus: CallbackValue = "No";
+          if (item.score > 0) {
+            if (index < callbackCount) {
+              cbStatus = "Yes";
+            } else if (index < callbackCount + alternateCount) {
+              const altIndex = index - callbackCount;
+              if (altIndex === 0) cbStatus = "Alt 1";
+              else if (altIndex === 1) cbStatus = "Alt 2";
+              else if (altIndex === 2) cbStatus = "Alt 3";
+              else cbStatus = "Alt 1";
+            }
           }
-        }
-        nextCallbacks[item.bib] = cbStatus;
+          nextCallbacks[item.bib] = cbStatus;
+        });
       });
       setLocalCallbacks(nextCallbacks);
     }
@@ -584,7 +580,7 @@ export default function JudgePortal({
     const currentScore = localScores[bib] || 0;
     if (currentScore === 0) return "—";
 
-    const scored = heatCompetitors
+    const scored = getSideQuota(bib).competitors
       .map(c => ({ bib: c.bib, score: localScores[c.bib] || 0 }))
       .filter(item => item.score > 0)
       .sort((a, b) => b.score - a.score);
@@ -602,7 +598,8 @@ export default function JudgePortal({
     const currentScore = localScores[bib] || 0;
     if (currentScore === 0) return "—";
 
-    const scored = [...heatCompetitors]
+    const { competitors: sideCompetitors, callbackCount, alternateCount } = getSideQuota(bib);
+    const scored = [...sideCompetitors]
       .map(c => ({ bib: c.bib, score: localScores[c.bib] || 0 }))
       .sort((a, b) => {
         if (b.score !== a.score) return b.score - a.score;
@@ -612,10 +609,10 @@ export default function JudgePortal({
     const index = scored.findIndex(item => item.bib === bib);
     if (index === -1) return "—";
 
-    if (index < targetCallbackCount) {
+    if (index < callbackCount) {
       return "Yes";
-    } else if (index < targetCallbackCount + targetAlternateCount) {
-      const altIdx = index - targetCallbackCount + 1;
+    } else if (index < callbackCount + alternateCount) {
+      const altIdx = index - callbackCount + 1;
       return `Alt ${altIdx}`;
     } else {
       return "No";
@@ -633,7 +630,7 @@ export default function JudgePortal({
 
     const currentWeight = cbWeights[localCallbacks[bib] || "No"];
 
-    const list = heatCompetitors.map(c => ({
+    const list = getSideQuota(bib).competitors.map(c => ({
       bib: c.bib,
       weight: cbWeights[localCallbacks[c.bib] || "No"]
     }));
@@ -661,7 +658,7 @@ export default function JudgePortal({
   const getAltConflicts = (bib: string): Competitor[] => {
     const val = localCallbacks[bib];
     if (!val || val === "Yes" || val === "No") return [];
-    return heatCompetitors.filter((c) => c.bib !== bib && localCallbacks[c.bib] === val);
+    return getSideQuota(bib).competitors.filter((c) => c.bib !== bib && localCallbacks[c.bib] === val);
   };
 
   const triggerSave = async (bib: string, scoreVal: number, cbVal: CallbackValue) => {
@@ -907,17 +904,19 @@ export default function JudgePortal({
   // Check for duplicate or tied ranks/scores
   const tiedBibs = new Set<string>();
   if (judgingStyle === "raw") {
-    const scoredCompetitors = heatCompetitors.filter(c => (localScores[c.bib] || 0) > 0);
-    const scoreMap: Record<number, string[]> = {};
-    scoredCompetitors.forEach(c => {
-      const s = localScores[c.bib];
-      if (!scoreMap[s]) scoreMap[s] = [];
-      scoreMap[s].push(c.bib);
-    });
-    Object.values(scoreMap).forEach(bibs => {
-      if (bibs.length > 1) {
-        bibs.forEach(b => tiedBibs.add(b));
-      }
+    sheetQuotas.forEach(({ competitors: sideCompetitors }) => {
+      const scoredCompetitors = sideCompetitors.filter(c => (localScores[c.bib] || 0) > 0);
+      const scoreMap: Record<number, string[]> = {};
+      scoredCompetitors.forEach(c => {
+        const s = localScores[c.bib];
+        if (!scoreMap[s]) scoreMap[s] = [];
+        scoreMap[s].push(c.bib);
+      });
+      Object.values(scoreMap).forEach(bibs => {
+        if (bibs.length > 1) {
+          bibs.forEach(b => tiedBibs.add(b));
+        }
+      });
     });
   } else if (judgingStyle === "placement") {
     const rankedCompetitors = heatCompetitors.filter(c => (localScores[c.bib] || 0) > 0);
@@ -935,25 +934,9 @@ export default function JudgePortal({
   }
 
   // Quota satisfied calculation
-  const currentYesCount = heatCompetitors.filter(c => localCallbacks[c.bib] === "Yes").length;
-  const currentAltCount = heatCompetitors.filter(c => {
-    const val = localCallbacks[c.bib];
-    return val && val !== "No" && val !== "Yes";
-  }).length;
-  
-  let areAltsSatisfied = true;
-  for (let r = 1; r <= targetAlternateCount; r++) {
-    const rStr = `Alt ${r}`;
-    const cnt = heatCompetitors.filter(c => localCallbacks[c.bib] === rStr).length;
-    if (cnt !== 1) areAltsSatisfied = false;
-  }
-  for (let r = targetAlternateCount + 1; r <= 3; r++) {
-    const rStr = `Alt ${r}`;
-    const cnt = heatCompetitors.filter(c => localCallbacks[c.bib] === rStr).length;
-    if (cnt > 0) areAltsSatisfied = false;
-  }
-
-  const isQuotaSatisfied = currentYesCount === targetCallbackCount && areAltsSatisfied;
+  const quotaStatuses = sheetQuotas.map((quota) => ({ quota, ...checkSheetQuota(quota, (bib) => localCallbacks[bib]) }));
+  const areAltsSatisfied = quotaStatuses.every((status) => status.areAltsSatisfied);
+  const isQuotaSatisfied = quotaStatuses.every((status) => status.isMet);
   const isQuotaReady = (judgingStyle !== "callback") ? true : isQuotaSatisfied;
   const canFinalize = isSheetComplete && isQuotaReady && tiedBibs.size === 0;
 
@@ -1073,17 +1056,15 @@ export default function JudgePortal({
                 <span className={`text-[10px] font-bold font-mono block uppercase tracking-wider ${isQuotaReady && isQuotaSatisfied ? "text-green-500" : "text-red-500"}`}>
                   Callback Quota
                 </span>
-                <span className={`text-xs font-bold font-mono block ${isQuotaReady && isQuotaSatisfied ? "text-green-500" : "text-red-500"}`}>
-                  Callbacks: {currentYesCount}/{targetCallbackCount}
-                </span>
-                <span className={`text-xs font-bold font-mono block ${isQuotaReady && isQuotaSatisfied ? "text-green-500" : "text-red-500"}`}>
-                  Alts: {currentAltCount}/{targetAlternateCount}
-                </span>
+                {quotaStatuses.map(({ quota, yesCount, altCount, isMet }) => (
+                  <span key={quota.side || "all"} className={`text-xs font-bold font-mono block ${isMet ? "text-green-500" : "text-red-500"}`}>
+                    {quota.side && quotaStatuses.length > 1 ? `${quota.side === "Lead" ? "Leaders" : "Followers"}: ` : ""}
+                    Callbacks: {yesCount}/{quota.callbackCount} · Alts: {altCount}/{quota.alternateCount}
+                  </span>
+                ))}
                 {!areAltsSatisfied && (
                   <span className="block text-[9px] text-rose-500 font-mono mt-0.5 font-bold animate-pulse">
-                    {targetAlternateCount > 1
-                      ? `Must assign exactly one of each: ${Array.from({ length: targetAlternateCount }).map((_, i) => `Alt ${i + 1}`).join(", ")}`
-                      : "Alt conflict — see indicator(s) below"}
+                    Each alternate must be assigned exactly once — see indicator(s) below
                   </span>
                 )}
               </div>
@@ -1354,9 +1335,9 @@ export default function JudgePortal({
                       >
                         <option value="No">No (Unselected)</option>
                         <option value="Yes">Yes (Callback)</option>
-                        {targetAlternateCount >= 1 && <option value="Alt 1">Alt 1 (Alternate 1)</option>}
-                        {targetAlternateCount >= 2 && <option value="Alt 2">Alt 2 (Alternate 2)</option>}
-                        {targetAlternateCount >= 3 && <option value="Alt 3">Alt 3 (Alternate 3)</option>}
+                        {getSideQuota(c.bib).alternateCount >= 1 && <option value="Alt 1">Alt 1 (Alternate 1)</option>}
+                        {getSideQuota(c.bib).alternateCount >= 2 && <option value="Alt 2">Alt 2 (Alternate 2)</option>}
+                        {getSideQuota(c.bib).alternateCount >= 3 && <option value="Alt 3">Alt 3 (Alternate 3)</option>}
                       </select>
                     </div>
                     {(() => {

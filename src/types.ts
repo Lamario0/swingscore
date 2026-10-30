@@ -85,6 +85,27 @@ export interface ScoreRecord {
   timestamp: number;
 }
 
+// Per-contest options set on the Scoring & Results Ledger, keyed by heat id.
+// The name and Chief Judge options also apply to the public Results Terminal.
+export interface ContestOptions {
+  sortMode?: "score" | "bib";
+  sideFilter?: "all" | "leaders" | "followers";
+  hideAllNoNames?: boolean;
+  hideCutNames?: boolean;
+  // false removes the Chief Judge's scores from the contest altogether.
+  includeChiefScores?: boolean;
+  // A side uses all of the Chief Judge's scores or none of them. Unset follows
+  // the default: used when fewer than two other judges score that side, or to
+  // settle a tie between the other judges.
+  chiefShownLeaders?: boolean;
+  chiefShownFollowers?: boolean;
+  // CJ Weighted Scores: on (the default), the Chief Judge's score settles a tie.
+  chiefWeightLeaders?: boolean;
+  chiefWeightFollowers?: boolean;
+  // The Chief Judge's order for dancers their scores couldn't separate.
+  chiefTieOrder?: string[];
+}
+
 export interface AppSettings {
   currentHeatId: string | null;
   judgingStyle: JudgingStyle;
@@ -111,6 +132,7 @@ export interface AppSettings {
   contestConfigLocked?: boolean;
   nextContestConfigLocked?: boolean;
   publishedHeatIds?: string[];
+  contestOptions?: Record<string, ContestOptions>;
   judgeNames?: string[];
   judgeRoles?: ("Leaders" | "Followers" | "Finals" | "None")[];
   chiefJudgeName?: string;
@@ -155,6 +177,7 @@ export interface CompletedContestResult {
     qualified?: boolean;
     isAlternate?: boolean;
     alternateRank?: number;
+    tieGroup?: number;
   }[];
   // The judging configuration actually in effect when this contest was completed
   // (callback/alternate quotas, judge roster, Chief Judge) -- frozen here so that

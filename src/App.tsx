@@ -561,6 +561,9 @@ export default function App() {
                   isDarkMode={isDarkMode}
                   settings={settings}
                   onUpdateSettings={handleUpdateSettings}
+                  competitors={competitors}
+                  heats={heats}
+                  scores={scores}
                 />
               )}
 

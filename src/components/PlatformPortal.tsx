@@ -1,14 +1,31 @@
 import React from "react";
 import { ShieldAlert, Award, UserCheck, Users, Landmark, ExternalLink, Globe, KeyRound, Trophy, ChevronDown, ChevronUp, Sparkles } from "lucide-react";
-import { AppSettings } from "../types";
+import { AppSettings, Competitor, CompletedContestResult, Heat, ScoreRecord } from "../types";
+import { getContestOptions, getContestOutcome, getCutGroup, isResultNameHidden } from "../utils/calculations";
+import { isCouplesHeat } from "../utils/partners";
 
 interface PlatformPortalProps {
   isDarkMode: boolean;
   settings?: AppSettings;
   onUpdateSettings?: (newSettings: Partial<AppSettings>) => Promise<void>;
+  competitors?: Competitor[];
+  heats?: Heat[];
+  scores?: ScoreRecord[];
 }
 
-export default function PlatformPortal({ isDarkMode, settings, onUpdateSettings }: PlatformPortalProps) {
+interface RecordedRow {
+  bib: string;
+  name: string;
+  rank: number;
+  qualified?: boolean;
+  isAlternate?: boolean;
+  alternateRank?: number;
+  tieGroup?: number;
+  side: "Lead" | "Follow" | null;
+  isNameHidden: boolean;
+}
+
+export default function PlatformPortal({ isDarkMode, settings, onUpdateSettings, competitors = [], heats = [], scores = [] }: PlatformPortalProps) {
   const [expandedHeatIds, setExpandedHeatIds] = React.useState<Record<string, boolean>>({});
 
   const toggleHeatExpand = (id: string) => {
@@ -16,6 +33,39 @@ export default function PlatformPortal({ isDarkMode, settings, onUpdateSettings 
       ...prev,
       [id]: !prev[id]
     }));
+  };
+
+  // A contest's lines as the Results Terminal shows them: the Scoring Ledger's
+  // options applied, ranked for Finals, otherwise each side in bib order with
+  // alternates after the callbacks and cuts last. A contest whose heat has been
+  // deleted can't be recalculated, so it shows what was recorded.
+  const getRecordedRows = (contest: CompletedContestResult): RecordedRow[] => {
+    const isFinals = contest.heatType === "Finals";
+    const heat = heats.find((h) => h.id === contest.heatId);
+    let rows: RecordedRow[] = contest.rankings.map((r) => ({ ...r, side: null, isNameHidden: false }));
+    if (heat && settings) {
+      const { results, judgingStyle } = getContestOutcome(heat, competitors, scores, settings);
+      const options = getContestOptions(settings, heat.id);
+      const hasSides = heat.role === "Mixed" && !isCouplesHeat(heat);
+      rows = results.map((r) => ({
+        bib: r.competitor.bib,
+        name: r.competitor.name,
+        rank: r.rank,
+        qualified: r.qualified,
+        isAlternate: r.isAlternate,
+        alternateRank: r.alternateRank,
+        tieGroup: r.tieGroup,
+        side: hasSides ? r.competitor.role : null,
+        isNameHidden: isResultNameHidden(r, options, isFinals, judgingStyle)
+      }));
+    }
+    if (isFinals) return rows.sort((a, b) => a.rank - b.rank);
+    const getSideOrder = (row: RecordedRow) => (row.side === "Follow" ? 1 : 0);
+    return rows.sort((a, b) =>
+      getSideOrder(a) - getSideOrder(b) ||
+      getCutGroup(a) - getCutGroup(b) ||
+      a.bib.localeCompare(b.bib, undefined, { numeric: true })
+    );
   };
 
   const systems = [
@@ -207,6 +257,8 @@ export default function PlatformPortal({ isDarkMode, settings, onUpdateSettings 
           <div className="space-y-4">
             {settings.completedResults.map((contest) => {
               const isExpanded = !!expandedHeatIds[contest.id];
+              const isFinals = contest.heatType === "Finals";
+              const rows = isExpanded ? getRecordedRows(contest) : [];
               return (
                 <div
                   key={contest.id}
@@ -246,41 +298,51 @@ export default function PlatformPortal({ isDarkMode, settings, onUpdateSettings 
                         <table className="w-full text-left border-collapse text-xs">
                           <thead>
                             <tr className="bg-slate-100/50 dark:bg-slate-900/40 text-[10px] font-mono text-slate-400 border-b border-slate-150 dark:border-slate-800">
-                              <th className="p-2 w-12 text-center font-bold">Rank</th>
+                              {isFinals && <th className="p-2 w-12 text-center font-bold">Rank</th>}
                               <th className="p-2 w-16 text-center font-bold">Bib</th>
                               <th className="p-2 font-bold">Competitor / Couple Name</th>
                               <th className="p-2 text-right font-bold">Status</th>
                             </tr>
                           </thead>
                           <tbody>
-                            {contest.rankings.map((ranking) => {
-                              const isPodium = ranking.rank <= 3;
+                            {rows.map((ranking, index) => {
+                              const isPodium = isFinals && ranking.rank <= 3;
+                              const showSideHeading = !!ranking.side && (index === 0 || rows[index - 1].side !== ranking.side);
                               return (
+                                <React.Fragment key={ranking.bib}>
+                                {showSideHeading && (
+                                  <tr>
+                                    <td colSpan={3} className="px-2 pt-3 pb-1 text-[9px] font-bold uppercase tracking-wider font-mono text-slate-400">
+                                      {ranking.side === "Lead" ? "Leaders" : "Followers"}
+                                    </td>
+                                  </tr>
+                                )}
                                 <tr
-                                  key={ranking.bib}
                                   className={`border-b border-slate-100 dark:border-slate-800/50 last:border-0 ${
                                     isPodium ? "bg-amber-500/[0.01]" : ""
                                   }`}
                                 >
-                                  <td className="p-2 text-center font-bold font-mono">
-                                    {ranking.rank === 1 ? (
-                                      <span className="inline-flex items-center justify-center w-5 h-5 rounded-full bg-amber-500/10 text-amber-500 text-[11px]">🥇</span>
-                                    ) : ranking.rank === 2 ? (
-                                      <span className="inline-flex items-center justify-center w-5 h-5 rounded-full bg-slate-300/20 text-slate-400 text-[11px]">🥈</span>
-                                    ) : ranking.rank === 3 ? (
-                                      <span className="inline-flex items-center justify-center w-5 h-5 rounded-full bg-amber-700/15 text-amber-700 text-[11px]">🥉</span>
-                                    ) : (
-                                      ranking.rank
-                                    )}
-                                  </td>
+                                  {isFinals && (
+                                    <td className="p-2 text-center font-bold font-mono">
+                                      {ranking.rank === 1 ? (
+                                        <span className="inline-flex items-center justify-center w-5 h-5 rounded-full bg-amber-500/10 text-amber-500 text-[11px]">🥇</span>
+                                      ) : ranking.rank === 2 ? (
+                                        <span className="inline-flex items-center justify-center w-5 h-5 rounded-full bg-slate-300/20 text-slate-400 text-[11px]">🥈</span>
+                                      ) : ranking.rank === 3 ? (
+                                        <span className="inline-flex items-center justify-center w-5 h-5 rounded-full bg-amber-700/15 text-amber-700 text-[11px]">🥉</span>
+                                      ) : (
+                                        ranking.rank
+                                      )}
+                                    </td>
+                                  )}
                                   <td className="p-2 text-center font-mono font-bold text-slate-400">
                                     {ranking.bib}
                                   </td>
                                   <td className="p-2 font-medium text-slate-300">
-                                    {ranking.name}
+                                    {ranking.isNameHidden ? <span className="italic text-slate-400">Name hidden</span> : ranking.name}
                                   </td>
                                   <td className="p-2 text-right">
-                                    {contest.heatType === "Finals" ? (
+                                    {isFinals ? (
                                       <span className="text-[10px] font-bold font-mono text-amber-500">
                                         Podium Winner
                                       </span>
@@ -288,17 +350,22 @@ export default function PlatformPortal({ isDarkMode, settings, onUpdateSettings 
                                       <span className="text-[10px] font-bold font-mono text-emerald-500">
                                         Qualified Callback
                                       </span>
+                                    ) : ranking.tieGroup !== undefined ? (
+                                      <span className="text-[10px] font-bold font-mono text-rose-500">
+                                        Tied
+                                      </span>
                                     ) : ranking.isAlternate ? (
                                       <span className="text-[10px] font-bold font-mono text-violet-400">
-                                        Alternate
+                                        Alt {ranking.alternateRank}
                                       </span>
                                     ) : (
                                       <span className="text-[10px] font-mono text-slate-500">
-                                        Completed
+                                        Cut
                                       </span>
                                     )}
                                   </td>
                                 </tr>
+                                </React.Fragment>
                               );
                             })}
                           </tbody>
