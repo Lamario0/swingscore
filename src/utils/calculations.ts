@@ -26,6 +26,7 @@ export interface CompetitorResult {
   alternateRank?: number;
   tieGroup?: number; // set when scores can't separate dancers at a cut line
   isChiefCounted: boolean; // a side uses all of the Chief Judge's scores or none
+  isTieSettledByChief?: boolean; // tied with another dancer until the Chief Judge decided
   majorityCalculatedRank?: number; // WSDC relative placement rank
 }
 
@@ -308,62 +309,45 @@ export function calculateHeatResults(
     // Section 5: the outcome for callbacks is the sum of point values across
     // judges; once that's tied, the Chief Judge's score breaks the tie. Shared
     // by the "callback" style's own sort and the callback cut computed below.
+    const compareByPoints = (a: CompetitorResult, b: CompetitorResult): number =>
+      (b.prelimPoints || 0) - (a.prelimPoints || 0);
     const getChiefCallbackValue = (r: CompetitorResult): number => {
       const chief = r.scoresByJudge[chiefJudgeName];
       if (!chief) return 0;
       return judgingStyle === "raw" ? chief.score : CALLBACK_POINTS[chief.isCallback] || 0;
     };
-    const compareByCallbackPoints = (a: CompetitorResult, b: CompetitorResult): number => {
-      const ptsA = a.prelimPoints || 0;
-      const ptsB = b.prelimPoints || 0;
-      if (ptsB !== ptsA) {
-        return ptsB - ptsA;
-      }
-      if (doesChiefBreakTies) {
-        const chiefA = getChiefCallbackValue(a);
-        const chiefB = getChiefCallbackValue(b);
-        if (chiefB !== chiefA) return chiefB - chiefA;
-      }
-      return compareChiefDecision(a, b);
-    };
+    const compareByCallbackPoints = (a: CompetitorResult, b: CompetitorResult): number =>
+      compareByPoints(a, b) ||
+      (doesChiefBreakTies ? getChiefCallbackValue(b) - getChiefCallbackValue(a) : 0) ||
+      compareChiefDecision(a, b);
 
-    // 4. Compare results based on the chosen judging style
-    const compareResults = (a: CompetitorResult, b: CompetitorResult): number => {
-      if (judgingStyle === "callback") {
-        // Callbacks: rank by point total, Chief Judge score breaks ties (Section 5)
-        return compareByCallbackPoints(a, b);
-      }
+    // 4. Compare results based on the chosen judging style, before any tie-break
+    const compareJudgedScores = (a: CompetitorResult, b: CompetitorResult): number => {
+      if (judgingStyle === "callback") return compareByPoints(a, b);
       if (judgingStyle === "placement") {
         // Placements: WSDC Relative Placement (Majority) ranking system
         if (a.countedPlacements.length > 0 && b.countedPlacements.length > 0) {
           const cmp = compareWSDCPlacement(a.countedPlacements, b.countedPlacements);
           if (cmp !== 0) return cmp;
         }
-        if (a.averagePlacement !== b.averagePlacement) {
-          return a.averagePlacement - b.averagePlacement;
-        }
-        if (doesChiefBreakTies) {
-          const chiefA = a.scoresByJudge[chiefJudgeName]?.placement ?? 999;
-          const chiefB = b.scoresByJudge[chiefJudgeName]?.placement ?? 999;
-          if (chiefA !== chiefB) return chiefA - chiefB;
-        }
-        return compareChiefDecision(a, b);
-      }
-      // Raw scores: higher average is better (e.g. 95.5 is best)
-      if (b.averageScore !== a.averageScore) {
-        return b.averageScore - a.averageScore;
-      }
-      // Tie breaker 1: average placement (lower is better)
-      if (a.averagePlacement !== b.averagePlacement) {
         return a.averagePlacement - b.averagePlacement;
       }
-      if (doesChiefBreakTies) {
-        const chiefA = a.scoresByJudge[chiefJudgeName]?.score || 0;
-        const chiefB = b.scoresByJudge[chiefJudgeName]?.score || 0;
-        if (chiefA !== chiefB) return chiefB - chiefA;
-      }
-      return compareChiefDecision(a, b);
+      // Raw scores: higher average is better (e.g. 95.5 is best), then average
+      // placement (lower is better)
+      return (b.averageScore - a.averageScore) || (a.averagePlacement - b.averagePlacement);
     };
+    // A tie goes to the Chief Judge's score: their Yes beats their No, their
+    // higher raw score or better placement wins.
+    const compareChiefScores = (a: CompetitorResult, b: CompetitorResult): number => {
+      if (!doesChiefBreakTies) return 0;
+      if (judgingStyle === "callback") return getChiefCallbackValue(b) - getChiefCallbackValue(a);
+      if (judgingStyle === "placement") {
+        return (a.scoresByJudge[chiefJudgeName]?.placement ?? 999) - (b.scoresByJudge[chiefJudgeName]?.placement ?? 999);
+      }
+      return (b.scoresByJudge[chiefJudgeName]?.score || 0) - (a.scoresByJudge[chiefJudgeName]?.score || 0);
+    };
+    const compareResults = (a: CompetitorResult, b: CompetitorResult): number =>
+      compareJudgedScores(a, b) || compareChiefScores(a, b) || compareChiefDecision(a, b);
 
     results.sort((a, b) => compareResults(a, b) || compareBibs(a, b));
 
@@ -406,6 +390,22 @@ export function calculateHeatResults(
       }
     });
 
+    // Flag ties the Chief Judge settled: any shared Finals placement, and on
+    // other rounds only ties that decided who made a callback or alternate.
+    const getCutStatus = (r: CompetitorResult) => (r.qualified ? "callback" : r.isAlternate ? `alt${r.alternateRank}` : "cut");
+    const isFinalsRound = heat.heatType === "Finals";
+    const ordered = isFinalsRound ? results : callbackRankedResults;
+    const compareTied = isFinalsRound ? compareJudgedScores : compareByPoints;
+    ordered.forEach((res, index) => {
+      const previous = ordered[index - 1];
+      if (!previous || compareTied(previous, res) !== 0) return;
+      const wasSeparated = isFinalsRound ? previous.rank !== res.rank : getCutStatus(previous) !== getCutStatus(res);
+      if (wasSeparated && res.tieGroup === undefined && previous.tieGroup === undefined) {
+        previous.isTieSettledByChief = true;
+        res.isTieSettledByChief = true;
+      }
+    });
+
     return results;
   };
 
@@ -415,13 +415,32 @@ export function calculateHeatResults(
   const hasChiefScores = heatScores.some((s) => s.judgeId === chiefJudgeName && units.some((u) => u.bib === s.competitorBib));
   if (!hasChiefScores || !isChiefIncluded || chiefShownOption === false) return scoreUnits(false);
   const otherJudgeCount = judges.filter((judgeId) => judgeId !== chiefJudgeName).length;
-  if (chiefShownOption === true || otherJudgeCount < 2) return scoreUnits(true);
+  if (otherJudgeCount < 2) return scoreUnits(true);
 
+  // Dancers the other judges tied, whichever way that's counted for the round
   const withoutChief = scoreUnits(false);
-  const isTieOpen = heat.heatType === "Finals"
-    ? withoutChief.some((r, index) => index > 0 && withoutChief[index - 1].rank === r.rank)
-    : withoutChief.some((r) => r.tieGroup !== undefined);
-  return isChiefWeighted && isTieOpen ? scoreUnits(true) : withoutChief;
+  const isFinalsRound = heat.heatType === "Finals";
+  const getTieKey = (r: CompetitorResult) => (isFinalsRound ? r.rank : r.tieGroup);
+  const tiedWithoutChief = withoutChief.filter((r) =>
+    getTieKey(r) !== undefined && withoutChief.some((other) => other !== r && getTieKey(other) === getTieKey(r))
+  );
+  if (chiefShownOption !== true && !(isChiefWeighted && tiedWithoutChief.length > 0)) return withoutChief;
+
+  // Adding the Chief Judge's scores can separate them through the totals alone,
+  // which is still a tie the Chief Judge settled.
+  const withChief = scoreUnits(true);
+  tiedWithoutChief.forEach((tied) => {
+    const res = withChief.find((r) => r.competitor.bib === tied.competitor.bib);
+    if (!res) return;
+    const wasSettled = isFinalsRound
+      ? !tiedWithoutChief.some((other) =>
+          other !== tied && getTieKey(other) === getTieKey(tied) &&
+          withChief.find((r) => r.competitor.bib === other.competitor.bib)?.rank === res.rank
+        )
+      : res.tieGroup === undefined;
+    if (wasSettled) res.isTieSettledByChief = true;
+  });
+  return withChief;
 }
 
 export function getContestOptions(settings: AppSettings | undefined, heatId: string): ContestOptions {
@@ -505,6 +524,12 @@ export function getContestOutcome(heat: Heat, competitors: Competitor[], scores:
     alternateCountLeaders,
     alternateCountFollowers
   };
+}
+
+export function formatPlacement(rank: number): string {
+  const lastTwo = rank % 100;
+  const suffix = lastTwo >= 11 && lastTwo <= 13 ? "th" : ["th", "st", "nd", "rd"][rank % 10] || "th";
+  return `${rank}${suffix}`;
 }
 
 // Non-Finals rounds are listed callbacks first, then anyone tied at a cut line,

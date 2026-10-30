@@ -2,7 +2,7 @@ import React, { useState, useEffect } from "react";
 import { Award, Check, Save, User, Clock, AlertTriangle, ChevronUp, ChevronDown, RefreshCw } from "lucide-react";
 import { Competitor, Heat, ScoreRecord, JudgingStyle, CallbackValue, AppSettings } from "../types";
 import { checkSheetQuota, getJudgeHeatCompetitors, getSheetQuotas } from "../utils/calculations";
-import { projectCompetitorsForHeat } from "../utils/partners";
+import { getDisplayBib, projectCompetitorsForHeat } from "../utils/partners";
 
 interface JudgePortalProps {
   competitors: Competitor[];
@@ -1194,7 +1194,7 @@ export default function JudgePortal({
                   {/* Bib No. & Name */}
                   <div className="flex items-center gap-3 min-w-[200px]">
                     <div className="w-10 h-10 rounded-xl bg-violet-600/10 text-violet-500 font-mono font-bold flex items-center justify-center text-sm border border-violet-500/10 shadow-inner">
-                      #{c.bib}
+                      #{getDisplayBib(c.bib, activeHeat?.contestType)}
                     </div>
                     <div>
                       <h3 className="font-bold text-sm tracking-tight">{c.name}</h3>
@@ -1310,7 +1310,7 @@ export default function JudgePortal({
                   {/* Bib No. & Name */}
                   <div className="flex items-center gap-3 min-w-[200px]">
                     <div className="w-10 h-10 rounded-xl bg-violet-600/10 text-violet-500 font-mono font-bold flex items-center justify-center text-sm border border-violet-500/10 shadow-inner">
-                      #{c.bib}
+                      #{getDisplayBib(c.bib, activeHeat?.contestType)}
                     </div>
                     <div>
                       <h3 className="font-bold text-sm tracking-tight">{c.name}</h3>
@@ -1346,10 +1346,10 @@ export default function JudgePortal({
                       return (
                         <span
                           className="flex items-center gap-1 text-[9px] font-mono font-bold text-red-500 whitespace-nowrap self-end mb-2"
-                          title={`Also assigned to ${conflicts.map((cc) => `#${cc.bib} ${cc.name}`).join(", ")}`}
+                          title={`Also assigned to ${conflicts.map((cc) => `#${getDisplayBib(cc.bib, activeHeat?.contestType)} ${cc.name}`).join(", ")}`}
                         >
                           <AlertTriangle className="w-3.5 h-3.5 shrink-0" />
-                          Conflict: {conflicts.map((cc) => `#${cc.bib}`).join(", ")}
+                          Conflict: {conflicts.map((cc) => `#${getDisplayBib(cc.bib, activeHeat?.contestType)}`).join(", ")}
                         </span>
                       );
                     })()}
@@ -1430,7 +1430,7 @@ export default function JudgePortal({
                     {/* Follower info */}
                     <div className="flex items-center gap-3">
                       <div className="w-9 h-9 rounded-lg bg-rose-600/10 text-rose-500 font-mono font-bold flex items-center justify-center text-xs border border-rose-500/10 shadow-inner">
-                        F#{followBib || "—"}
+                        {activeHeat?.contestType === "Strictly Swing" ? "F" : `F#${followBib || "—"}`}
                       </div>
                       <div>
                         <span className="text-[9px] text-slate-400 font-mono uppercase tracking-wider block">Follower</span>

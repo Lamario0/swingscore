@@ -2,7 +2,7 @@ import React, { useState, useEffect, useRef, useMemo } from "react";
 import { Shield, Sparkles, RefreshCw, Trash2, PlusCircle, CheckSquare, Settings, AlertTriangle, Play, Eye, EyeOff, Lock, Unlock, Trophy, Calendar, ArrowUp, ArrowDown, Plus, ChevronDown, ChevronUp, SortAsc, Scissors, Edit, X, FileText, Award, ExternalLink } from "lucide-react";
 import { Competitor, Heat, JudgingStyle, AppSettings, ScoreRecord, CallbackValue, CompletedContestResult, ContestEntryFields } from "../types";
 import { calculateHeatResults, checkSheetQuota, getJudgeHeatCompetitors, getSheetQuotas } from "../utils/calculations";
-import { buildRegisteredCouples, findRegisteredPartner, getDivisionLockKey, getEntrantSides, isActiveInHeat, isCouplesHeat, isPartneredContest, isRegisteredFor, projectCompetitorsForHeat, roleUpdateForEntry, validateContestEntries } from "../utils/partners";
+import { buildRegisteredCouples, findRegisteredPartner, getDisplayBib, getDivisionLockKey, getEntrantSides, isActiveInHeat, isCouplesHeat, isPartneredContest, isRegisteredFor, projectCompetitorsForHeat, roleUpdateForEntry, validateContestEntries } from "../utils/partners";
 import ContestEntryInputs, { emptyContestEntries, contestEntriesFrom } from "./ContestEntryInputs";
 
 // Which phase(s) a completed non-Finals round can advance to, per the
@@ -890,7 +890,7 @@ export default function AdminPanel({
   // for cut. `judgingStyleOverride` lets the completed-contest card show its
   // own frozen judging style even if the live settings have since moved on to
   // a different contest.
-  const renderLiveRankRow = (r: (typeof liveHeatResults)[number], judgingStyleOverride?: JudgingStyle) => (
+  const renderLiveRankRow = (r: (typeof liveHeatResults)[number], contestType?: string | null, judgingStyleOverride?: JudgingStyle) => (
     <tr
       key={r.competitor.bib}
       className={`border-b last:border-0 ${isDarkMode ? "border-slate-800/50" : "border-slate-100"} ${
@@ -904,10 +904,13 @@ export default function AdminPanel({
       <td className={`p-2 text-center font-mono font-bold ${r.qualified ? "text-green-500" : r.isAlternate ? "text-amber-500" : "text-slate-400"}`}>
         {r.rank}
       </td>
-      <td className="p-2 text-center font-mono font-bold text-violet-500">#{r.competitor.bib}</td>
+      <td className="p-2 text-center font-mono font-bold text-violet-500">#{getDisplayBib(r.competitor.bib, contestType)}</td>
       <td className={`p-2 font-medium ${r.qualified ? "" : "opacity-70"}`}>{r.competitor.name}</td>
       <td className="p-2 text-right font-mono font-semibold">
         {(judgingStyleOverride || settings.judgingStyle || "raw") === "raw" ? r.averageScore.toFixed(2) : `${(r.prelimPoints || 0).toFixed(1)} pts`}
+        {r.isTieSettledByChief && (
+          <span title="Tie settled by the Chief Judge" className="ml-1.5 px-1 py-0.5 rounded bg-amber-500/10 text-amber-500 text-[9px] font-bold border border-amber-500/20">CJ</span>
+        )}
       </td>
       <td className="p-2 text-right">
         <span className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-bold ${
@@ -2952,7 +2955,7 @@ export default function AdminPanel({
 
                                                 return (
                                                   <tr key={record.id} className="hover:bg-slate-50/20">
-                                                    <td className="p-2 text-center font-bold text-slate-400">#{record.competitorBib}</td>
+                                                    <td className="p-2 text-center font-bold text-slate-400">#{getDisplayBib(record.competitorBib, h.contestType)}</td>
                                                     <td className="p-2 font-sans font-medium text-slate-700 dark:text-slate-200">{competitorName}</td>
                                                     <td className="p-2 text-center">
                                                       <span className="text-[10px] uppercase font-bold text-slate-400">
@@ -3064,7 +3067,7 @@ export default function AdminPanel({
                                               {resList.map((res) => (
                                                 <tr key={res.competitor.bib} className="hover:bg-slate-50/20">
                                                   <td className="p-2 font-bold text-center text-violet-500">#{res.rank}</td>
-                                                  <td className="p-2 text-center text-slate-700 dark:text-slate-300">#{res.competitor.bib}</td>
+                                                  <td className="p-2 text-center text-slate-700 dark:text-slate-300">#{getDisplayBib(res.competitor.bib, h.contestType)}</td>
                                                   <td className="p-2 font-sans font-bold text-slate-800 dark:text-slate-100">{res.competitor.name}</td>
                                                   {heatExpectedJudges.map((j) => {
                                                     const scoreObj = res.scoresByJudge[j];
@@ -3624,7 +3627,7 @@ export default function AdminPanel({
                                         </td>
                                         <td className="p-2.5 text-center">
                                           <span className="font-mono bg-rose-500/10 text-rose-500 px-1.5 py-0.5 rounded text-[10px] font-bold">
-                                            #{row.bibLabel}
+                                            {activeHeat.contestType === "Strictly Swing" ? "—" : `#${row.bibLabel}`}
                                           </span>
                                         </td>
                                         <td className="p-2.5 font-semibold text-slate-700 dark:text-slate-200 truncate max-w-[140px]" title={row.name}>
@@ -4605,7 +4608,7 @@ export default function AdminPanel({
                       <th className="p-2 text-right">Cut</th>
                     </tr>
                   </thead>
-                  <tbody>{liveHeatRankedLeads.map((r) => renderLiveRankRow(r))}</tbody>
+                  <tbody>{liveHeatRankedLeads.map((r) => renderLiveRankRow(r, liveHeat?.contestType))}</tbody>
                 </table>
               </div>
             </div>
@@ -4622,7 +4625,7 @@ export default function AdminPanel({
                       <th className="p-2 text-right">Cut</th>
                     </tr>
                   </thead>
-                  <tbody>{liveHeatRankedFollows.map((r) => renderLiveRankRow(r))}</tbody>
+                  <tbody>{liveHeatRankedFollows.map((r) => renderLiveRankRow(r, liveHeat?.contestType))}</tbody>
                 </table>
               </div>
             </div>
@@ -4639,7 +4642,7 @@ export default function AdminPanel({
                   <th className="p-2 text-right">Cut</th>
                 </tr>
               </thead>
-              <tbody>{liveHeatRankedFlat.map((r) => renderLiveRankRow(r))}</tbody>
+              <tbody>{liveHeatRankedFlat.map((r) => renderLiveRankRow(r, liveHeat?.contestType))}</tbody>
             </table>
           </div>
         )}
@@ -4698,7 +4701,7 @@ export default function AdminPanel({
                       <th className="p-2 text-right">Cut</th>
                     </tr>
                   </thead>
-                  <tbody>{lastCompletedRankedLeads.map((r) => renderLiveRankRow(r, lastCompletedResult.judgingStyle))}</tbody>
+                  <tbody>{lastCompletedRankedLeads.map((r) => renderLiveRankRow(r, lastCompletedHeat?.contestType, lastCompletedResult.judgingStyle))}</tbody>
                 </table>
               </div>
             </div>
@@ -4715,7 +4718,7 @@ export default function AdminPanel({
                       <th className="p-2 text-right">Cut</th>
                     </tr>
                   </thead>
-                  <tbody>{lastCompletedRankedFollows.map((r) => renderLiveRankRow(r, lastCompletedResult.judgingStyle))}</tbody>
+                  <tbody>{lastCompletedRankedFollows.map((r) => renderLiveRankRow(r, lastCompletedHeat?.contestType, lastCompletedResult.judgingStyle))}</tbody>
                 </table>
               </div>
             </div>
@@ -4732,7 +4735,7 @@ export default function AdminPanel({
                   <th className="p-2 text-right">Cut</th>
                 </tr>
               </thead>
-              <tbody>{lastCompletedRankedFlat.map((r) => renderLiveRankRow(r, lastCompletedResult.judgingStyle))}</tbody>
+              <tbody>{lastCompletedRankedFlat.map((r) => renderLiveRankRow(r, lastCompletedHeat?.contestType, lastCompletedResult.judgingStyle))}</tbody>
             </table>
           </div>
         )}

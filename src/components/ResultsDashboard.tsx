@@ -1,8 +1,8 @@
 import React, { useState } from "react";
 import { Award, Medal, Landmark, Check, AlertCircle, TrendingUp, Users, RefreshCw, Lock, Key } from "lucide-react";
 import { Competitor, Heat, ScoreRecord, AppSettings } from "../types";
-import { CompetitorResult, CUT_GROUP_LABELS, getContestOptions, getContestOutcome, getCutGroup, isResultNameHidden } from "../utils/calculations";
-import { isCouplesHeat } from "../utils/partners";
+import { CompetitorResult, CUT_GROUP_LABELS, formatPlacement, getContestOptions, getContestOutcome, getCutGroup, isResultNameHidden } from "../utils/calculations";
+import { getDisplayBib, isCouplesHeat } from "../utils/partners";
 
 interface ResultsDashboardProps {
   competitors: Competitor[];
@@ -379,11 +379,11 @@ export default function ResultsDashboard({
                         ) : isThird ? (
                           <span className="text-amber-700">🥉 3rd</span>
                         ) : (
-                          <span className="text-slate-500 pl-6">{res.rank}th</span>
+                          <span className="text-slate-500 pl-6">{formatPlacement(res.rank)}</span>
                         )}
                       </td>
                     )}
-                    <td className="p-3 font-mono font-bold text-violet-500">#{res.competitor.bib}</td>
+                    <td className="p-3 font-mono font-bold text-violet-500">#{getDisplayBib(res.competitor.bib, currentHeat.contestType)}</td>
                     <td className="p-3 font-medium">
                       <div>
                         {isNameHidden ? (
@@ -423,14 +423,6 @@ export default function ResultsDashboard({
                                   {details.isCallback}
                                 </span>
                               )}
-                              {judgingStyle !== "callback" && details.isCallback !== "-" && (
-                                <span className={`text-[9px] font-bold mt-1 ${
-                                  details.isCallback === "Yes" ? "text-green-500" :
-                                  details.isCallback.startsWith("Alt") ? "text-amber-500" : "text-slate-500"
-                                }`}>
-                                  {details.isCallback === "Yes" ? "Yes" : details.isCallback.startsWith("Alt") ? details.isCallback : "No"}
-                                </span>
-                              )}
                             </div>
                           ) : (
                             <span className="text-slate-600 dark:text-slate-600">—</span>
@@ -447,6 +439,9 @@ export default function ResultsDashboard({
                         <span className="text-violet-500">{res.averagePlacement === 999 ? "—" : res.averagePlacement.toFixed(2)}</span>
                       ) : (
                         <span className="text-emerald-500">{res.prelimPoints !== undefined ? `${res.prelimPoints.toFixed(1)} pts` : `${res.yesCount} Yes`}</span>
+                      )}
+                      {res.isTieSettledByChief && (
+                        <span title="Tie settled by the Chief Judge" className="ml-1.5 px-1 py-0.5 rounded bg-amber-500/10 text-amber-500 text-[9px] font-bold border border-amber-500/20">CJ</span>
                       )}
                     </td>
 
@@ -503,6 +498,13 @@ export default function ResultsDashboard({
             </tbody>
           </table>
         </div>
+
+        {results.some((r) => r.isTieSettledByChief) && (
+          <p id="results-cj-legend" className="mt-3 text-[11px] text-slate-400">
+            <span className="px-1 py-0.5 mr-1 rounded bg-amber-500/10 text-amber-500 text-[9px] font-bold border border-amber-500/20">CJ</span>
+            Tie settled by the Chief Judge.
+          </p>
+        )}
 
         {/* Callback Division Boundary visual indicator */}
         {isCallbackHeat && results.length > 0 && (

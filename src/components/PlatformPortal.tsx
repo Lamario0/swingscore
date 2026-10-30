@@ -1,8 +1,8 @@
 import React from "react";
 import { ShieldAlert, Award, UserCheck, Users, Landmark, ExternalLink, Globe, KeyRound, Trophy, ChevronDown, ChevronUp, Sparkles } from "lucide-react";
 import { AppSettings, Competitor, CompletedContestResult, Heat, ScoreRecord } from "../types";
-import { getContestOptions, getContestOutcome, getCutGroup, isResultNameHidden } from "../utils/calculations";
-import { isCouplesHeat } from "../utils/partners";
+import { formatPlacement, getContestOptions, getContestOutcome, getCutGroup, isResultNameHidden } from "../utils/calculations";
+import { getDisplayBib, isCouplesHeat } from "../utils/partners";
 
 interface PlatformPortalProps {
   isDarkMode: boolean;
@@ -336,7 +336,7 @@ export default function PlatformPortal({ isDarkMode, settings, onUpdateSettings,
                                     </td>
                                   )}
                                   <td className="p-2 text-center font-mono font-bold text-slate-400">
-                                    {ranking.bib}
+                                    {getDisplayBib(ranking.bib, heats.find((h) => h.id === contest.heatId)?.contestType)}
                                   </td>
                                   <td className="p-2 font-medium text-slate-300">
                                     {ranking.isNameHidden ? <span className="italic text-slate-400">Name hidden</span> : ranking.name}
@@ -344,7 +344,7 @@ export default function PlatformPortal({ isDarkMode, settings, onUpdateSettings,
                                   <td className="p-2 text-right">
                                     {isFinals ? (
                                       <span className="text-[10px] font-bold font-mono text-amber-500">
-                                        Podium Winner
+                                        {formatPlacement(ranking.rank)} Place
                                       </span>
                                     ) : ranking.qualified ? (
                                       <span className="text-[10px] font-bold font-mono text-emerald-500">

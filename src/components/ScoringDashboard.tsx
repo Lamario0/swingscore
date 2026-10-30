@@ -2,7 +2,7 @@ import React, { useState, useMemo } from "react";
 import { Trophy, RefreshCw, ChevronDown, ChevronUp, BarChart3, ListOrdered, CheckCircle2, Filter, ArrowDownAZ, ArrowDownWideNarrow, EyeOff } from "lucide-react";
 import { AppSettings, Competitor, ContestOptions, Heat, ScoreRecord, CompletedContestResult } from "../types";
 import { getContestOptions, getContestOutcome, getCutGroup, isResultNameHidden } from "../utils/calculations";
-import { isCouplesHeat } from "../utils/partners";
+import { getDisplayBib, isCouplesHeat } from "../utils/partners";
 
 interface ScoringDashboardProps {
   settings: AppSettings;
@@ -27,6 +27,7 @@ interface MatrixRow {
   role: "Lead" | "Follow";
   outcome: "Callback" | "Tied" | "Alternate" | "Cut" | null;
   alternateRank?: number;
+  isTieSettledByChief: boolean;
 }
 
 interface Matrix {
@@ -38,7 +39,7 @@ interface Matrix {
   chiefJudgeName: string;
   chiefSides: { leaders: ChiefSideState; followers: ChiefSideState };
   changedBibs: string[]; // dancers whose result differs from Complete Contest
-  tieGroups: { bib: string; name: string }[][]; // dancers scores can't separate
+  tieGroups: { bib: string; label: string; name: string }[][]; // dancers scores can't separate
 }
 
 interface ChiefSideState {
@@ -103,16 +104,16 @@ function buildMatrix(
         ? recorded.rank !== r.rank
         : !!recorded.qualified !== r.qualified || !!recorded.isAlternate !== !!r.isAlternate;
     })
-    .map((r) => r.competitor.bib);
+    .map((r) => getDisplayBib(r.competitor.bib, heat.contestType));
 
   // Dancers the scores couldn't separate: on Finals any shared rank, otherwise
   // only a tie across a cut line matters.
-  const tieGroupMap = new Map<string, { bib: string; name: string }[]>();
+  const tieGroupMap = new Map<string, { bib: string; label: string; name: string }[]>();
   results.forEach((r) => {
     const key = isFinals ? `rank:${r.rank}` : r.tieGroup !== undefined ? `${r.competitor.role}:${r.tieGroup}` : null;
     if (!key) return;
     const name = isResultNameHidden(r, options, isFinals, contest.judgingStyle) ? "" : r.competitor.name;
-    tieGroupMap.set(key, [...(tieGroupMap.get(key) || []), { bib: r.competitor.bib, name }]);
+    tieGroupMap.set(key, [...(tieGroupMap.get(key) || []), { bib: r.competitor.bib, label: getDisplayBib(r.competitor.bib, heat.contestType), name }]);
   });
   const tieGroups = Array.from(tieGroupMap.values()).filter((group) => group.length > 1);
 
@@ -169,7 +170,7 @@ function buildMatrix(
     }
 
     return {
-      bib: r.competitor.bib,
+      bib: getDisplayBib(r.competitor.bib, heat.contestType),
       // Bib number and every judge's score/cell stay visible either way --
       // only the name itself is redacted, and only when an option is on.
       name: isResultNameHidden(r, options, isFinals, contest.judgingStyle) ? "" : r.competitor.name,
@@ -179,7 +180,8 @@ function buildMatrix(
       isAllNo,
       role: r.competitor.role === "Follow" ? ("Follow" as const) : ("Lead" as const),
       outcome: isFinals ? null : ([ "Callback", "Tied", "Alternate", "Cut" ] as const)[getCutGroup(r)],
-      alternateRank: r.alternateRank
+      alternateRank: r.alternateRank,
+      isTieSettledByChief: !!r.isTieSettledByChief
     };
   });
 
@@ -545,7 +547,7 @@ export default function ScoringDashboard({ settings, competitors, heats, scores,
                             </div>
                           ))}
                         </div>
-                        <p className="text-[10px] text-slate-400 mt-2">A side uses all of the Chief Judge's scores or none. CJ Weighted Scores lets their score settle a tie.</p>
+                        <p className="text-[10px] text-slate-400 mt-2">CJ Weighted Scores lets their score settle a tie.</p>
                       </div>
 
                       {matrix.tieGroups.length > 0 && (
@@ -560,7 +562,7 @@ export default function ScoringDashboard({ settings, competitors, heats, scores,
                                   onClick={() => updateContestOptions(contest.heatId, { chiefTieOrder: [dancer.bib, ...chiefTieOrder.filter((bib) => bib !== dancer.bib)] })}
                                   className="px-2 py-1 rounded-lg border border-rose-500/30 hover:bg-rose-500/10 text-[10px] font-bold cursor-pointer transition-all"
                                 >
-                                  Put #{dancer.bib}{dancer.name ? ` ${dancer.name}` : ""} ahead
+                                  Put #{dancer.label}{dancer.name ? ` ${dancer.name}` : ""} ahead
                                 </button>
                               ))}
                             </div>
@@ -638,6 +640,9 @@ export default function ScoringDashboard({ settings, competitors, heats, scores,
                                   ))}
                                   <td className="p-2 text-right font-mono font-bold text-slate-700 dark:text-slate-200 whitespace-nowrap">
                                     {row.relativeResult}
+                                    {row.isTieSettledByChief && (
+                                      <span title="Tie settled by the Chief Judge" className="ml-1.5 px-1 py-0.5 rounded bg-amber-500/10 text-amber-500 text-[9px] font-bold border border-amber-500/20">CJ</span>
+                                    )}
                                   </td>
                                   {!matrix.isFinals && (
                                     <td className={`p-2 text-right font-semibold whitespace-nowrap ${
@@ -652,6 +657,12 @@ export default function ScoringDashboard({ settings, competitors, heats, scores,
                             })}
                           </tbody>
                         </table>
+                        {matrix.rows.some((row) => row.isTieSettledByChief) && (
+                          <p className="mt-2 text-[10px] text-slate-400">
+                            <span className="px-1 py-0.5 mr-1 rounded bg-amber-500/10 text-amber-500 text-[9px] font-bold border border-amber-500/20">CJ</span>
+                            Tie settled by the Chief Judge.
+                          </p>
+                        )}
                       </div>
                       )}
                       </>

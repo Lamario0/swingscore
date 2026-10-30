@@ -1075,7 +1075,9 @@ export default function CoordinatorCheckIn({
                             const renderPartner = (c: Competitor) => (
                               <div>
                                 <div className="flex items-center gap-2">
-                                  <span className={`font-mono font-bold ${cp.scratched ? "text-slate-500" : "text-violet-500"}`}>#{c.bib}</span>
+                                  {!(activeContestType === "Strictly Swing" && c.bib === cp.follow.bib) && (
+                                    <span className={`font-mono font-bold ${cp.scratched ? "text-slate-500" : "text-violet-500"}`}>#{c.bib}</span>
+                                  )}
                                   <span className="text-sm font-bold">{c.name}</span>
                                 </div>
                                 <button
@@ -1313,7 +1315,7 @@ export default function CoordinatorCheckIn({
                               : "hover:bg-slate-50/50 dark:hover:bg-slate-800/20"
                           }`}
                         >
-                          <td className={`p-3 font-mono font-bold ${c.scratched ? "text-slate-500" : "text-violet-500"}`}>{c.bib.includes("_") ? "" : "#"}{c.bib}</td>
+                          <td className={`p-3 font-mono font-bold ${c.scratched ? "text-slate-500" : "text-violet-500"}`}>{activeContestType === "Strictly Swing" && c.role === "Follow" ? "—" : `${c.bib.includes("_") ? "" : "#"}${c.bib}`}</td>
                           <td className="p-3 font-medium">
                             <div className="flex items-center gap-2">
                               <span>{c.name}</span>

@@ -30,6 +30,13 @@ export function isCouplesHeat(heat: { heatType?: string | null; contestType?: st
   return heat.heatType === "Finals" || !!heat.name?.includes("Finals") || isPartneredContest(heat.contestType);
 }
 
+// Strictly Swing couples are known by the leader's bib alone.
+export function getDisplayBib(id: string, contestType?: string | null): string {
+  if (contestType !== "Strictly Swing" || !id.includes("_")) return id;
+  const [leadBib, followBib] = id.split("_");
+  return leadBib || followBib;
+}
+
 // Every contest entry a dancer registered: up to two Jack & Jill and two
 // Strictly Swing divisions (each with its own role), and one Routine.
 // Strictly roles fall back to the Jack & Jill role for registrations made
