@@ -1,8 +1,8 @@
 import React, { useState, useMemo } from "react";
 import { Trophy, RefreshCw, ChevronDown, ChevronUp, BarChart3, ListOrdered, CheckCircle2, Filter, ArrowDownAZ, ArrowDownWideNarrow, EyeOff } from "lucide-react";
 import { AppSettings, Competitor, ContestOptions, Heat, ScoreRecord, CompletedContestResult } from "../types";
-import { getContestOptions, getContestOutcome, getCutGroup, isResultNameHidden } from "../utils/calculations";
-import { getDisplayBib, isCouplesHeat } from "../utils/partners";
+import { formatPlacement, formatRelativePlacements, getContestOptions, getContestOutcome, getCutGroup, isResultNameHidden } from "../utils/calculations";
+import { getDisplayBib, isCouplesHeat, showsBibs } from "../utils/partners";
 
 interface ScoringDashboardProps {
   settings: AppSettings;
@@ -36,16 +36,22 @@ interface Matrix {
   resultColumnLabel: string;
   hasDistinctRoles: boolean;
   isFinals: boolean;
+  showBibs: boolean;
   chiefJudgeName: string;
   chiefSides: { leaders: ChiefSideState; followers: ChiefSideState };
-  changedBibs: string[]; // dancers whose result differs from Complete Contest
+  changedLabels: string[]; // dancers whose result differs from Complete Contest
   tieGroups: { bib: string; label: string; name: string }[][]; // dancers scores can't separate
+  chiefTieLabels: string[]; // the Chief Judge's order for tied dancers
 }
 
 interface ChiefSideState {
   hasScores: boolean;
   isShown: boolean;
 }
+
+const cjBadge = (
+  <span title="Tie settled by the Chief Judge" className="ml-1.5 px-1 py-0.5 rounded bg-amber-500/10 text-amber-500 text-[9px] font-bold border border-amber-500/20">CJ</span>
+);
 
 function buildMatrix(
   contest: CompletedContestResult,
@@ -58,7 +64,8 @@ function buildMatrix(
   if (!heat) return null;
 
   const options = getContestOptions(settings, heat.id);
-  const sortMode: SortMode = options.sortMode || "score";
+  const showBibs = showsBibs(heat.contestType);
+  const sortMode: SortMode = showBibs ? options.sortMode || "score" : "score";
   const sideFilter: SideFilter = options.sideFilter || "all";
   const isFinals = contest.heatType === "Finals";
 
@@ -94,9 +101,13 @@ function buildMatrix(
   };
   const chiefSides = { leaders: getChiefSide("Lead"), followers: getChiefSide("Follow") };
 
+  const getEntrantLabel = (bib: string) => showBibs
+    ? `#${getDisplayBib(bib, heat.contestType)}`
+    : results.find((r) => r.competitor.bib === bib)?.competitor.name || "";
+
   // Flag anyone whose result differs from what Complete Contest recorded,
   // since any next round was built from that record.
-  const changedBibs = results
+  const changedLabels = results
     .filter((r) => {
       const recorded = contest.rankings.find((entry) => entry.bib === r.competitor.bib);
       if (!recorded) return false;
@@ -104,7 +115,7 @@ function buildMatrix(
         ? recorded.rank !== r.rank
         : !!recorded.qualified !== r.qualified || !!recorded.isAlternate !== !!r.isAlternate;
     })
-    .map((r) => getDisplayBib(r.competitor.bib, heat.contestType));
+    .map((r) => getEntrantLabel(r.competitor.bib));
 
   // Dancers the scores couldn't separate: on Finals any shared rank, otherwise
   // only a tie across a cut line matters.
@@ -113,9 +124,10 @@ function buildMatrix(
     const key = isFinals ? `rank:${r.rank}` : r.tieGroup !== undefined ? `${r.competitor.role}:${r.tieGroup}` : null;
     if (!key) return;
     const name = isResultNameHidden(r, options, isFinals, contest.judgingStyle) ? "" : r.competitor.name;
-    tieGroupMap.set(key, [...(tieGroupMap.get(key) || []), { bib: r.competitor.bib, label: getDisplayBib(r.competitor.bib, heat.contestType), name }]);
+    tieGroupMap.set(key, [...(tieGroupMap.get(key) || []), { bib: r.competitor.bib, label: showBibs ? getEntrantLabel(r.competitor.bib) : "", name }]);
   });
   const tieGroups = Array.from(tieGroupMap.values()).filter((group) => group.length > 1);
+  const chiefTieLabels = (options.chiefTieOrder || []).map(getEntrantLabel);
 
   if (hasDistinctRoles && sideFilter !== "all") {
     results = results.filter((r) =>
@@ -156,9 +168,8 @@ function buildMatrix(
     });
 
     let relativeResult = "—";
-    if (contest.judgingStyle === "placement") {
-      const placements = [...r.countedPlacements].sort((a, b) => a - b);
-      relativeResult = placements.length > 0 ? placements.join("-") : "—";
+    if (isFinals || contest.judgingStyle === "placement") {
+      relativeResult = formatRelativePlacements(r.countedPlacements);
     } else if (contest.judgingStyle === "callback") {
       let s = `Y(${r.yesCount})N(${r.noCount})`;
       if ((r.alt1Count || 0) > 0) s += `A1(${r.alt1Count})`;
@@ -186,9 +197,9 @@ function buildMatrix(
   });
 
   const resultColumnLabel =
-    contest.judgingStyle === "placement" ? "Placements" : contest.judgingStyle === "callback" ? "Callback Tally" : "Raw Avg";
+    isFinals || contest.judgingStyle === "placement" ? "Relative Placement" : contest.judgingStyle === "callback" ? "Callback Tally" : "Raw Avg";
 
-  return { judgeNames, rows, resultColumnLabel, hasDistinctRoles, isFinals, chiefJudgeName, chiefSides, changedBibs, tieGroups };
+  return { judgeNames, rows, resultColumnLabel, hasDistinctRoles, isFinals, showBibs, chiefJudgeName, chiefSides, changedLabels, tieGroups, chiefTieLabels };
 }
 
 export default function ScoringDashboard({ settings, competitors, heats, scores, isDarkMode, onRefresh, onUpdateSettings }: ScoringDashboardProps) {
@@ -264,10 +275,7 @@ export default function ScoringDashboard({ settings, competitors, heats, scores,
             <Trophy className="w-6 h-6" />
           </div>
           <div>
-            <span className="text-[10px] font-mono font-bold uppercase tracking-widest text-slate-400 bg-slate-100 dark:bg-slate-800 px-2 py-0.5 rounded">
-              Virtual Domain: scoring.swingscore.com
-            </span>
-            <h1 className="text-2xl font-extrabold tracking-tight mt-1.5 text-slate-900 dark:text-slate-100">
+            <h1 className="text-2xl font-extrabold tracking-tight text-slate-900 dark:text-slate-100">
               Scoring &amp; Results Ledger
             </h1>
             <p className="text-xs text-slate-400 mt-1 max-w-lg leading-relaxed">
@@ -420,23 +428,25 @@ export default function ScoringDashboard({ settings, competitors, heats, scores,
                       <>
                       {/* Options for this contest. Name and Chief Judge options also apply to the public Results Terminal. */}
                       <div className="flex items-center gap-x-4 gap-y-2 mb-3 flex-wrap">
-                        <div className="flex items-center gap-2 flex-wrap">
-                          <span className="text-[10px] font-mono uppercase tracking-wider text-slate-400">Sort</span>
-                          <button
-                            id={`scoring-sort-score-btn-${contest.id}`}
-                            onClick={() => updateContestOptions(contest.heatId, { sortMode: "score" })}
-                            className={optionButtonClass((options.sortMode || "score") === "score")}
-                          >
-                            <ArrowDownWideNarrow className="w-3 h-3" /> Score (High to Low)
-                          </button>
-                          <button
-                            id={`scoring-sort-bib-btn-${contest.id}`}
-                            onClick={() => updateContestOptions(contest.heatId, { sortMode: "bib" })}
-                            className={optionButtonClass(options.sortMode === "bib")}
-                          >
-                            <ArrowDownAZ className="w-3 h-3" /> Bib Number
-                          </button>
-                        </div>
+                        {matrix.showBibs && (
+                          <div className="flex items-center gap-2 flex-wrap">
+                            <span className="text-[10px] font-mono uppercase tracking-wider text-slate-400">Sort</span>
+                            <button
+                              id={`scoring-sort-score-btn-${contest.id}`}
+                              onClick={() => updateContestOptions(contest.heatId, { sortMode: "score" })}
+                              className={optionButtonClass((options.sortMode || "score") === "score")}
+                            >
+                              <ArrowDownWideNarrow className="w-3 h-3" /> Score (High to Low)
+                            </button>
+                            <button
+                              id={`scoring-sort-bib-btn-${contest.id}`}
+                              onClick={() => updateContestOptions(contest.heatId, { sortMode: "bib" })}
+                              className={optionButtonClass(options.sortMode === "bib")}
+                            >
+                              <ArrowDownAZ className="w-3 h-3" /> Bib Number
+                            </button>
+                          </div>
+                        )}
 
                         {matrix.hasDistinctRoles && (
                           <div className="flex items-center gap-2 flex-wrap">
@@ -562,7 +572,7 @@ export default function ScoringDashboard({ settings, competitors, heats, scores,
                                   onClick={() => updateContestOptions(contest.heatId, { chiefTieOrder: [dancer.bib, ...chiefTieOrder.filter((bib) => bib !== dancer.bib)] })}
                                   className="px-2 py-1 rounded-lg border border-rose-500/30 hover:bg-rose-500/10 text-[10px] font-bold cursor-pointer transition-all"
                                 >
-                                  Put #{dancer.label}{dancer.name ? ` ${dancer.name}` : ""} ahead
+                                  Put {[dancer.label, dancer.name].filter(Boolean).join(" ")} ahead
                                 </button>
                               ))}
                             </div>
@@ -576,13 +586,13 @@ export default function ScoringDashboard({ settings, competitors, heats, scores,
                           onClick={() => updateContestOptions(contest.heatId, { chiefTieOrder: [] })}
                           className="mb-3 text-[10px] font-semibold text-slate-400 underline cursor-pointer"
                         >
-                          Clear the Chief Judge's tie order ({chiefTieOrder.map((bib) => `#${bib}`).join(", ")})
+                          Clear the Chief Judge's tie order ({matrix.chiefTieLabels.join(", ")})
                         </button>
                       )}
 
-                      {matrix.changedBibs.length > 0 && (
+                      {matrix.changedLabels.length > 0 && (
                         <p id={`scoring-changed-note-${contest.id}`} className="mb-3 p-2.5 rounded-lg bg-amber-500/10 border border-amber-500/20 text-[11px] text-amber-500 font-semibold">
-                          This differs from the result recorded at Complete Contest for: {matrix.changedBibs.map((bib) => `#${bib}`).join(", ")}. Any next round already created keeps the dancers it was built with.
+                          This differs from the result recorded at Complete Contest for: {matrix.changedLabels.join(", ")}. Any next round already created keeps the dancers it was built with.
                         </p>
                       )}
 
@@ -595,11 +605,12 @@ export default function ScoringDashboard({ settings, competitors, heats, scores,
                         <table className="w-full text-left border-collapse text-xs">
                           <thead>
                             <tr className={`text-[10px] font-mono text-slate-400 border-b ${isDarkMode ? "bg-slate-900/60 border-slate-800" : "bg-slate-50 border-slate-150"}`}>
-                              <th className="p-2 w-16 text-center font-bold">Bib</th>
+                              {matrix.showBibs && <th className="p-2 w-16 text-center font-bold">Bib</th>}
                               <th className="p-2 font-bold">Competitor / Couple</th>
                               {matrix.judgeNames.map((j) => (
                                 <th key={j} className="p-2 text-center font-bold whitespace-nowrap">{j}</th>
                               ))}
+                              {matrix.isFinals && <th className="p-2 text-right font-bold whitespace-nowrap">Placements</th>}
                               <th className="p-2 text-right font-bold whitespace-nowrap">{matrix.resultColumnLabel}</th>
                               {!matrix.isFinals && <th className="p-2 text-right font-bold">Outcome</th>}
                             </tr>
@@ -626,9 +637,11 @@ export default function ScoringDashboard({ settings, competitors, heats, scores,
                                 <tr
                                   className={`border-b last:border-0 ${isDarkMode ? "border-slate-800/50" : "border-slate-100"} ${isPodium ? "bg-amber-500/[0.03]" : row.isAllNo || row.outcome === "Cut" ? "opacity-50" : ""}`}
                                 >
-                                  <td className="p-2 text-center font-mono font-bold text-slate-400">
-                                    {row.bib}
-                                  </td>
+                                  {matrix.showBibs && (
+                                    <td className="p-2 text-center font-mono font-bold text-slate-400">
+                                      {row.bib}
+                                    </td>
+                                  )}
                                   <td className="p-2 font-medium text-slate-700 dark:text-slate-300 whitespace-nowrap">
                                     {isPodium && (row.rank === 1 ? "🥇 " : row.rank === 2 ? "🥈 " : "🥉 ")}
                                     {row.name ? row.name : <span className="italic text-slate-400">Name hidden</span>}
@@ -638,11 +651,15 @@ export default function ScoringDashboard({ settings, competitors, heats, scores,
                                       {row.cells[j]}
                                     </td>
                                   ))}
+                                  {matrix.isFinals && (
+                                    <td className="p-2 text-right font-mono font-bold text-violet-500 whitespace-nowrap">
+                                      {formatPlacement(row.rank)}
+                                      {row.isTieSettledByChief && cjBadge}
+                                    </td>
+                                  )}
                                   <td className="p-2 text-right font-mono font-bold text-slate-700 dark:text-slate-200 whitespace-nowrap">
                                     {row.relativeResult}
-                                    {row.isTieSettledByChief && (
-                                      <span title="Tie settled by the Chief Judge" className="ml-1.5 px-1 py-0.5 rounded bg-amber-500/10 text-amber-500 text-[9px] font-bold border border-amber-500/20">CJ</span>
-                                    )}
+                                    {!matrix.isFinals && row.isTieSettledByChief && cjBadge}
                                   </td>
                                   {!matrix.isFinals && (
                                     <td className={`p-2 text-right font-semibold whitespace-nowrap ${

@@ -1,8 +1,8 @@
 import React, { useState } from "react";
-import { Award, Medal, Landmark, Check, AlertCircle, TrendingUp, Users, RefreshCw, Lock, Key } from "lucide-react";
+import { Award, Medal, Landmark, Check, AlertCircle, TrendingUp, Users, RefreshCw, Lock } from "lucide-react";
 import { Competitor, Heat, ScoreRecord, AppSettings } from "../types";
-import { CompetitorResult, CUT_GROUP_LABELS, formatPlacement, getContestOptions, getContestOutcome, getCutGroup, isResultNameHidden } from "../utils/calculations";
-import { getDisplayBib, isCouplesHeat } from "../utils/partners";
+import { CompetitorResult, CUT_GROUP_LABELS, formatPlacement, formatRelativePlacements, getContestOptions, getContestOutcome, getCutGroup, isResultNameHidden } from "../utils/calculations";
+import { getDisplayBib, isCouplesHeat, showsBibs } from "../utils/partners";
 
 interface ResultsDashboardProps {
   competitors: Competitor[];
@@ -11,6 +11,7 @@ interface ResultsDashboardProps {
   settings: AppSettings;
   isDarkMode: boolean;
   onRefresh: () => Promise<void>;
+  canPreviewDrafts?: boolean;
 }
 
 export default function ResultsDashboard({
@@ -19,13 +20,12 @@ export default function ResultsDashboard({
   scores,
   settings,
   isDarkMode,
-  onRefresh
+  onRefresh,
+  canPreviewDrafts
 }: ResultsDashboardProps) {
   const [selectedHeatId, setSelectedHeatId] = useState<string | null>(null);
   const [sideTab, setSideTab] = useState<"Lead" | "Follow">("Lead");
   const [syncing, setSyncing] = useState(false);
-  const [bypassCode, setBypassCode] = useState("");
-  const [bypassError, setBypassError] = useState("");
   const [bypassSuccess, setBypassSuccess] = useState(false);
 
   const visibleHeats = bypassSuccess 
@@ -79,57 +79,16 @@ export default function ResultsDashboard({
             </p>
           </div>
 
-          <form 
-            onSubmit={(e) => {
-              e.preventDefault();
-              if (bypassCode === "admin") {
-                setBypassSuccess(true);
-                setBypassError("");
-              } else {
-                setBypassError("Invalid audit passcode.");
-              }
-            }}
-            className="mt-6 space-y-4 border-t border-slate-100 dark:border-slate-800 pt-5"
-          >
-            <div>
-              <label className="block text-[10px] font-mono font-bold text-slate-400 uppercase tracking-wider mb-2 text-center">
-                Auditor & Staff Access Bypass
-              </label>
-              <div className="relative">
-                <input
-                  id="bypass-passcode-input"
-                  type="password"
-                  value={bypassCode}
-                  onChange={(e) => setBypassCode(e.target.value)}
-                  placeholder="Enter bypass passcode"
-                  className={`w-full text-xs pl-10 pr-4 py-2.5 rounded-xl border focus:outline-none focus:ring-1 focus:ring-violet-500 font-mono transition-all text-center ${
-                    isDarkMode
-                      ? "bg-slate-800 border-slate-700 text-slate-100 placeholder-slate-500"
-                      : "bg-slate-50 border-slate-200 text-slate-800 placeholder-slate-400"
-                  }`}
-                />
-                <Key className="w-3.5 h-3.5 text-slate-500 absolute left-3.5 top-3.5" />
-              </div>
-            </div>
-
-            {bypassError && (
-              <p className="text-[10px] text-rose-500 text-center font-semibold">{bypassError}</p>
-            )}
-
+          {canPreviewDrafts && (
             <button
               id="bypass-submit-btn"
-              type="submit"
-              className="w-full py-2 bg-violet-600 hover:bg-violet-500 text-white font-semibold text-xs rounded-xl tracking-wider uppercase transition-all cursor-pointer"
+              type="button"
+              onClick={() => setBypassSuccess(true)}
+              className="w-full mt-6 py-2 bg-violet-600 hover:bg-violet-500 text-white font-semibold text-xs rounded-xl tracking-wider uppercase transition-all cursor-pointer"
             >
-              Verify & Preview Draft
+              Preview Draft Results
             </button>
-          </form>
-
-          <div className="mt-6 border-t border-slate-100 dark:border-slate-800 pt-4 text-center">
-            <p className="text-[10px] font-mono text-slate-500">
-              Local simulated event directors may use passcode <strong className="text-violet-400">"admin"</strong> to preview scores prior to official publishing.
-            </p>
-          </div>
+          )}
         </div>
       </div>
     );
@@ -155,6 +114,9 @@ export default function ResultsDashboard({
   // then the alternates, with the dancers who were cut at the bottom.
   const isFinals = currentHeat.heatType === "Finals";
   const isCallbackHeat = !isFinals;
+  const showBibs = showsBibs(currentHeat.contestType);
+  // A raw-scored Finals is ranked by the placements its scores give each dancer.
+  const isRawFinals = isFinals && judgingStyle === "raw";
   const hasSideTabs = currentHeat.role === "Mixed" && !isCouplesHeat(currentHeat);
   const sheetSide = hasSideTabs ? sideTab : currentHeat.role;
   const sideResults = hasSideTabs
@@ -225,7 +187,7 @@ export default function ResultsDashboard({
           <div className="flex items-center gap-1.5 text-[11px] font-mono text-slate-400">
             <span>Style:</span>
             <span className="font-bold text-violet-500 bg-violet-600/10 px-2 py-0.5 rounded uppercase">
-              {judgingStyle === "raw" ? "Raw Average" : judgingStyle === "placement" ? "Placement Rank" : "Callback Select"}
+              {isRawFinals ? "Raw Score Placements" : judgingStyle === "raw" ? "Raw Average" : judgingStyle === "placement" ? "Placement Rank" : "Callback Select"}
             </span>
           </div>
 
@@ -314,7 +276,7 @@ export default function ResultsDashboard({
             <thead>
               <tr className={`${isDarkMode ? "bg-slate-800/50 text-slate-300" : "bg-slate-50 text-slate-500"} text-xs font-semibold font-mono border-b border-slate-200 dark:border-slate-800`}>
                 {isFinals && <th className="p-3 w-16">Rank</th>}
-                <th className="p-3 w-16">Bib</th>
+                {showBibs && <th className="p-3 w-16">Bib</th>}
                 <th className="p-3">Dancer Name</th>
                 
                 {/* Individual Judge columns */}
@@ -323,7 +285,9 @@ export default function ResultsDashboard({
                 ))}
                 
                 {/* Score stats depending on mode */}
-                {judgingStyle === "raw" ? (
+                {isRawFinals ? (
+                  <th className="p-3 text-right">Relative Placement</th>
+                ) : judgingStyle === "raw" ? (
                   <th className="p-3 text-right">Avg Score</th>
                 ) : judgingStyle === "placement" ? (
                   <th className="p-3 text-right">Avg Placement</th>
@@ -383,7 +347,7 @@ export default function ResultsDashboard({
                         )}
                       </td>
                     )}
-                    <td className="p-3 font-mono font-bold text-violet-500">#{getDisplayBib(res.competitor.bib, currentHeat.contestType)}</td>
+                    {showBibs && <td className="p-3 font-mono font-bold text-violet-500">#{getDisplayBib(res.competitor.bib, currentHeat.contestType)}</td>}
                     <td className="p-3 font-medium">
                       <div>
                         {isNameHidden ? (
@@ -433,7 +397,9 @@ export default function ResultsDashboard({
 
                     {/* Final Average */}
                     <td className="p-3 text-right font-mono font-bold">
-                      {judgingStyle === "raw" ? (
+                      {isRawFinals ? (
+                        <span className="text-violet-500">{formatRelativePlacements(res.countedPlacements)}</span>
+                      ) : judgingStyle === "raw" ? (
                         <span className="text-violet-500">{res.averageScore.toFixed(2)}</span>
                       ) : judgingStyle === "placement" ? (
                         <span className="text-violet-500">{res.averagePlacement === 999 ? "—" : res.averagePlacement.toFixed(2)}</span>

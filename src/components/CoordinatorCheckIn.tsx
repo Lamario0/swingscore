@@ -318,7 +318,7 @@ export default function CoordinatorCheckIn({
     const namedPartner = getContestEntry(record, activeContestType, activeHeat.division)?.partner;
     return partner ? (
       <div className="text-[11px] text-slate-400 mt-1.5">
-        Partner: <span className="font-semibold text-violet-500">#{partner.bib} {partner.name}</span>
+        Partner: <span className="font-semibold text-violet-500">{isRoutineHeat ? partner.name : `#${partner.bib} ${partner.name}`}</span>
       </div>
     ) : (
       <div className="text-[11px] text-amber-500 mt-1.5 font-semibold">
@@ -455,7 +455,7 @@ export default function CoordinatorCheckIn({
     return (
       <div key={dancer.bib} id={`partner-finder-${dancer.bib}`} className={`p-3 rounded-xl border ${isDarkMode ? "border-slate-800 bg-slate-950/40" : "border-slate-200 bg-slate-50"}`}>
         <div className="flex items-center gap-2 flex-wrap">
-          <span className="font-mono font-bold text-violet-500">#{dancer.bib}</span>
+          {!isRoutineHeat && <span className="font-mono font-bold text-violet-500">#{dancer.bib}</span>}
           <span className="text-sm font-bold">{dancer.name}</span>
           {dancerRole && getRoleBadge(dancerRole)}
           <span className="text-[11px] text-slate-400">
@@ -483,7 +483,7 @@ export default function CoordinatorCheckIn({
           type="text"
           value={filter}
           onChange={(e) => setPartnerFilters((prev) => ({ ...prev, [dancer.bib]: e.target.value }))}
-          placeholder="Partner's name or bib"
+          placeholder={isRoutineHeat ? "Partner's name" : "Partner's name or bib"}
           className={inputClass}
         />
 
@@ -493,7 +493,7 @@ export default function CoordinatorCheckIn({
             {matches.map((c) => (
               <div key={c.bib} className="flex items-center justify-between gap-2 text-xs">
                 <span>
-                  <span className="font-mono font-bold text-violet-500">#{c.bib}</span> {c.name}
+                  {!isRoutineHeat && <span className="font-mono font-bold text-violet-500">#{c.bib} </span>}{c.name}
                   <span className="text-[10px] text-slate-400 ml-2">{entryNote(c)}</span>
                 </span>
                 <button
@@ -520,7 +520,7 @@ export default function CoordinatorCheckIn({
               >
                 <option value="">Select a registrant (A-Z)...</option>
                 {alphabetical.map((c) => (
-                  <option key={c.bib} value={c.bib}>{c.name} (#{c.bib})</option>
+                  <option key={c.bib} value={c.bib}>{isRoutineHeat ? c.name : `${c.name} (#${c.bib})`}</option>
                 ))}
               </select>
               <button
@@ -1075,7 +1075,7 @@ export default function CoordinatorCheckIn({
                             const renderPartner = (c: Competitor) => (
                               <div>
                                 <div className="flex items-center gap-2">
-                                  {!(activeContestType === "Strictly Swing" && c.bib === cp.follow.bib) && (
+                                  {!isRoutineHeat && !(activeContestType === "Strictly Swing" && c.bib === cp.follow.bib) && (
                                     <span className={`font-mono font-bold ${cp.scratched ? "text-slate-500" : "text-violet-500"}`}>#{c.bib}</span>
                                   )}
                                   <span className="text-sm font-bold">{c.name}</span>

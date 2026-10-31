@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback } from "react";
+import React, { useState, useEffect } from "react";
 import { Award, RefreshCw, Moon, Sun, AlertCircle, ArrowLeft, Globe, ShieldAlert, UserCheck, Users, Landmark } from "lucide-react";
 import Header from "./components/Header";
 import RegisterCompetitor from "./components/RegisterCompetitor";
@@ -9,7 +9,15 @@ import ResultsDashboard from "./components/ResultsDashboard";
 import ScoringDashboard from "./components/ScoringDashboard";
 import PlatformPortal from "./components/PlatformPortal";
 import RoleLogin from "./components/RoleLogin";
-import { Competitor, Heat, ScoreRecord, AppSettings, ViewRole, CallbackValue, ContestEntryFields } from "./types";
+import GatewayConnect from "./components/GatewayConnect";
+import GatewaySettings from "./components/GatewaySettings";
+import { doc, setDoc, waitForPendingWrites, writeBatch } from "firebase/firestore";
+import { db } from "./firebase";
+import { canReadAllScores, useCommunityState } from "./hooks/useCommunityState";
+import { useGatewaySession } from "./hooks/useGatewaySession";
+import { AppSettings, Competitor, ViewRole, CallbackValue, ContestEntryFields, ScoreRecord, StaffRole } from "./types";
+import { apiRequest } from "./utils/api";
+import { getScoreDocId, toDocId } from "./utils/ids";
 import { isCouplesHeat, projectCompetitorsForHeat } from "./utils/partners";
 
 export default function App() {
@@ -40,15 +48,8 @@ export default function App() {
       // ignore storage errors (private browsing, etc.)
     }
   };
-  const myClaimedJudge = (() => {
-    try {
-      return localStorage.getItem("swingscore_judge_claim") || "";
-    } catch {
-      return "";
-    }
-  })();
   const [isDarkMode, setIsDarkMode] = useState<boolean>(true);
-  const [isAuthenticated, setIsAuthenticated] = useState<boolean>(false);
+  const [actionError, setActionError] = useState("");
 
   // Parse the current virtual environment at mount time
   useEffect(() => {
@@ -94,74 +95,27 @@ export default function App() {
       return "portal";
     };
 
-    const role = detectRole();
-    setCurrentRole(role);
-
-    // Results panel and Central portal do not require passcodes
-    if (role === "results" || role === "portal") {
-      setIsAuthenticated(true);
-    } else {
-      // Check if session is already authenticated locally
-      const storedAuth = localStorage.getItem(`swingscore_auth_${role}`);
-      if (storedAuth === "true") {
-        setIsAuthenticated(true);
-      } else {
-        setIsAuthenticated(false);
-      }
-    }
+    setCurrentRole(detectRole());
   }, []);
 
-  // Synced Application State
-  const [competitors, setCompetitors] = useState<Competitor[]>([]);
-  const [heats, setHeats] = useState<Heat[]>([]);
-  const [scores, setScores] = useState<ScoreRecord[]>([]);
-  const [settings, setSettings] = useState<AppSettings>({
-    currentHeatId: null,
-    judgingStyle: "raw",
-    callbackCount: 3,
-    callbackCountLeaders: 3,
-    callbackCountFollowers: 3,
-    alternateCountLeaders: 2,
-    alternateCountFollowers: 2
-  });
+  // This device's gateway connection and its community's live data
+  const { session, isReady, connect, loginRole, logoutRole, applyToken, leaveGateway } = useGatewaySession();
+  const { communityName, competitors, heats, scores, settings, error, isOffline, hasUnsyncedScores, loading } = useCommunityState(session);
 
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState("");
+  // Results and the portal page only need the gateway code.
+  const isOpenPortal = currentRole === "portal" || currentRole === "results";
+  const isAuthenticated = isOpenPortal || !!session?.roles.includes(currentRole as StaffRole);
+  const myClaimedJudge = session?.judgeName || "";
 
-  // Fetch full state from server
-  const fetchState = useCallback(async () => {
-    try {
-      const res = await fetch("/api/state");
-      if (!res.ok) throw new Error("Server failed to respond");
-      const data = await res.json();
-      setCompetitors(data.competitors || []);
-      setHeats(data.heats || []);
-      setScores(data.scores || []);
-      setSettings(data.settings || { currentHeatId: null, judgingStyle: "raw", callbackCount: 3 });
-      setError("");
-    } catch (err: any) {
-      console.error("Failed to sync application state:", err);
-      setError("Lost connection to server scoring database. Retrying...");
-    } finally {
-      setLoading(false);
-    }
-  }, []);
+  // Live data arrives by itself, so the portals' refresh buttons have nothing to do.
+  const refreshState = async () => {};
 
-  // Initial fetch and automatic periodic state polling for real-time synchronization
-  useEffect(() => {
-    fetchState();
-    const interval = setInterval(() => {
-      fetchState();
-    }, 1500); // Poll every 1.5s for snappy real-time multi-device sync
-
-    return () => clearInterval(interval);
-  }, [fetchState]);
-
-  // If the currently selected judge profile becomes disabled (role set to "None"), switch to the first enabled judge profile.
+  // If the currently selected judge profile becomes disabled (role set to "None"), send
+  // the judge back to the picker: scores can only be saved under a name they've claimed.
   // Guarded on !loading: settings starts out as a hardcoded placeholder (no judgeNames/
-  // judgeRoles/chiefJudgeRole at all) until the initial fetchState() resolves. Without this
+  // judgeRoles/chiefJudgeRole at all) until the first live data arrives. Without this
   // guard, this effect ran against that placeholder immediately after a judge picked their
-  // profile, saw every role fall back to "None", and force-switched them to the Chief Judge
+  // profile, saw every role fall back to "None", and force-switched them away from their
   // profile before the real settings ever loaded -- while the judge's own name stayed marked
   // claimed/locked from the picker's own claim update. That is why logging a judge out and
   // picking them back in from the picker appeared to log into a different profile and
@@ -178,129 +132,81 @@ export default function App() {
     const chiefRole = settings.chiefJudgeRole || "Both";
 
     const idx = names.indexOf(selectedJudgeId);
-    if (idx !== -1) {
-      if (roles[idx] === "None") {
-        const firstEnabledIdx = roles.findIndex((r) => r !== "None");
-        if (firstEnabledIdx !== -1) {
-          setSelectedJudgeId(names[firstEnabledIdx]);
-        } else if (chiefRole !== "None") {
-          setSelectedJudgeId(chiefName);
-        }
-      }
-    } else if (selectedJudgeId === chiefName && chiefRole === "None") {
-      const firstEnabledIdx = roles.findIndex((r) => r !== "None");
-      if (firstEnabledIdx !== -1) {
-        setSelectedJudgeId(names[firstEnabledIdx]);
-      }
-    }
+    const isDisabled = idx !== -1 ? roles[idx] === "None" : selectedJudgeId === chiefName && chiefRole === "None";
+    if (isDisabled) setSelectedJudgeId("");
   }, [settings, selectedJudgeId, loading]);
 
   // Actions
   const handleRegisterCompetitor = async (competitor: { bib: string; name: string; email: string; division: string; role: "Lead" | "Follow" } & ContestEntryFields) => {
-    const res = await fetch("/api/register", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(competitor)
-    });
-    if (!res.ok) {
-      const data = await res.json();
-      throw new Error(data.error || "Failed to register");
-    }
-    await fetchState();
+    await apiRequest("/api/register", competitor);
+  };
+
+  const handleAddSampleDancers = async (division: string) => {
+    await apiRequest("/api/register/samples", { division });
   };
 
   // Check-in and scratch apply to one contest (heat); registry points are global.
   const handleCheckInToggle = async (bib: string, heatId: string, checkedIn: boolean, scratched?: boolean, registryPoints?: number) => {
-    const res = await fetch("/api/check-in", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ bib, heatId, checkedIn, scratched, registryPoints })
-    });
-    if (!res.ok) throw new Error("Failed to toggle check-in");
-    await fetchState();
+    await apiRequest("/api/check-in", { bib, heatId, checkedIn, scratched, registryPoints });
   };
 
   const handleAssignPartner = async (heatId: string, bib: string, partnerBib: string) => {
-    const res = await fetch("/api/heats/assign-partner", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ heatId, bib, partnerBib })
-    });
-    if (!res.ok) {
-      const data = await res.json().catch(() => ({}));
-      throw new Error(data.error || "Failed to assign partner");
-    }
-    await fetchState();
+    await apiRequest("/api/heats/assign-partner", { heatId, bib, partnerBib });
   };
 
   const handleUpdateCompetitor = async (
     oldBib: string,
     updates: { bib: string; name: string; email?: string; division: string; role: "Lead" | "Follow"; checkedIn?: boolean; scratched?: boolean; heatId?: string } & ContestEntryFields
   ) => {
-    const res = await fetch("/api/competitor/update", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ oldBib, newBib: updates.bib, ...updates })
-    });
-    if (!res.ok) {
-      const data = await res.json();
-      throw new Error(data.error || "Failed to update competitor");
-    }
-    await fetchState();
+    await apiRequest("/api/competitor/update", { oldBib, newBib: updates.bib, ...updates });
   };
 
   const handleCreateHeat = async (
     heatData: { name: string; division: string; role: "Lead" | "Follow" | "Mixed"; competitorBibs: string[]; couples?: { id: string; leadBib: string; followBib: string }[]; unpairedBibs?: string[]; finalistBibs?: string[]; heatType?: "Prelim" | "Semi-Final" | "Quarter Final" | "Finals"; contestType?: "Jack & Jill" | "Strictly Swing" | "Routine" },
     target: "live" | "next" = "live"
   ) => {
-    const res = await fetch("/api/heats/create", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ ...heatData, target })
-    });
-    if (!res.ok) throw new Error("Failed to create heat");
-    const data = await res.json();
-    if (data.heat && data.heat.id) {
-      if (target === "next") {
-        await handleUpdateSettings({ queuedHeatId: data.heat.id, queuedCheckInFinalized: false });
-      } else {
-        await handleUpdateSettings({ currentHeatId: data.heat.id });
-      }
+    const data = await apiRequest("/api/heats/create", { ...heatData, target });
+    if (target === "next") {
+      await handleUpdateSettings({ queuedHeatId: data.heat.id, queuedCheckInFinalized: false });
     } else {
-      await fetchState();
+      await handleUpdateSettings({ currentHeatId: data.heat.id });
     }
   };
 
   const handleDeleteHeat = async (heatId: string) => {
-    const res = await fetch("/api/heats/delete", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ heatId })
-    });
-    if (!res.ok) throw new Error("Failed to delete heat");
-    await fetchState();
+    await apiRequest("/api/heats/delete", { heatId });
   };
 
   const handleUpdateHeat = async (heatId: string, updates: { name?: string; division?: string; role?: "Lead" | "Follow" | "Mixed"; competitorBibs?: string[]; couples?: any[]; isCustom?: boolean; splits?: number[]; heatType?: "Prelim" | "Semi-Final" | "Quarter Final" | "Finals"; contestType?: "Jack & Jill" | "Strictly Swing" | "Routine" }) => {
-    const res = await fetch("/api/heats/update", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ heatId, ...updates })
-    });
-    if (!res.ok) throw new Error("Failed to update heat");
-    await fetchState();
+    await apiRequest("/api/heats/update", { heatId, ...updates });
   };
 
   const handleUpdateSettings = async (newSettings: Partial<AppSettings>) => {
-    const res = await fetch("/api/settings", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(newSettings)
-    });
-    if (!res.ok) throw new Error("Failed to update configurations");
-    await fetchState();
+    await apiRequest("/api/settings", newSettings);
   };
 
+  const handleClaimJudge = async (name: string) => {
+    const { token } = await apiRequest("/api/judge/claim", { name });
+    await applyToken(token);
+  };
+
+  const handleReleaseJudge = async (name: string) => {
+    const { token } = await apiRequest("/api/judge/release", { name });
+    await applyToken(token);
+  };
+
+  // The sheet's scores must reach the server first, or it would refuse the sheet.
+  const handleFinalizeSheet = async (key: string, name: string) => {
+    await waitForPendingWrites(db);
+    await apiRequest("/api/judge/finalize", { key, name });
+  };
+
+  const scoreDoc = (heatId: string, id: string) =>
+    doc(db, `communities/${session!.communityId}/heats/${toDocId(heatId)}/scores/${id}`);
+
+  // Scores go straight to Firestore so they survive a Wi-Fi drop. Firestore only
+  // finishes this write once the server has it, which offline could be minutes
+  // away, so the sheet doesn't wait: the device's copy updates immediately.
   const handleSaveScore = async (scoreData: {
     judgeId: string;
     heatId: string;
@@ -308,13 +214,12 @@ export default function App() {
     score: number;
     isCallback: CallbackValue;
   }) => {
-    const res = await fetch("/api/score", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(scoreData)
+    const id = getScoreDocId(scoreData.judgeId, scoreData.competitorBib);
+    const record: ScoreRecord = { ...scoreData, id, timestamp: Date.now() };
+    setDoc(scoreDoc(scoreData.heatId, id), record).catch((err) => {
+      console.error("A score was rejected", err);
+      setActionError(`A score for bib ${scoreData.competitorBib} couldn't be saved. Please log out and choose your judge profile again.`);
     });
-    if (!res.ok) throw new Error("Failed to upload score");
-    await fetchState();
   };
 
   // Automated Mock Score Simulator based on Judging Configuration
@@ -449,19 +354,17 @@ export default function App() {
         });
       }
 
-      await fetch("/api/score/bulk", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ judgeId: judge, heatId, scores: simulatedData })
+      const batch = writeBatch(db);
+      simulatedData.forEach(({ competitorBib, score, isCallback }) => {
+        const id = getScoreDocId(judge, competitorBib);
+        batch.set(scoreDoc(heatId, id), { id, judgeId: judge, heatId, competitorBib, score, isCallback, timestamp: Date.now() });
       });
+      await batch.commit();
     }
-
-    await fetchState();
   };
 
   const handleResetDatabase = async () => {
-    const res = await fetch("/api/reset", { method: "POST" });
-    if (!res.ok) throw new Error("Failed to reset database");
+    await apiRequest("/api/reset");
     // The server already clears settings.claimedJudges on reset, freeing every
     // judge name up for anyone to pick -- but THIS browser's own remembered
     // claim (swingscore_judge_claim) survives a server reset on its own, and
@@ -469,14 +372,11 @@ export default function App() {
     // browser opens the Judge domain. Clear it here too so a reset always
     // means every judge picks fresh.
     setSelectedJudgeId("");
-    await fetchState();
   };
 
   const handleClearAllDatabase = async () => {
-    const res = await fetch("/api/clear-all", { method: "POST" });
-    if (!res.ok) throw new Error("Failed to clear database");
+    await apiRequest("/api/clear-all");
     setSelectedJudgeId("");
-    await fetchState();
   };
 
   const isTestingEnv = !window.location.hostname.includes("swingscore.com");
@@ -494,13 +394,26 @@ export default function App() {
           isDarkMode={isDarkMode}
           setIsDarkMode={setIsDarkMode}
           settings={settings}
+          communityName={communityName}
         />
 
         {/* Global Lost Connection / Loading banners */}
-        {error && (
+        {session && isOffline && (
+          <div id="offline-banner" className="bg-amber-600 text-white text-xs py-2 px-4 flex items-center justify-center gap-2 font-mono text-center">
+            <AlertCircle className="w-4 h-4 animate-bounce flex-shrink-0" />
+            <span>Reconnecting. Judges' scores stay on this device and sync automatically. Other changes need a connection.</span>
+          </div>
+        )}
+        {!isOffline && currentRole === "judge" && hasUnsyncedScores && (
+          <div id="unsynced-scores-banner" className="bg-violet-600 text-white text-xs py-2 px-4 flex items-center justify-center gap-2 font-mono">
+            <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+            <span>Syncing scores...</span>
+          </div>
+        )}
+        {(error || actionError) && (
           <div className="bg-amber-600 text-white text-xs py-2 px-4 flex items-center justify-center gap-2 font-mono">
             <AlertCircle className="w-4 h-4 animate-bounce" />
-            <span>{error}</span>
+            <span>{actionError || error}</span>
           </div>
         )}
 
@@ -510,9 +423,11 @@ export default function App() {
           {currentRole !== "portal" && isTestingEnv && (
             <div className="mb-6 flex justify-start">
               <button
-                onClick={() => {
-                  // Clear simulated session auth state for testing and return to directory
-                  localStorage.removeItem(`swingscore_auth_${currentRole}`);
+                onClick={async () => {
+                  // Staff portals sign out on the way back to the directory
+                  if (session?.roles.includes(currentRole as StaffRole)) {
+                    await logoutRole(currentRole as StaffRole).catch(() => {});
+                  }
                   window.location.search = "?role=portal";
                 }}
                 className={`group flex items-center gap-1.5 text-xs font-semibold px-3 py-1.5 rounded-xl border transition-all ${
@@ -522,12 +437,18 @@ export default function App() {
                 }`}
               >
                 <ArrowLeft className="w-3.5 h-3.5 transition-transform group-hover:-translate-x-0.5" />
-                Return to Virtual Domain Directory
+                Return to Portal Directory
               </button>
             </div>
           )}
 
-          {loading ? (
+          {!isReady ? (
+            <div className="flex flex-col items-center justify-center py-20 gap-4">
+              <RefreshCw className="w-8 h-8 text-violet-500 animate-spin" />
+            </div>
+          ) : !session ? (
+            <GatewayConnect isDarkMode={isDarkMode} onConnect={connect} />
+          ) : loading ? (
             <div className="flex flex-col items-center justify-center py-20 gap-4">
               <RefreshCw className="w-8 h-8 text-violet-500 animate-spin" />
               <p className="text-xs text-slate-400 font-mono">Loading WCS database state...</p>
@@ -535,13 +456,10 @@ export default function App() {
           ) : !isAuthenticated ? (
             // Render the lock screen if the user has navigated to a protected domain slug and is unauthenticated
             <RoleLogin
-              role={currentRole === "portal" ? "results" : currentRole}
+              role={currentRole as StaffRole}
               isDarkMode={isDarkMode}
-              onSuccess={() => {
-                // Persist the session so a page refresh doesn't force the passcode again
-                if (currentRole !== "portal") {
-                  localStorage.setItem(`swingscore_auth_${currentRole}`, "true");
-                }
+              onLogin={async (passcode) => {
+                await loginRole(currentRole as StaffRole, passcode);
                 // Entering a passcode to get into the Judge domain means this
                 // browser wasn't already recognized (a fresh device, a cleared
                 // session, or someone new sitting down at this station) -- so
@@ -551,7 +469,6 @@ export default function App() {
                 if (currentRole === "judge") {
                   setSelectedJudgeId("");
                 }
-                setIsAuthenticated(true);
               }}
             />
           ) : (
@@ -560,10 +477,11 @@ export default function App() {
                 <PlatformPortal
                   isDarkMode={isDarkMode}
                   settings={settings}
-                  onUpdateSettings={handleUpdateSettings}
                   competitors={competitors}
                   heats={heats}
                   scores={scores}
+                  canReadAllScores={canReadAllScores(session)}
+                  communityName={communityName}
                 />
               )}
 
@@ -574,7 +492,8 @@ export default function App() {
                   scores={scores}
                   settings={settings}
                   isDarkMode={isDarkMode}
-                  onRefresh={fetchState}
+                  onRefresh={refreshState}
+                  canPreviewDrafts={!!session?.roles.some((role) => role === "admin" || role === "scoring")}
                 />
               )}
 
@@ -585,7 +504,7 @@ export default function App() {
                   heats={heats}
                   scores={scores}
                   isDarkMode={isDarkMode}
-                  onRefresh={fetchState}
+                  onRefresh={refreshState}
                   onUpdateSettings={handleUpdateSettings}
                 />
               )}
@@ -594,6 +513,7 @@ export default function App() {
                 <RegisterCompetitor
                   competitors={competitors}
                   onRegister={handleRegisterCompetitor}
+                  onAddSampleDancers={handleAddSampleDancers}
                   onUpdateCompetitor={handleUpdateCompetitor}
                   isDarkMode={isDarkMode}
                   settings={settings}
@@ -623,11 +543,23 @@ export default function App() {
                   judgeId={selectedJudgeId}
                   onSaveScore={handleSaveScore}
                   isDarkMode={isDarkMode}
-                  onRefresh={fetchState}
+                  onRefresh={refreshState}
                   settings={settings}
                   onSelectJudge={setSelectedJudgeId}
-                  onUpdateSettings={handleUpdateSettings}
+                  onClaimJudge={handleClaimJudge}
+                  onReleaseJudge={handleReleaseJudge}
+                  onFinalizeSheet={handleFinalizeSheet}
                   myClaimedJudge={myClaimedJudge}
+                />
+              )}
+
+              {currentRole === "admin" && (
+                <GatewaySettings
+                  isDarkMode={isDarkMode}
+                  communityName={communityName}
+                  settings={settings}
+                  onUpdateSettings={handleUpdateSettings}
+                  onApplyToken={applyToken}
                 />
               )}
 
@@ -657,8 +589,22 @@ export default function App() {
         <footer className={`py-6 border-t text-center text-[10px] font-mono ${
           isDarkMode ? "bg-slate-900/50 border-slate-900 text-slate-500" : "bg-white border-slate-200 text-slate-400"
         }`}>
-          <div>WCS Real-Time Scoring Engine • Separated Domain Tenant Architecture</div>
+          <div>WCS Real-Time Scoring Engine</div>
           <div className="mt-1 opacity-75">Designed with Desktop precision and Mobile optimized tactile controls</div>
+          {session && (
+            <button
+              type="button"
+              id="leave-gateway-btn"
+              onClick={() => {
+                if (window.confirm("Disconnect this device from the gateway? You'll need the gateway code to reconnect.")) {
+                  leaveGateway();
+                }
+              }}
+              className="mt-2 underline hover:text-slate-300 cursor-pointer"
+            >
+              Leave this gateway
+            </button>
+          )}
         </footer>
       </div>
     </div>

@@ -2,7 +2,7 @@ import React, { useState, useEffect } from "react";
 import { Award, Check, Save, User, Clock, AlertTriangle, ChevronUp, ChevronDown, RefreshCw } from "lucide-react";
 import { Competitor, Heat, ScoreRecord, JudgingStyle, CallbackValue, AppSettings } from "../types";
 import { checkSheetQuota, getJudgeHeatCompetitors, getSheetQuotas } from "../utils/calculations";
-import { getDisplayBib, projectCompetitorsForHeat } from "../utils/partners";
+import { getDisplayBib, projectCompetitorsForHeat, showsBibs } from "../utils/partners";
 
 interface JudgePortalProps {
   competitors: Competitor[];
@@ -22,7 +22,9 @@ interface JudgePortalProps {
   onRefresh: () => Promise<void>;
   settings: AppSettings;
   onSelectJudge?: (id: string) => void;
-  onUpdateSettings: (newSettings: Partial<AppSettings>) => Promise<void>;
+  onClaimJudge: (name: string) => Promise<void>;
+  onReleaseJudge: (name: string) => Promise<void>;
+  onFinalizeSheet: (key: string, name: string) => Promise<void>;
   // The judge name (if any) that THIS browser has already claimed, so it can
   // still re-select that same name after a logout or refresh even though the
   // name is otherwise locked out for everyone else.
@@ -41,15 +43,20 @@ export default function JudgePortal({
   onRefresh,
   settings,
   onSelectJudge,
-  onUpdateSettings,
+  onClaimJudge,
+  onReleaseJudge,
+  onFinalizeSheet,
   myClaimedJudge,
 }: JudgePortalProps) {
+  const [claimError, setClaimError] = useState("");
   const [localScores, setLocalScores] = useState<{ [bib: string]: number }>({});
   const [localCallbacks, setLocalCallbacks] = useState<{ [bib: string]: CallbackValue }>({});
   const [localRawScores, setLocalRawScores] = useState<{ [bib: string]: string }>({});
   const [savedStatus, setSavedStatus] = useState<{ [bib: string]: "idle" | "saving" | "saved" | "error" }>({});
   const [syncing, setSyncing] = useState(false);
-  const isSheetFinalized = !!(activeHeatId && settings.finalizedSheets?.includes(`${activeHeatId}:${judgeId}`));
+  const [isFinalizing, setIsFinalizing] = useState(false);
+  const [finalizeError, setFinalizeError] = useState("");
+  const isSheetFinalized =!!(activeHeatId && settings.finalizedSheets?.includes(`${activeHeatId}:${judgeId}`));
 
   // Name selection dropdown states
   const [tempSelectedJudge, setTempSelectedJudge] = useState(judgeId || "");
@@ -161,6 +168,8 @@ export default function JudgePortal({
 
   const activeHeat = heats.find((h) => h.id === activeHeatId);
   const isHeatFinals = activeHeat ? (activeHeat.heatType === "Finals" || activeHeat.name.includes("Finals")) : false;
+  // Routines show their running order where other sheets show a bib.
+  const showBibs = showsBibs(activeHeat?.contestType);
 
   // Shared with AdminPanel's Judges tab so a judge's own sheet always lines up
   // with what the admin's live "who has/hasn't submitted" view expects of them.
@@ -360,11 +369,14 @@ export default function JudgePortal({
               disabled={!tempSelectedJudge || isNameClaimedByOther(tempSelectedJudge)}
               onClick={async () => {
                 if (!tempSelectedJudge || isNameClaimedByOther(tempSelectedJudge)) return;
-                if (!claimedJudges.includes(tempSelectedJudge)) {
-                  await onUpdateSettings({ claimedJudges: [...claimedJudges, tempSelectedJudge] });
-                }
-                if (onSelectJudge) {
-                  onSelectJudge(tempSelectedJudge);
+                try {
+                  setClaimError("");
+                  await onClaimJudge(tempSelectedJudge);
+                  if (onSelectJudge) {
+                    onSelectJudge(tempSelectedJudge);
+                  }
+                } catch (err: any) {
+                  setClaimError(err.message);
                 }
               }}
               className={`w-full py-3 rounded-xl font-semibold text-xs tracking-wide uppercase transition-all ${
@@ -375,6 +387,7 @@ export default function JudgePortal({
             >
               Enter Scoring Console
             </button>
+            {claimError && <p className="text-[11px] text-rose-500 text-center font-semibold">{claimError}</p>}
           </div>
         </div>
       </div>
@@ -396,9 +409,7 @@ export default function JudgePortal({
           <button
             onClick={async () => {
               if (judgeId) {
-                await onUpdateSettings({
-                  claimedJudges: (settings.claimedJudges || []).filter((name) => name !== judgeId),
-                });
+                await onReleaseJudge(judgeId);
               }
               if (onSelectJudge) onSelectJudge("");
             }}
@@ -773,9 +784,7 @@ export default function JudgePortal({
           <button
             onClick={async () => {
               if (judgeId) {
-                await onUpdateSettings({
-                  claimedJudges: (settings.claimedJudges || []).filter((name) => name !== judgeId),
-                });
+                await onReleaseJudge(judgeId);
               }
               if (onSelectJudge) onSelectJudge("");
             }}
@@ -818,9 +827,7 @@ export default function JudgePortal({
           <button
             onClick={async () => {
               if (judgeId) {
-                await onUpdateSettings({
-                  claimedJudges: (settings.claimedJudges || []).filter((name) => name !== judgeId),
-                });
+                await onReleaseJudge(judgeId);
               }
               if (onSelectJudge) onSelectJudge("");
             }}
@@ -865,9 +872,7 @@ export default function JudgePortal({
           <button
             onClick={async () => {
               if (judgeId) {
-                await onUpdateSettings({
-                  claimedJudges: (settings.claimedJudges || []).filter((name) => name !== judgeId),
-                });
+                await onReleaseJudge(judgeId);
               }
               if (onSelectJudge) onSelectJudge("");
             }}
@@ -938,7 +943,12 @@ export default function JudgePortal({
   const areAltsSatisfied = quotaStatuses.every((status) => status.areAltsSatisfied);
   const isQuotaSatisfied = quotaStatuses.every((status) => status.isMet);
   const isQuotaReady = (judgingStyle !== "callback") ? true : isQuotaSatisfied;
-  const canFinalize = isSheetComplete && isQuotaReady && tiedBibs.size === 0;
+  const canFinalize = isSheetComplete && isQuotaReady && tiedBibs.size === 0 && !isFinalizing;
+  // A raw score sheet works callbacks out by itself, so its quotas only need
+  // showing when one sheet covers both sides. Under quota isn't an error there:
+  // it just means the sheet isn't finished.
+  const showQuotas = judgingStyle === "callback" || (judgingStyle === "raw" && sheetQuotas.length > 1);
+  const unmetQuotaColor = judgingStyle === "callback" ? "text-red-500" : "text-amber-500";
 
   const hasJudgeStartedInput = !!(
     (activeHeat && scores.some((s) => s.judgeId === judgeId && s.heatId === activeHeat.id)) ||
@@ -956,21 +966,18 @@ export default function JudgePortal({
         if (!savedBibs.has(c.bib)) await triggerSave(c.bib, localScores[c.bib] || 0, localCallbacks[c.bib] || "No");
       }
     }
-    const key = `${activeHeatId}:${judgeId}`;
-    const currentFinalized = settings.finalizedSheets || [];
-    const payload: Partial<AppSettings> = {};
-    if (!currentFinalized.includes(key)) {
-      payload.finalizedSheets = [...currentFinalized, key];
-    }
-    // Release this judge's claimed-name slot as soon as they finalize, so the
-    // name is immediately available again (e.g. for the next round, or for
-    // someone else at a shared station) without forcing this browser's own
-    // view away from the "Finalized & Locked" confirmation below.
-    if (judgeId && (settings.claimedJudges || []).includes(judgeId)) {
-      payload.claimedJudges = (settings.claimedJudges || []).filter((name) => name !== judgeId);
-    }
-    if (Object.keys(payload).length > 0) {
-      await onUpdateSettings(payload);
+    // Also releases this judge's claimed-name slot, so the name is immediately
+    // available again (e.g. for the next round, or for someone else at a shared
+    // station) without forcing this browser's own view away from the
+    // "Finalized & Locked" confirmation below.
+    setFinalizeError("");
+    setIsFinalizing(true);
+    try {
+      await onFinalizeSheet(`${activeHeatId}:${judgeId}`, judgeId);
+    } catch (err: any) {
+      setFinalizeError(err.message);
+    } finally {
+      setIsFinalizing(false);
     }
   };
 
@@ -1014,9 +1021,7 @@ export default function JudgePortal({
         <button
           onClick={async () => {
             if (judgeId) {
-              await onUpdateSettings({
-                claimedJudges: (settings.claimedJudges || []).filter((name) => name !== judgeId),
-              });
+              await onReleaseJudge(judgeId);
             }
             if (onSelectJudge) onSelectJudge("");
           }}
@@ -1051,18 +1056,18 @@ export default function JudgePortal({
           </div>
 
           <div className="flex items-center gap-3 w-full sm:w-auto justify-between sm:justify-end border-t sm:border-t-0 pt-3 sm:pt-0 border-slate-200 dark:border-slate-800 flex-wrap sm:flex-nowrap">
-            {judgingStyle === "callback" && (
+            {showQuotas && (
               <div className="text-left sm:text-right pr-3 sm:border-r border-slate-200 dark:border-slate-800">
-                <span className={`text-[10px] font-bold font-mono block uppercase tracking-wider ${isQuotaReady && isQuotaSatisfied ? "text-green-500" : "text-red-500"}`}>
+                <span className={`text-[10px] font-bold font-mono block uppercase tracking-wider ${isQuotaReady && isQuotaSatisfied ? "text-green-500" : unmetQuotaColor}`}>
                   Callback Quota
                 </span>
                 {quotaStatuses.map(({ quota, yesCount, altCount, isMet }) => (
-                  <span key={quota.side || "all"} className={`text-xs font-bold font-mono block ${isMet ? "text-green-500" : "text-red-500"}`}>
+                  <span key={quota.side || "all"} className={`text-xs font-bold font-mono block ${isMet ? "text-green-500" : unmetQuotaColor}`}>
                     {quota.side && quotaStatuses.length > 1 ? `${quota.side === "Lead" ? "Leaders" : "Followers"}: ` : ""}
                     Callbacks: {yesCount}/{quota.callbackCount} · Alts: {altCount}/{quota.alternateCount}
                   </span>
                 ))}
-                {!areAltsSatisfied && (
+                {judgingStyle === "callback" && !areAltsSatisfied && (
                   <span className="block text-[9px] text-rose-500 font-mono mt-0.5 font-bold animate-pulse">
                     Each alternate must be assigned exactly once — see indicator(s) below
                   </span>
@@ -1089,7 +1094,7 @@ export default function JudgePortal({
                     : "bg-slate-200 dark:bg-slate-800 text-slate-400 dark:text-slate-600 cursor-not-allowed border border-slate-300 dark:border-slate-700"
               }`}
             >
-              {isSheetFinalized ? "Finalized ✓" : "Finalize"}
+              {isFinalizing ? "Saving..." : isSheetFinalized ? "Finalized ✓" : "Finalize"}
             </button>
 
             <button
@@ -1112,6 +1117,13 @@ export default function JudgePortal({
               <strong className="block text-sm font-bold">Sheet Finalized & Locked!</strong>
               <span>Your scores and callbacks have been successfully registered on the central server and are secure.</span>
             </div>
+          </div>
+        )}
+
+        {finalizeError && (
+          <div className="mt-4 p-3 rounded-xl bg-rose-500/10 border border-rose-500/20 text-rose-500 text-xs font-medium flex items-center gap-2">
+            <AlertTriangle className="w-4 h-4 flex-shrink-0" />
+            <span>{finalizeError}</span>
           </div>
         )}
 
@@ -1169,6 +1181,8 @@ export default function JudgePortal({
 
           if (judgingStyle === "raw") {
             const isTied = tiedBibs.has(c.bib);
+            // Finals have no callbacks, only this judge's order
+            const rawResult = isHeatFinals ? getRawPlacement(c.bib) : getRawRankStatus(c.bib);
             // Raw Score Format
             return (
               <React.Fragment key={c.bib}>
@@ -1194,12 +1208,12 @@ export default function JudgePortal({
                   {/* Bib No. & Name */}
                   <div className="flex items-center gap-3 min-w-[200px]">
                     <div className="w-10 h-10 rounded-xl bg-violet-600/10 text-violet-500 font-mono font-bold flex items-center justify-center text-sm border border-violet-500/10 shadow-inner">
-                      #{getDisplayBib(c.bib, activeHeat?.contestType)}
+                      {showBibs ? `#${getDisplayBib(c.bib, activeHeat?.contestType)}` : index + 1}
                     </div>
                     <div>
                       <h3 className="font-bold text-sm tracking-tight">{c.name}</h3>
                       <p className="text-[10px] text-slate-400 font-mono">
-                        {c.division} • {c.role}s
+                        {showBibs ? `${c.division} • ${c.role}s` : c.division}
                       </p>
                     </div>
                   </div>
@@ -1261,11 +1275,12 @@ export default function JudgePortal({
                     <div className="text-left sm:text-right min-w-[95px]">
                       <span className="block text-[9px] font-semibold text-slate-400 font-mono uppercase tracking-wider mb-1">Judge Placement</span>
                       <span className={`text-xs font-mono font-bold px-2.5 py-1 rounded border ${
-                        getRawRankStatus(c.bib) === "Yes" ? "text-green-500 bg-green-500/10 border-green-500/15" :
-                        getRawRankStatus(c.bib).startsWith("Alt") ? "text-amber-500 bg-amber-500/10 border-amber-500/15" :
+                        isHeatFinals && score > 0 ? "text-violet-500 bg-violet-600/10 border-violet-500/15" :
+                        rawResult === "Yes" ? "text-green-500 bg-green-500/10 border-green-500/15" :
+                        rawResult.startsWith("Alt") ? "text-amber-500 bg-amber-500/10 border-amber-500/15" :
                         "text-slate-400 bg-slate-500/10 border-slate-500/15"
                       }`}>
-                        {getRawRankStatus(c.bib)}
+                        {rawResult}
                       </span>
                     </div>
 
@@ -1419,21 +1434,23 @@ export default function JudgePortal({
                     {/* Leader info */}
                     <div className="flex items-center gap-3">
                       <div className="w-9 h-9 rounded-lg bg-emerald-600/10 text-emerald-500 font-mono font-bold flex items-center justify-center text-xs border border-emerald-500/10 shadow-inner">
-                        L#{leadBib}
+                        {showBibs ? `L#${leadBib}` : index + 1}
                       </div>
                       <div>
-                        <span className="text-[9px] text-slate-400 font-mono uppercase tracking-wider block">Leader</span>
+                        <span className="text-[9px] text-slate-400 font-mono uppercase tracking-wider block">{showBibs ? "Leader" : "Partner"}</span>
                         <h4 className="font-bold text-sm tracking-tight">{leadName}</h4>
                       </div>
                     </div>
 
                     {/* Follower info */}
                     <div className="flex items-center gap-3">
-                      <div className="w-9 h-9 rounded-lg bg-rose-600/10 text-rose-500 font-mono font-bold flex items-center justify-center text-xs border border-rose-500/10 shadow-inner">
-                        {activeHeat?.contestType === "Strictly Swing" ? "F" : `F#${followBib || "—"}`}
-                      </div>
+                      {showBibs && (
+                        <div className="w-9 h-9 rounded-lg bg-rose-600/10 text-rose-500 font-mono font-bold flex items-center justify-center text-xs border border-rose-500/10 shadow-inner">
+                          {activeHeat?.contestType === "Strictly Swing" ? "F" : `F#${followBib || "—"}`}
+                        </div>
+                      )}
                       <div>
-                        <span className="text-[9px] text-slate-400 font-mono uppercase tracking-wider block">Follower</span>
+                        <span className="text-[9px] text-slate-400 font-mono uppercase tracking-wider block">{showBibs ? "Follower" : "Partner"}</span>
                         <h4 className="font-bold text-sm tracking-tight">{followName}</h4>
                       </div>
                     </div>

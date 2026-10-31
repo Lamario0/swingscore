@@ -12,3 +12,7 @@ coverage/
 
 # Local runtime persistence file (server.ts) -- never commit the live contest data
 data.json
+
+# Firebase CLI cache and local emulator exports
+.firebase/
+emulator-data/

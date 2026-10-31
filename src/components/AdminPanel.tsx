@@ -1,9 +1,18 @@
 import React, { useState, useEffect, useRef, useMemo } from "react";
 import { Shield, Sparkles, RefreshCw, Trash2, PlusCircle, CheckSquare, Settings, AlertTriangle, Play, Eye, EyeOff, Lock, Unlock, Trophy, Calendar, ArrowUp, ArrowDown, Plus, ChevronDown, ChevronUp, SortAsc, Scissors, Edit, X, FileText, Award, ExternalLink } from "lucide-react";
 import { Competitor, Heat, JudgingStyle, AppSettings, ScoreRecord, CallbackValue, CompletedContestResult, ContestEntryFields } from "../types";
-import { calculateHeatResults, checkSheetQuota, getJudgeHeatCompetitors, getSheetQuotas } from "../utils/calculations";
-import { buildRegisteredCouples, findRegisteredPartner, getDisplayBib, getDivisionLockKey, getEntrantSides, isActiveInHeat, isCouplesHeat, isPartneredContest, isRegisteredFor, projectCompetitorsForHeat, roleUpdateForEntry, validateContestEntries } from "../utils/partners";
+import { calculateHeatResults, checkSheetQuota, formatRelativePlacements, getJudgeHeatCompetitors, getQueuedPromotion, getSheetQuotas } from "../utils/calculations";
+import { buildRegisteredCouples, findRegisteredPartner, getDisplayBib, getDivisionLockKey, getEntrantSides, isActiveInHeat, isCouplesHeat, isPartneredContest, isRegisteredFor, projectCompetitorsForHeat, roleUpdateForEntry, showsBibs, validateContestEntries } from "../utils/partners";
 import ContestEntryInputs, { emptyContestEntries, contestEntriesFrom } from "./ContestEntryInputs";
+
+function shuffle<T>(array: T[]): T[] {
+  const copy = [...array];
+  for (let i = copy.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [copy[i], copy[j]] = [copy[j], copy[i]];
+  }
+  return copy;
+}
 
 // Which phase(s) a completed non-Finals round can advance to, per the
 // contest's own progression rules. Finals is terminal (no further round).
@@ -386,6 +395,10 @@ export default function AdminPanel({
       })
     : [];
 
+  // A Routine sheet has no bibs: couples are known by name and run in saved order.
+  const showSheetBibs = showsBibs(activeHeat?.contestType);
+  const isSortedByBib = sortingMode === "bib" && showSheetBibs;
+
   // Bib order sorts a couple by its leader's bib, so both partners stay on
   // the same row of the Leaders and Followers lists.
   const getBibSortKey = (row: { index: number; bibLabel: string }) => {
@@ -395,7 +408,7 @@ export default function AdminPanel({
     return leadBib || followBib || "";
   };
   const orderedHeatRows = activeHeat
-    ? (sortingMode === "bib"
+    ? (isSortedByBib
         ? [...activeHeatRows].sort((a, b) => getBibSortKey(a).localeCompare(getBibSortKey(b), undefined, { numeric: true }))
         : activeHeatRows)
     : [];
@@ -427,6 +440,7 @@ export default function AdminPanel({
   // Followers), or null for the single-list sheet. On a couples sheet each row
   // is one couple's leader or follower, so moving a dancer swaps them with the
   // neighbouring couple's dancer on that side, re-partnering both couples.
+  // Routine partners are fixed, so there the whole couple moves.
   const moveSheetDancer = async (side: "Lead" | "Follow" | null, from: number, to: number) => {
     if (!activeHeat) return;
     if (isCouplesSheet) {
@@ -436,8 +450,12 @@ export default function AdminPanel({
         return { leadBib, followBib };
       });
       if (to < 0 || to >= shownCouples.length) return;
-      const key = side === "Lead" ? "leadBib" : "followBib";
-      [shownCouples[from][key], shownCouples[to][key]] = [shownCouples[to][key], shownCouples[from][key]];
+      if (showSheetBibs) {
+        const key = side === "Lead" ? "leadBib" : "followBib";
+        [shownCouples[from][key], shownCouples[to][key]] = [shownCouples[to][key], shownCouples[from][key]];
+      } else {
+        [shownCouples[from], shownCouples[to]] = [shownCouples[to], shownCouples[from]];
+      }
       const couples = shownCouples.map((couple) => ({ id: `${couple.leadBib}_${couple.followBib}`, ...couple }));
       await saveSheetOrder({ competitorBibs: couples.map((couple) => couple.id), couples });
       return;
@@ -456,6 +474,19 @@ export default function AdminPanel({
     const followIds = followRows.map((row) => row.id);
     if (!swap(side === "Lead" ? leadIds : followIds)) return;
     await saveSheetOrder({ competitorBibs: [...leadIds, ...followIds] });
+  };
+
+  // Shuffles a Routine's running order, with partners staying together. The
+  // final check-in rebuilds the sheet, so this waits until it's finalized.
+  const isSheetCheckInFinalized = activeHeatControlTab === "next" ? !!settings.queuedCheckInFinalized : !!settings.checkInFinalized;
+  const handleRandomizeRoutineOrder = async () => {
+    if (!activeHeat) return;
+    if (!window.confirm("Randomize the running order? The current order will be replaced.")) return;
+    const couples = shuffle(activeHeat.competitorBibs).map((id) => {
+      const [leadBib = "", followBib = ""] = id.split("_");
+      return { id, leadBib, followBib };
+    });
+    await saveSheetOrder({ competitorBibs: couples.map((couple) => couple.id), couples });
   };
 
   // Draw mode partners a Jack & Jill Finals: followers, listed in bib order at
@@ -575,7 +606,7 @@ export default function AdminPanel({
     ? activeHeat.competitorBibs.map((bib) => activeHeatView.find((c) => c.bib === bib)).filter((c): c is Competitor => !!c)
     : [];
   const activeHeatCompetitors = activeHeat
-    ? (sortingMode === "bib"
+    ? (isSortedByBib
         ? [...rawActiveHeatCompetitors].sort((a, b) => a.bib.localeCompare(b.bib, undefined, { numeric: true }))
         : rawActiveHeatCompetitors)
     : [];
@@ -617,6 +648,14 @@ export default function AdminPanel({
 
     return expected;
   };
+
+  // settings.judgingStyle belongs to the Live Contest. Any other contest keeps
+  // the style it was scored with, or queued with.
+  const getHeatJudgingStyle = (heat: Heat): JudgingStyle =>
+    settings.completedResults?.find((r) => r.heatId === heat.id)?.judgingStyle
+    || (heat.id === settings.queuedHeatId ? settings.nextJudgingStyle : undefined)
+    || settings.judgingStyle
+    || "raw";
 
   const getExpectedCompetitorsForJudge = (heat: Heat, judgeId: string) => {
     const heatCompetitors = projectCompetitorsForHeat(competitors, heat);
@@ -1140,30 +1179,7 @@ export default function AdminPanel({
   // when there's no Live Contest to protect (guarded by the caller), so this
   // never displaces an in-progress round.
   const promoteQueuedToLive = async () => {
-    const promotePayload: any = {
-      currentHeatId: settings.queuedHeatId,
-      queuedHeatId: null,
-      // Floor Coordinators may already have finalized the queued contest's check-in.
-      checkInFinalized: !!settings.queuedCheckInFinalized,
-      queuedCheckInFinalized: false,
-      finalizedSheets: [],
-      nextContestConfigLocked: false,
-      ...(settings.nextContestType ? { contestType: settings.nextContestType, nextContestType: null } : {}),
-      ...(settings.nextDivision ? { division: settings.nextDivision, nextDivision: null } : {}),
-      ...(settings.nextHeatType ? { heatType: settings.nextHeatType, nextHeatType: null } : {}),
-      ...(settings.nextJudgingStyle ? { judgingStyle: settings.nextJudgingStyle, nextJudgingStyle: null } : {}),
-      ...(settings.nextCallbackCount ? { callbackCount: settings.nextCallbackCount, nextCallbackCount: null } : {}),
-      ...(settings.nextAlternateCount !== undefined ? { alternateCount: settings.nextAlternateCount, nextAlternateCount: null } : {}),
-      ...(settings.nextCallbackCountLeaders ? { callbackCountLeaders: settings.nextCallbackCountLeaders, nextCallbackCountLeaders: null } : {}),
-      ...(settings.nextCallbackCountFollowers ? { callbackCountFollowers: settings.nextCallbackCountFollowers, nextCallbackCountFollowers: null } : {}),
-      ...(settings.nextAlternateCountLeaders !== undefined ? { alternateCountLeaders: settings.nextAlternateCountLeaders, nextAlternateCountLeaders: null } : {}),
-      ...(settings.nextAlternateCountFollowers !== undefined ? { alternateCountFollowers: settings.nextAlternateCountFollowers, nextAlternateCountFollowers: null } : {}),
-      ...(settings.nextJudgeNames ? { judgeNames: settings.nextJudgeNames, nextJudgeNames: null } : {}),
-      ...(settings.nextJudgeRoles ? { judgeRoles: settings.nextJudgeRoles, nextJudgeRoles: null } : {}),
-      ...(settings.nextChiefJudgeName ? { chiefJudgeName: settings.nextChiefJudgeName, nextChiefJudgeName: null } : {}),
-      ...(settings.nextChiefJudgeRole ? { chiefJudgeRole: settings.nextChiefJudgeRole, nextChiefJudgeRole: null } : {}),
-    };
-    await onUpdateSettings(promotePayload);
+    await onUpdateSettings(getQueuedPromotion(settings) as any);
   };
 
   const createAdvancementHeat = async (
@@ -1366,34 +1382,7 @@ export default function AdminPanel({
     // 2. Advance / Reset logic
     if (settings.queuedHeatId) {
       const nextHeat = heats.find(h => h.id === settings.queuedHeatId);
-      const promotePayload: any = {
-        completedResults: updatedCompletedResults,
-        currentHeatId: settings.queuedHeatId,
-        queuedHeatId: null,
-        // Carry over the queued contest's own check-in finalization: Floor
-        // Coordinators can check it in while the previous contest is Live.
-        checkInFinalized: !!settings.queuedCheckInFinalized,
-        finalizedSheets: [], // Reset finalized sheets for the next live heat!
-        // The Next slot is empty again: unlock it so another check-in sheet
-        // can be prepared once the new Live Contest's check-in is finalized.
-        nextContestConfigLocked: false,
-        queuedCheckInFinalized: false,
-        ...(settings.nextContestType ? { contestType: settings.nextContestType, nextContestType: null } : {}),
-        ...(settings.nextDivision ? { division: settings.nextDivision, nextDivision: null } : {}),
-        ...(settings.nextHeatType ? { heatType: settings.nextHeatType, nextHeatType: null } : {}),
-        ...(settings.nextJudgingStyle ? { judgingStyle: settings.nextJudgingStyle, nextJudgingStyle: null } : {}),
-        ...(settings.nextCallbackCount ? { callbackCount: settings.nextCallbackCount, nextCallbackCount: null } : {}),
-        ...(settings.nextAlternateCount !== undefined ? { alternateCount: settings.nextAlternateCount, nextAlternateCount: null } : {}),
-        ...(settings.nextCallbackCountLeaders ? { callbackCountLeaders: settings.nextCallbackCountLeaders, nextCallbackCountLeaders: null } : {}),
-        ...(settings.nextCallbackCountFollowers ? { callbackCountFollowers: settings.nextCallbackCountFollowers, nextCallbackCountFollowers: null } : {}),
-        ...(settings.nextAlternateCountLeaders !== undefined ? { alternateCountLeaders: settings.nextAlternateCountLeaders, nextAlternateCountLeaders: null } : {}),
-        ...(settings.nextAlternateCountFollowers !== undefined ? { alternateCountFollowers: settings.nextAlternateCountFollowers, nextAlternateCountFollowers: null } : {}),
-        ...(settings.nextJudgeNames ? { judgeNames: settings.nextJudgeNames, nextJudgeNames: null } : {}),
-        ...(settings.nextJudgeRoles ? { judgeRoles: settings.nextJudgeRoles, nextJudgeRoles: null } : {}),
-        ...(settings.nextChiefJudgeName ? { chiefJudgeName: settings.nextChiefJudgeName, nextChiefJudgeName: null } : {}),
-        ...(settings.nextChiefJudgeRole ? { chiefJudgeRole: settings.nextChiefJudgeRole, nextChiefJudgeRole: null } : {}),
-      };
-      await onUpdateSettings(promotePayload);
+      await onUpdateSettings({ completedResults: updatedCompletedResults, ...getQueuedPromotion(settings) } as any);
       setActiveHeatControlTab("live");
       return { promotedName: nextHeat ? nextHeat.name : "Queued heat" };
     } else {
@@ -1489,79 +1478,83 @@ export default function AdminPanel({
     }
   };
 
-  // Wipes the Live Contest's slot back to a blank state: deletes its current
-  // heat (cascading its scores), clears check-in/finalization flags, resets
-  // the Contest Configuration fields to their defaults, and unlocks them so
-  // the card can be reconfigured from scratch.
+  // Deletes the Live Contest and its scores, then frees the slot: the server
+  // promotes the Next Contest into it, or clears it back to a blank
+  // configuration when nothing is queued.
   const handleResetLiveContest = async () => {
-    if (!window.confirm("Reset the Live Contest? This deletes its current heat and any scores recorded against it, clears its type/division/phase configuration, and unlocks the Contest Configuration card.")) {
+    const queuedHeat = heats.find((h) => h.id === settings.queuedHeatId);
+    const whatHappensNext = queuedHeat ? ` ${queuedHeat.name} will become the Live Contest.` : "";
+    if (!window.confirm(`Delete ${liveHeat?.name || "the Live Contest"}? This permanently deletes it and every score on it, and clears its configuration.${whatHappensNext}`)) {
       return;
     }
     setLoading(true);
     try {
-      const heatIdToClear = settings.currentHeatId;
-      if (heatIdToClear) {
-        await onDeleteHeat(heatIdToClear);
+      if (settings.currentHeatId) {
+        await onDeleteHeat(settings.currentHeatId);
+      } else {
+        await onUpdateSettings({
+          checkInFinalized: false,
+          contestType: "Jack & Jill",
+          division: "Novice",
+          heatType: "Prelim",
+          judgingStyle: "raw",
+          contestConfigLocked: false
+        });
       }
-      const payload: any = {
-        currentHeatId: null,
-        checkInFinalized: false,
-        contestType: "Jack & Jill",
-        division: "Novice",
-        heatType: "Prelim",
-        judgingStyle: "raw",
-        contestConfigLocked: false
-      };
-      if (heatIdToClear) {
-        payload.finalizedSheets = (settings.finalizedSheets || []).filter((entry) => !entry.startsWith(`${heatIdToClear}:`));
-      }
-      await onUpdateSettings(payload);
-      if (!isNextTab) {
+      setActiveHeatControlTab("live");
+      if (!queuedHeat) {
         setContestType("Jack & Jill");
         setDivision("Novice");
         setHeatType("Prelim");
       }
     } catch (err) {
-      alert("Failed to reset the Live Contest.");
+      alert("Failed to delete the Live Contest.");
     } finally {
       setLoading(false);
     }
   };
 
-  // Wipes the Queued (Next) Contest's slot back to a blank state, mirroring
-  // handleResetLiveContest for the staged "next" fields.
+  // Deletes the Queued (Next) Contest, mirroring handleResetLiveContest for
+  // the staged "next" fields.
   const handleResetNextContest = async () => {
-    if (!window.confirm("Reset the Queued Contest? This deletes its queued heat and any scores recorded against it, clears its staged type/division/phase configuration, and unlocks it for reconfiguration.")) {
+    const queuedHeat = heats.find((h) => h.id === settings.queuedHeatId);
+    if (!window.confirm(`Delete ${queuedHeat?.name || "the Next Contest"}? This permanently deletes it and any scores on it, and clears its staged configuration.`)) {
       return;
     }
     setLoading(true);
     try {
-      const heatIdToClear = settings.queuedHeatId;
-      if (heatIdToClear) {
-        await onDeleteHeat(heatIdToClear);
+      if (settings.queuedHeatId) {
+        await onDeleteHeat(settings.queuedHeatId);
+      } else {
+        await onUpdateSettings({
+          queuedCheckInFinalized: false,
+          nextContestType: null,
+          nextDivision: null,
+          nextHeatType: null,
+          nextJudgingStyle: null,
+          nextContestConfigLocked: false
+        } as any);
       }
-      const payload: any = {
-        queuedHeatId: null,
-        queuedCheckInFinalized: false,
-        nextContestType: null,
-        nextDivision: null,
-        nextHeatType: null,
-        nextJudgingStyle: null,
-        nextContestConfigLocked: false
-      };
-      if (heatIdToClear) {
-        payload.finalizedSheets = (settings.finalizedSheets || []).filter((entry) => !entry.startsWith(`${heatIdToClear}:`));
-      }
-      await onUpdateSettings(payload);
       if (isNextTab) {
         setContestType("Jack & Jill");
         setDivision("Novice");
         setHeatType("Prelim");
       }
     } catch (err) {
-      alert("Failed to reset the Queued Contest.");
+      alert("Failed to delete the Next Contest.");
     } finally {
       setLoading(false);
+    }
+  };
+
+  const handleDeleteCompletedContest = async (heat: Heat) => {
+    if (!window.confirm(`Delete ${heat.name}? This permanently deletes it, its scores and its recorded results.`)) {
+      return;
+    }
+    try {
+      await onDeleteHeat(heat.id);
+    } catch (err) {
+      alert(`Failed to delete ${heat.name}.`);
     }
   };
 
@@ -1700,7 +1693,7 @@ export default function AdminPanel({
     setResetStatus("Resetting...");
     try {
       await onResetDatabase();
-      setResetStatus("Database reset to original seed state successfully.");
+      setResetStatus("Contests and results cleared. Your dancers were kept.");
       setShowResetConfirm(false);
       setTimeout(() => setResetStatus(null), 5000);
     } catch (err) {
@@ -1713,6 +1706,7 @@ export default function AdminPanel({
 
   const handleClearAll = async () => {
     if (!onClearAllDatabase) return;
+    if (!window.confirm("Permanently delete every dancer, contest, score and result in this gateway? This can't be undone.")) return;
     setLoading(true);
     try {
       await onClearAllDatabase();
@@ -2031,7 +2025,7 @@ export default function AdminPanel({
                       id="reset-contest-config-btn"
                       onClick={() => (isNextTab ? handleResetNextContest() : handleResetLiveContest())}
                       disabled={loading}
-                      title={isNextTab ? "Reset the Queued Contest" : "Reset the Live Contest"}
+                      title={isNextTab ? "Delete the Next Contest" : "Delete the Live Contest"}
                       className={`flex-shrink-0 p-2.5 rounded-xl border transition-all ${
                         loading ? "opacity-50 cursor-not-allowed" : "cursor-pointer"
                       } ${
@@ -2064,7 +2058,7 @@ export default function AdminPanel({
                         id="reset-next-contest-config-btn"
                         onClick={handleResetNextContest}
                         disabled={loading}
-                        title="Reset the Queued Contest"
+                        title="Delete the Next Contest"
                         className={`flex-shrink-0 p-2.5 rounded-xl border transition-all ${
                           loading ? "opacity-50 cursor-not-allowed" : "cursor-pointer"
                         } ${
@@ -2111,7 +2105,7 @@ export default function AdminPanel({
                 <div className="flex items-center justify-between p-2 rounded-xl border border-slate-200 dark:border-slate-800 bg-slate-50/50 dark:bg-slate-950/40">
                   <div>
                     <span className="text-xs font-bold block">Competitor Registration</span>
-                    <span className="text-[9px] text-slate-400">Self-registration system</span>
+                    <span className="text-[9px] text-slate-400">Registration system</span>
                   </div>
                   <button
                     id="toggle-reg-permission-btn"
@@ -2682,12 +2676,12 @@ export default function AdminPanel({
                                 }`}
                               >
                                 <div className="flex items-center gap-2">
-                                  <span className="font-mono bg-violet-600/10 text-violet-500 px-1.5 py-0.5 rounded text-[10px] font-bold">#{c.bib}</span>
+                                  {showsBibs(contestType) && <span className="font-mono bg-violet-600/10 text-violet-500 px-1.5 py-0.5 rounded text-[10px] font-bold">#{c.bib}</span>}
                                   <span className="truncate">{c.name}</span>
                                   {isPartneredContest(contestType) && (() => {
                                     const partner = findRegisteredPartner(c, competitors, contestType, division);
                                     return partner
-                                      ? <span className="text-[9px] text-slate-400 truncate">w/ #{partner.bib} {partner.name}</span>
+                                      ? <span className="text-[9px] text-slate-400 truncate">w/ {showsBibs(contestType) ? `#${partner.bib} ` : ""}{partner.name}</span>
                                       : <span className="text-[9px] text-amber-500 font-semibold truncate">No registered partner</span>;
                                   })()}
                                 </div>
@@ -2835,9 +2829,9 @@ export default function AdminPanel({
                             <button
                               type="button"
                               id={`delete-heat-${h.id}`}
-                              onClick={() => onDeleteHeat(h.id)}
+                              onClick={() => handleDeleteCompletedContest(h)}
                               className="p-1.5 text-rose-500 hover:bg-rose-500/10 rounded-lg transition-colors border border-transparent hover:border-rose-500/25 cursor-pointer"
-                              title="Delete Heat"
+                              title="Delete Contest"
                             >
                               <Trash2 className="w-3.5 h-3.5" />
                             </button>
@@ -2929,7 +2923,7 @@ export default function AdminPanel({
                                         <table className="w-full text-left border-collapse text-xs">
                                           <thead>
                                             <tr className="bg-slate-50 dark:bg-slate-850 font-mono text-[10px] font-semibold border-b border-slate-200 dark:border-slate-800">
-                                              <th className="p-2 w-16 text-center">Bib</th>
+                                              {showsBibs(h.contestType) && <th className="p-2 w-16 text-center">Bib</th>}
                                               <th className="p-2">Competitor</th>
                                               <th className="p-2 text-center w-24">Mark Type</th>
                                               <th className="p-2 text-center w-28">Score / Value</th>
@@ -2955,27 +2949,27 @@ export default function AdminPanel({
 
                                                 return (
                                                   <tr key={record.id} className="hover:bg-slate-50/20">
-                                                    <td className="p-2 text-center font-bold text-slate-400">#{getDisplayBib(record.competitorBib, h.contestType)}</td>
+                                                    {showsBibs(h.contestType) && <td className="p-2 text-center font-bold text-slate-400">#{getDisplayBib(record.competitorBib, h.contestType)}</td>}
                                                     <td className="p-2 font-sans font-medium text-slate-700 dark:text-slate-200">{competitorName}</td>
                                                     <td className="p-2 text-center">
                                                       <span className="text-[10px] uppercase font-bold text-slate-400">
-                                                        {h.heatType === "Finals" ? "Placement" : "Qualifying"}
+                                                        {h.heatType !== "Finals" ? "Qualifying" : getHeatJudgingStyle(h) === "raw" ? "Raw Score" : "Placement"}
                                                       </span>
                                                     </td>
                                                     <td className="p-2 text-center font-bold text-violet-500">
-                                                      {h.heatType === "Finals" || settings.judgingStyle === "placement"
+                                                      {getHeatJudgingStyle(h) === "placement"
                                                         ? record.score !== undefined ? `Placement: #${record.score}` : "—"
-                                                        : settings.judgingStyle === "callback"
+                                                        : getHeatJudgingStyle(h) === "callback"
                                                           ? `Marked: ${record.isCallback}`
                                                           : record.score !== undefined ? `Score: ${record.score} pts` : "—"
                                                       }
                                                     </td>
                                                     <td className="p-2 text-center">
-                                                      {record.isCallback === "Yes" ? (
+                                                      {h.heatType !== "Finals" && record.isCallback === "Yes" ? (
                                                         <span className="px-2 py-0.5 rounded text-[10px] font-bold bg-green-500/10 border border-green-500/25 text-green-500">
                                                           Callback
                                                         </span>
-                                                      ) : record.isCallback && record.isCallback.startsWith("Alt") ? (
+                                                      ) : h.heatType !== "Finals" && record.isCallback && record.isCallback.startsWith("Alt") ? (
                                                         <span className="px-2 py-0.5 rounded text-[10px] font-bold bg-amber-500/10 border border-amber-500/25 text-amber-500 font-mono">
                                                           {record.isCallback}
                                                         </span>
@@ -3013,7 +3007,7 @@ export default function AdminPanel({
                                       h,
                                       competitors,
                                       scores,
-                                      settings.judgingStyle || "raw",
+                                      getHeatJudgingStyle(h),
                                       hCallbackCount,
                                       hAlternateCount,
                                       settings.callbackCountLeaders,
@@ -3026,6 +3020,13 @@ export default function AdminPanel({
                                       return <p className="text-xs text-slate-500 font-mono italic">No competitor scores have been recorded for this heat yet.</p>;
                                     }
                                     const heatExpectedJudges = getExpectedJudgesForHeat(h);
+
+                                    // Finals have no callbacks: show the raw score with the judge's
+                                    // placement, or just the placement on a placement sheet.
+                                    const getJudgeMark = (scoreObj: { score: number; isCallback: string }) => {
+                                      if (h.heatType !== "Finals") return scoreObj.isCallback || scoreObj.score;
+                                      return getHeatJudgingStyle(h) === "raw" && scoreObj.score > 0 ? scoreObj.score : "";
+                                    };
 
                                     const renderResultsTable = (resList: typeof results) => {
                                       if (resList.length === 0) {
@@ -3055,19 +3056,20 @@ export default function AdminPanel({
                                             <thead>
                                               <tr className="bg-slate-50 dark:bg-slate-850 font-mono text-[10px] font-semibold border-b border-slate-200 dark:border-slate-800 text-slate-500 dark:text-slate-400">
                                                 <th className="p-2 w-12 text-center">Rank</th>
-                                                <th className="p-2 w-20 text-center">Bib Number</th>
+                                                {showsBibs(h.contestType) && <th className="p-2 w-20 text-center">Bib Number</th>}
                                                 <th className="p-2">Name</th>
                                                 {heatExpectedJudges.map((j) => (
                                                   <th key={j} className="p-2 text-center font-mono">{j}</th>
                                                 ))}
                                                 <th className="p-2 text-center">Results/Placements</th>
+                                                {h.heatType === "Finals" && <th className="p-2 text-center">Relative Placement</th>}
                                               </tr>
                                             </thead>
                                             <tbody className="divide-y divide-slate-100 dark:divide-slate-800 font-mono">
                                               {resList.map((res) => (
                                                 <tr key={res.competitor.bib} className="hover:bg-slate-50/20">
                                                   <td className="p-2 font-bold text-center text-violet-500">#{res.rank}</td>
-                                                  <td className="p-2 text-center text-slate-700 dark:text-slate-300">#{getDisplayBib(res.competitor.bib, h.contestType)}</td>
+                                                  {showsBibs(h.contestType) && <td className="p-2 text-center text-slate-700 dark:text-slate-300">#{getDisplayBib(res.competitor.bib, h.contestType)}</td>}
                                                   <td className="p-2 font-sans font-bold text-slate-800 dark:text-slate-100">{res.competitor.name}</td>
                                                   {heatExpectedJudges.map((j) => {
                                                     const scoreObj = res.scoresByJudge[j];
@@ -3075,8 +3077,8 @@ export default function AdminPanel({
                                                       <td key={j} className="p-2 text-center">
                                                         {scoreObj ? (
                                                           <span className="text-slate-800 dark:text-slate-200">
-                                                            {scoreObj.isCallback || scoreObj.score}
-                                                            {scoreObj.placement ? ` (${scoreObj.placement})` : ""}
+                                                            {getJudgeMark(scoreObj)}
+                                                            {scoreObj.placement < 999 ? ` (${scoreObj.placement})` : ""}
                                                           </span>
                                                         ) : (
                                                           <span className="text-slate-400">—</span>
@@ -3097,6 +3099,9 @@ export default function AdminPanel({
                                                       <span className="text-slate-400 font-normal">Cut</span>
                                                     )}
                                                   </td>
+                                                  {h.heatType === "Finals" && (
+                                                    <td className="p-2 text-center font-bold">{formatRelativePlacements(res.countedPlacements)}</td>
+                                                  )}
                                                 </tr>
                                               ))}
                                             </tbody>
@@ -3181,7 +3186,25 @@ export default function AdminPanel({
             </div>
 
           <div className="flex items-center gap-3">
-            {activeHeat && (
+            {activeHeat && !showSheetBibs && (
+              <button
+                type="button"
+                id="randomize-order-btn"
+                disabled={!isSheetCheckInFinalized}
+                onClick={handleRandomizeRoutineOrder}
+                title={isSheetCheckInFinalized ? "Shuffle the running order" : "Available once the Floor Coordinator finalizes check-in"}
+                className={`inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-bold rounded-xl border transition-all ${
+                  isSheetCheckInFinalized
+                    ? "bg-violet-600/15 border-violet-500 text-violet-500 hover:bg-violet-600/25 cursor-pointer"
+                    : "bg-slate-100 dark:bg-slate-800 border-slate-200 dark:border-slate-700 text-slate-400 cursor-not-allowed opacity-60"
+                }`}
+              >
+                <Sparkles className="w-3.5 h-3.5" />
+                Randomize Order
+              </button>
+            )}
+
+            {activeHeat && showSheetBibs && (
               <button
                 type="button"
                 onClick={() => setSortingMode(prev => prev === "bib" ? "manual" : "bib")}
@@ -3300,7 +3323,7 @@ export default function AdminPanel({
               </div>
             )}
 
-                {!isDrawMode ? (
+                {!isDrawMode || !showSheetBibs ? (
                   <div className="space-y-6">
                     {activeHeat ? (
                       <div className="space-y-4">
@@ -3319,15 +3342,6 @@ export default function AdminPanel({
                                 onClick={async () => {
                                   const leads = activeHeatRows.filter(r => r.role === "Lead" && r.bibLabel && r.bibLabel !== "—" && r.bibLabel !== "").map(r => r.bibLabel);
                                   const follows = activeHeatRows.filter(r => r.role === "Follow" && r.bibLabel && r.bibLabel !== "—" && r.bibLabel !== "").map(r => r.bibLabel);
-                                  
-                                  const shuffle = <T,>(array: T[]): T[] => {
-                                    const copy = [...array];
-                                    for (let i = copy.length - 1; i > 0; i--) {
-                                      const j = Math.floor(Math.random() * (i + 1));
-                                      [copy[i], copy[j]] = [copy[j], copy[i]];
-                                    }
-                                    return copy;
-                                  };
                                   
                                   const shuffledLeads = shuffle(leads);
                                   const newCouples = follows.map((follow, idx) => {
@@ -3361,7 +3375,7 @@ export default function AdminPanel({
                                 <tr className={`${isDarkMode ? "bg-slate-800/50 text-slate-300" : "bg-slate-50 text-slate-500"} text-[10px] font-semibold font-mono border-b border-slate-200 dark:border-slate-800`}>
                                   <th className="p-2.5 w-10 text-center">No.</th>
                                   <th className="p-2.5 w-32">{activeHeat.contestType === "Routine" ? "Contest" : "Role"}</th>
-                                  <th className="p-2.5 w-16 text-center">Bib #</th>
+                                  {showSheetBibs && <th className="p-2.5 w-16 text-center">Bib #</th>}
                                   <th className="p-2.5">Competitor Name</th>
                                   <th className="p-2.5 text-right w-36">Actions</th>
                                 </tr>
@@ -3399,11 +3413,13 @@ export default function AdminPanel({
                                           </select>
                                           )}
                                         </td>
-                                        <td className="p-2.5 text-center">
-                                          <span className="font-mono bg-emerald-500/10 text-emerald-500 px-1.5 py-0.5 rounded text-[10px] font-bold">
-                                            #{row.bibLabel}
-                                          </span>
-                                        </td>
+                                        {showSheetBibs && (
+                                          <td className="p-2.5 text-center">
+                                            <span className="font-mono bg-emerald-500/10 text-emerald-500 px-1.5 py-0.5 rounded text-[10px] font-bold">
+                                              #{row.bibLabel}
+                                            </span>
+                                          </td>
+                                        )}
                                         <td className="p-2.5 font-semibold text-slate-700 dark:text-slate-200 truncate max-w-[140px]" title={row.name}>
                                           {row.name}
                                         </td>
@@ -3546,15 +3562,6 @@ export default function AdminPanel({
                                   const leads = activeHeatRows.filter(r => r.role === "Lead" && r.bibLabel && r.bibLabel !== "—" && r.bibLabel !== "").map(r => r.bibLabel);
                                   const follows = activeHeatRows.filter(r => r.role === "Follow" && r.bibLabel && r.bibLabel !== "—" && r.bibLabel !== "").map(r => r.bibLabel);
                                   
-                                  const shuffle = <T,>(array: T[]): T[] => {
-                                    const copy = [...array];
-                                    for (let i = copy.length - 1; i > 0; i--) {
-                                      const j = Math.floor(Math.random() * (i + 1));
-                                      [copy[i], copy[j]] = [copy[j], copy[i]];
-                                    }
-                                    return copy;
-                                  };
-                                  
                                   const shuffledFollows = shuffle(follows);
                                   const newCouples = leads.map((lead, idx) => {
                                     const follow = shuffledFollows[idx] || "";
@@ -3587,7 +3594,7 @@ export default function AdminPanel({
                                 <tr className={`${isDarkMode ? "bg-slate-800/50 text-slate-300" : "bg-slate-50 text-slate-500"} text-[10px] font-semibold font-mono border-b border-slate-200 dark:border-slate-800`}>
                                   <th className="p-2.5 w-10 text-center">No.</th>
                                   <th className="p-2.5 w-32">{activeHeat.contestType === "Routine" ? "Contest" : "Role"}</th>
-                                  <th className="p-2.5 w-16 text-center">Bib #</th>
+                                  {showSheetBibs && <th className="p-2.5 w-16 text-center">Bib #</th>}
                                   <th className="p-2.5">Competitor Name</th>
                                   <th className="p-2.5 text-right w-36">Actions</th>
                                 </tr>
@@ -3625,11 +3632,13 @@ export default function AdminPanel({
                                           </select>
                                           )}
                                         </td>
-                                        <td className="p-2.5 text-center">
-                                          <span className="font-mono bg-rose-500/10 text-rose-500 px-1.5 py-0.5 rounded text-[10px] font-bold">
-                                            {activeHeat.contestType === "Strictly Swing" ? "—" : `#${row.bibLabel}`}
-                                          </span>
-                                        </td>
+                                        {showSheetBibs && (
+                                          <td className="p-2.5 text-center">
+                                            <span className="font-mono bg-rose-500/10 text-rose-500 px-1.5 py-0.5 rounded text-[10px] font-bold">
+                                              {activeHeat.contestType === "Strictly Swing" ? "—" : `#${row.bibLabel}`}
+                                            </span>
+                                          </td>
+                                        )}
                                         <td className="p-2.5 font-semibold text-slate-700 dark:text-slate-200 truncate max-w-[140px]" title={row.name}>
                                           {row.name}
                                         </td>
@@ -4334,7 +4343,7 @@ export default function AdminPanel({
                         {activeHeatView
                           .filter(c => activeHeatSides.get(c.bib) === "Lead" && c.checkedIn && !c.scratched && !(activeHeat.couples || []).some(cp => cp.leadBib === c.bib))
                           .map(c => (
-                            <option key={c.bib} value={c.bib}>#{c.bib} {c.name}</option>
+                            <option key={c.bib} value={c.bib}>{showSheetBibs ? `#${c.bib} ${c.name}` : c.name}</option>
                           ))}
                       </select>
                       <button
@@ -4371,7 +4380,7 @@ export default function AdminPanel({
                         {activeHeatView
                           .filter(c => activeHeatSides.get(c.bib) === "Follow" && c.checkedIn && !c.scratched && !(activeHeat.couples || []).some(cp => cp.followBib === c.bib))
                           .map(c => (
-                            <option key={c.bib} value={c.bib}>#{c.bib} {c.name}</option>
+                            <option key={c.bib} value={c.bib}>{showSheetBibs ? `#${c.bib} ${c.name}` : c.name}</option>
                           ))}
                       </select>
                       <button
@@ -4825,6 +4834,35 @@ export default function AdminPanel({
         <ExternalLink className="w-3.5 h-3.5" />
         Go to Scoring
       </button>
+
+      {(liveHeat || settings.queuedHeatId) && (
+        <div className="mt-2 flex flex-col sm:flex-row gap-2">
+          {liveHeat && (
+            <button
+              id="delete-live-contest-btn"
+              type="button"
+              disabled={loading}
+              onClick={handleResetLiveContest}
+              className="flex-1 py-2 rounded-xl font-bold text-[11px] border border-rose-500/30 text-rose-500 hover:bg-rose-500/10 transition-all flex items-center justify-center gap-1.5 cursor-pointer"
+            >
+              <Trash2 className="w-3.5 h-3.5" />
+              Delete Live Contest
+            </button>
+          )}
+          {settings.queuedHeatId && (
+            <button
+              id="delete-next-contest-btn"
+              type="button"
+              disabled={loading}
+              onClick={handleResetNextContest}
+              className="flex-1 py-2 rounded-xl font-bold text-[11px] border border-rose-500/30 text-rose-500 hover:bg-rose-500/10 transition-all flex items-center justify-center gap-1.5 cursor-pointer"
+            >
+              <Trash2 className="w-3.5 h-3.5" />
+              Delete Next Contest
+            </button>
+          )}
+        </div>
+      )}
     </div>
     </>)}
 
@@ -4835,7 +4873,7 @@ export default function AdminPanel({
         System Database Control
       </h2>
       <p className="text-[11px] text-slate-400 mb-4 leading-relaxed">
-        Restore all references and entries back to the default reference contest starting catalog.
+        Clear every contest, score and result to start a new event. Your dancers stay registered.
       </p>
       {!showResetConfirm ? (
         <button
@@ -4849,7 +4887,7 @@ export default function AdminPanel({
         </button>
       ) : (
         <div className="space-y-2 p-1 bg-slate-50 dark:bg-slate-900/40 rounded-xl border border-slate-100 dark:border-slate-800">
-          <p className="text-[11px] text-amber-500 font-semibold text-center">Are you sure? This will restore all default dancers and heats, and wipe all scores.</p>
+          <p className="text-[11px] text-amber-500 font-semibold text-center">Are you sure? This will delete all contests, scores and results. Dancers are kept.</p>
           <div className="grid grid-cols-2 gap-2">
             <button
               onClick={handleReset}
@@ -4894,18 +4932,23 @@ export default function AdminPanel({
 
       {!collapsedCards.devUtils && (
         <div className="space-y-3">
-          <button
-            id="simulate-scores-btn"
-            onClick={handleSimulate}
-            disabled={loading}
-            className="w-full py-2.5 rounded-xl bg-violet-600 hover:bg-violet-750 text-white text-xs font-bold shadow transition-all flex items-center justify-center gap-2"
-          >
-            <Play className="w-4 h-4" />
-            Simulate 3 Judges Sheets
-          </button>
-          <p className="text-[10px] text-slate-400 text-center leading-relaxed">
-            Instantly populates realistic scores for Judge A, B, and C in the active heat to immediately view completed results matrices!
-          </p>
+          {/* Overwrites real judges' scores, so it never ships to communities */}
+          {import.meta.env.DEV && (
+            <>
+              <button
+                id="simulate-scores-btn"
+                onClick={handleSimulate}
+                disabled={loading}
+                className="w-full py-2.5 rounded-xl bg-violet-600 hover:bg-violet-750 text-white text-xs font-bold shadow transition-all flex items-center justify-center gap-2"
+              >
+                <Play className="w-4 h-4" />
+                Simulate 3 Judges Sheets
+              </button>
+              <p className="text-[10px] text-slate-400 text-center leading-relaxed">
+                Instantly populates realistic scores for Judge A, B, and C in the active heat to immediately view completed results matrices!
+              </p>
+            </>
+          )}
 
           <button
             id="clear-all-database-btn"

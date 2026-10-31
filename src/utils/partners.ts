@@ -30,6 +30,11 @@ export function isCouplesHeat(heat: { heatType?: string | null; contestType?: st
   return heat.heatType === "Finals" || !!heat.name?.includes("Finals") || isPartneredContest(heat.contestType);
 }
 
+// Routine couples are known by their names, so no screen shows their bibs.
+export function showsBibs(contestType?: string | null): boolean {
+  return contestType !== "Routine";
+}
+
 // Strictly Swing couples are known by the leader's bib alone.
 export function getDisplayBib(id: string, contestType?: string | null): string {
   if (contestType !== "Strictly Swing" || !id.includes("_")) return id;

@@ -9,12 +9,13 @@ type CompetitorDetails = { bib: string; name: string; email: string; division: s
 interface RegisterCompetitorProps {
   competitors: Competitor[];
   onRegister: (competitor: CompetitorDetails) => Promise<void>;
+  onAddSampleDancers: (division: string) => Promise<void>;
   onUpdateCompetitor?: (oldBib: string, updates: CompetitorDetails) => Promise<void>;
   isDarkMode: boolean;
   settings: AppSettings;
 }
 
-export default function RegisterCompetitor({ competitors, onRegister, onUpdateCompetitor, isDarkMode, settings }: RegisterCompetitorProps) {
+export default function RegisterCompetitor({ competitors, onRegister, onAddSampleDancers, onUpdateCompetitor, isDarkMode, settings }: RegisterCompetitorProps) {
   const [bib, setBib] = useState("");
   const [name, setName] = useState("");
   const [email, setEmail] = useState("");
@@ -43,7 +44,7 @@ export default function RegisterCompetitor({ competitors, onRegister, onUpdateCo
           
           <h2 className="text-xl font-bold tracking-tight mt-2 text-slate-900 dark:text-slate-100">Registration Locked</h2>
           <p className="text-xs text-slate-400 mt-2 leading-relaxed">
-            Competitor self-registration is currently suspended by the event administrators. Please contact the Contest Coordinator floor desk to register manually.
+            Registration is currently closed by the event administrators. Please contact the Contest Coordinator floor desk to register manually.
           </p>
         </div>
       </div>
@@ -127,6 +128,20 @@ export default function RegisterCompetitor({ competitors, onRegister, onUpdateCo
       resetForm();
     } catch (err: any) {
       setError(err.message || (editingCompetitor ? "Failed to update registration." : "Failed to register competitor."));
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleAddSamples = async () => {
+    setError("");
+    setSuccess("");
+    setLoading(true);
+    try {
+      await onAddSampleDancers(division);
+      setSuccess(`Added 5 sample leaders and 5 sample followers to ${division}.`);
+    } catch (err: any) {
+      setError(err.message || "Failed to add sample dancers.");
     } finally {
       setLoading(false);
     }
@@ -226,7 +241,7 @@ export default function RegisterCompetitor({ competitors, onRegister, onUpdateCo
                 <tr className={`${isDarkMode ? "bg-slate-800/50 text-slate-300" : "bg-slate-50 text-slate-500"} text-xs font-semibold font-mono border-b border-slate-200 dark:border-slate-800`}>
                   <th className="p-3">Bib</th>
                   <th className="p-3">Name</th>
-                  <th className="p-3">Email</th>
+                  {onUpdateCompetitor && <th className="p-3">Email</th>}
                   <th className="p-3">Division</th>
                   <th className="p-3">Role</th>
                   <th className="p-3">Other Entries</th>
@@ -242,7 +257,7 @@ export default function RegisterCompetitor({ competitors, onRegister, onUpdateCo
                     >
                       <td className="p-3 font-mono font-bold text-violet-500">{c.bib}</td>
                       <td className="p-3 font-medium">{c.name}</td>
-                      <td className="p-3 text-slate-400">{c.email || "—"}</td>
+                      {onUpdateCompetitor && <td className="p-3 text-slate-400">{c.email || "—"}</td>}
                       <td className="p-3">
                         <span className={`px-2 py-0.5 rounded-full text-[10px] font-semibold border ${
                           c.division === "Novice" ? "bg-sky-500/10 text-sky-500 border-sky-500/20" :
@@ -282,7 +297,7 @@ export default function RegisterCompetitor({ competitors, onRegister, onUpdateCo
                   ))
                 ) : (
                   <tr>
-                    <td colSpan={onUpdateCompetitor ? 7 : 6} className="p-6 text-center text-slate-500">
+                    <td colSpan={onUpdateCompetitor ? 7 : 5} className="p-6 text-center text-slate-500">
                       No competitors found. Use the form to register new dancers.
                     </td>
                   </tr>
@@ -465,6 +480,18 @@ export default function RegisterCompetitor({ competitors, onRegister, onUpdateCo
                 className="w-full py-2 rounded-xl border border-slate-200 dark:border-slate-700 text-xs font-semibold text-slate-500 hover:text-slate-300 transition-all"
               >
                 Cancel Editing
+              </button>
+            )}
+            {!editingCompetitor && (
+              <button
+                id="add-sample-dancers-btn"
+                type="button"
+                onClick={handleAddSamples}
+                disabled={loading}
+                className="w-full py-2 rounded-xl border border-slate-200 dark:border-slate-700 text-xs font-semibold text-slate-500 hover:text-violet-500 hover:border-violet-500/40 flex items-center justify-center gap-2 transition-all disabled:opacity-50 disabled:cursor-not-allowed"
+              >
+                <Sparkles className="w-3.5 h-3.5" />
+                Generate 5 Sample Leaders &amp; 5 Followers
               </button>
             )}
           </form>

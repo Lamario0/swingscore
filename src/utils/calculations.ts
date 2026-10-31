@@ -209,13 +209,22 @@ export function calculateHeatResults(
     const sortedRecords = judgingStyle === "placement"
       ? judgeRecords.filter((s) => s.score > 0).sort((a, b) => a.score - b.score)
       : [...judgeRecords].sort((a, b) => b.score - a.score);
+    // Equal scores share a placement, so the order the records happen to be
+    // stored in can never separate two dancers.
     sortedRecords.forEach((record, index) => {
-      judgePlacements[judgeId][record.competitorBib] = index + 1;
+      const previous = sortedRecords[index - 1];
+      judgePlacements[judgeId][record.competitorBib] = previous?.score === record.score
+        ? judgePlacements[judgeId][previous.competitorBib]
+        : index + 1;
     });
   });
 
   const compareBibs = (a: CompetitorResult, b: CompetitorResult): number =>
     a.competitor.bib.localeCompare(b.competitor.bib, undefined, { numeric: true });
+
+  // Every Finals is decided by relative placement. On a raw score sheet each
+  // judge's placements come from the order of their scores.
+  const ranksByPlacement = judgingStyle === "placement" || (judgingStyle === "raw" && heat.heatType === "Finals");
 
   // Scores the sheet with or without the Chief Judge. Only scores rank dancers:
   // those they can't separate share a rank, and bib order just lists them.
@@ -324,7 +333,7 @@ export function calculateHeatResults(
     // 4. Compare results based on the chosen judging style, before any tie-break
     const compareJudgedScores = (a: CompetitorResult, b: CompetitorResult): number => {
       if (judgingStyle === "callback") return compareByPoints(a, b);
-      if (judgingStyle === "placement") {
+      if (ranksByPlacement) {
         // Placements: WSDC Relative Placement (Majority) ranking system
         if (a.countedPlacements.length > 0 && b.countedPlacements.length > 0) {
           const cmp = compareWSDCPlacement(a.countedPlacements, b.countedPlacements);
@@ -526,6 +535,11 @@ export function getContestOutcome(heat: Heat, competitors: Competitor[], scores:
   };
 }
 
+// A dancer's placements from each judge, best first, e.g. "1-1-2".
+export function formatRelativePlacements(placements: number[]): string {
+  return placements.length > 0 ? [...placements].sort((a, b) => a - b).join("-") : "—";
+}
+
 export function formatPlacement(rank: number): string {
   const lastTwo = rank % 100;
   const suffix = lastTwo >= 11 && lastTwo <= 13 ? "th" : ["th", "st", "nd", "rd"][rank % 10] || "th";
@@ -537,6 +551,36 @@ export function formatPlacement(rank: number): string {
 export const CUT_GROUP_LABELS = ["Callbacks", "Tied", "Alternates", "Cut"];
 export function getCutGroup(res: { qualified?: boolean; isAlternate?: boolean; tieGroup?: number }): number {
   return res.qualified ? 0 : res.tieGroup !== undefined ? 1 : res.isAlternate ? 2 : 3;
+}
+
+// The settings change that moves the queued Next Contest into the Live slot,
+// bringing its staged configuration with it.
+export function getQueuedPromotion(settings: AppSettings): Record<string, unknown> {
+  return {
+    currentHeatId: settings.queuedHeatId,
+    queuedHeatId: null,
+    // Floor Coordinators may already have finalized the queued contest's check-in.
+    checkInFinalized: !!settings.queuedCheckInFinalized,
+    queuedCheckInFinalized: false,
+    finalizedSheets: [],
+    // The Next slot is empty again: unlock it so another check-in sheet can be
+    // prepared once the new Live Contest's check-in is finalized.
+    nextContestConfigLocked: false,
+    ...(settings.nextContestType ? { contestType: settings.nextContestType, nextContestType: null } : {}),
+    ...(settings.nextDivision ? { division: settings.nextDivision, nextDivision: null } : {}),
+    ...(settings.nextHeatType ? { heatType: settings.nextHeatType, nextHeatType: null } : {}),
+    ...(settings.nextJudgingStyle ? { judgingStyle: settings.nextJudgingStyle, nextJudgingStyle: null } : {}),
+    ...(settings.nextCallbackCount ? { callbackCount: settings.nextCallbackCount, nextCallbackCount: null } : {}),
+    ...(settings.nextAlternateCount !== undefined ? { alternateCount: settings.nextAlternateCount, nextAlternateCount: null } : {}),
+    ...(settings.nextCallbackCountLeaders ? { callbackCountLeaders: settings.nextCallbackCountLeaders, nextCallbackCountLeaders: null } : {}),
+    ...(settings.nextCallbackCountFollowers ? { callbackCountFollowers: settings.nextCallbackCountFollowers, nextCallbackCountFollowers: null } : {}),
+    ...(settings.nextAlternateCountLeaders !== undefined ? { alternateCountLeaders: settings.nextAlternateCountLeaders, nextAlternateCountLeaders: null } : {}),
+    ...(settings.nextAlternateCountFollowers !== undefined ? { alternateCountFollowers: settings.nextAlternateCountFollowers, nextAlternateCountFollowers: null } : {}),
+    ...(settings.nextJudgeNames ? { judgeNames: settings.nextJudgeNames, nextJudgeNames: null } : {}),
+    ...(settings.nextJudgeRoles ? { judgeRoles: settings.nextJudgeRoles, nextJudgeRoles: null } : {}),
+    ...(settings.nextChiefJudgeName ? { chiefJudgeName: settings.nextChiefJudgeName, nextChiefJudgeName: null } : {}),
+    ...(settings.nextChiefJudgeRole ? { chiefJudgeRole: settings.nextChiefJudgeRole, nextChiefJudgeRole: null } : {})
+  };
 }
 
 // Each side's callback quota for a judge's sheet. The Chief Judge scores both
@@ -587,6 +631,12 @@ export function isResultNameHidden(res: CompetitorResult, options: ContestOption
   const isCut = !isFinals && getCutGroup(res) === 3;
   const isAllNo = judgingStyle === "callback" && res.yesCount === 0 && res.altCount === 0;
   return (!!options.hideCutNames && isCut) || (!!options.hideAllNoNames && isAllNo);
+}
+
+export function getJudgeRole(settings: AppSettings, judgeId: string): "Leaders" | "Followers" | "Finals" | "Both" | "None" {
+  if (judgeId === (settings.chiefJudgeName || "Chief Judge")) return settings.chiefJudgeRole || "Both";
+  const idx = (settings.judgeNames || []).indexOf(judgeId);
+  return idx === -1 ? "None" : (settings.judgeRoles || [])[idx] || "None";
 }
 
 // Determine the exact set of competitors (or virtual couple units) a given judge

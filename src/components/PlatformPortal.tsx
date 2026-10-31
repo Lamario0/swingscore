@@ -1,16 +1,19 @@
 import React from "react";
-import { ShieldAlert, Award, UserCheck, Users, Landmark, ExternalLink, Globe, KeyRound, Trophy, ChevronDown, ChevronUp, Sparkles } from "lucide-react";
+import { ShieldAlert, Award, UserCheck, Users, Landmark, ExternalLink, KeyRound, Trophy, ChevronDown, ChevronUp, Sparkles } from "lucide-react";
 import { AppSettings, Competitor, CompletedContestResult, Heat, ScoreRecord } from "../types";
+import { getPublicHeatIds } from "../hooks/useCommunityState";
 import { formatPlacement, getContestOptions, getContestOutcome, getCutGroup, isResultNameHidden } from "../utils/calculations";
-import { getDisplayBib, isCouplesHeat } from "../utils/partners";
+import { getDisplayBib, isCouplesHeat, showsBibs } from "../utils/partners";
 
 interface PlatformPortalProps {
   isDarkMode: boolean;
   settings?: AppSettings;
-  onUpdateSettings?: (newSettings: Partial<AppSettings>) => Promise<void>;
   competitors?: Competitor[];
   heats?: Heat[];
   scores?: ScoreRecord[];
+  // Staff devices hold every contest's scores; public devices only Published ones.
+  canReadAllScores?: boolean;
+  communityName?: string;
 }
 
 interface RecordedRow {
@@ -25,7 +28,7 @@ interface RecordedRow {
   isNameHidden: boolean;
 }
 
-export default function PlatformPortal({ isDarkMode, settings, onUpdateSettings, competitors = [], heats = [], scores = [] }: PlatformPortalProps) {
+export default function PlatformPortal({ isDarkMode, settings, competitors = [], heats = [], scores = [], canReadAllScores = false, communityName }: PlatformPortalProps) {
   const [expandedHeatIds, setExpandedHeatIds] = React.useState<Record<string, boolean>>({});
 
   const toggleHeatExpand = (id: string) => {
@@ -38,12 +41,13 @@ export default function PlatformPortal({ isDarkMode, settings, onUpdateSettings,
   // A contest's lines as the Results Terminal shows them: the Scoring Ledger's
   // options applied, ranked for Finals, otherwise each side in bib order with
   // alternates after the callbacks and cuts last. A contest whose heat has been
-  // deleted can't be recalculated, so it shows what was recorded.
+  // deleted, or whose scores this device can't read, shows what was recorded.
   const getRecordedRows = (contest: CompletedContestResult): RecordedRow[] => {
     const isFinals = contest.heatType === "Finals";
     const heat = heats.find((h) => h.id === contest.heatId);
     let rows: RecordedRow[] = contest.rankings.map((r) => ({ ...r, side: null, isNameHidden: false }));
-    if (heat && settings) {
+    const canRecalculate = canReadAllScores || (!!settings && getPublicHeatIds(settings).includes(contest.heatId));
+    if (heat && settings && canRecalculate) {
       const { results, judgingStyle } = getContestOutcome(heat, competitors, scores, settings);
       const options = getContestOptions(settings, heat.id);
       const hasSides = heat.role === "Mixed" && !isCouplesHeat(heat);
@@ -71,60 +75,54 @@ export default function PlatformPortal({ isDarkMode, settings, onUpdateSettings,
   const systems = [
     {
       title: "Admin Control Panel",
-      domain: "admin.swingscore.com",
       path: "/admin",
       query: "?role=admin",
-      passcode: "admin",
+      access: "Gateway code + passcode",
       description: "Manage competitor databases, activate division heats, configure relative placement options, and toggle simulation modules.",
       icon: <ShieldAlert className="w-5 h-5 text-rose-500" />,
       color: "border-rose-500/20 hover:border-rose-500/40 bg-rose-500/[0.02]"
     },
     {
       title: "Judge Station Portal",
-      domain: "judge.swingscore.com",
       path: "/judge",
       query: "?role=judge",
-      passcode: "judge",
+      access: "Gateway code + passcode",
       description: "Dedicated real-time digital sheet for registered adjudicators. Record scores or sequential placement rankings securely.",
       icon: <Award className="w-5 h-5 text-amber-500" />,
       color: "border-amber-500/20 hover:border-amber-500/40 bg-amber-500/[0.02]"
     },
     {
       title: "Floor Coordinator Panel",
-      domain: "floorcord.swingscore.com",
       path: "/floorcord",
       query: "?role=coordinator",
-      passcode: "floor",
+      access: "Gateway code + passcode",
       description: "Dancer check-in dashboard and queue staging. Verify competitors as they report for their scheduled heats.",
       icon: <UserCheck className="w-5 h-5 text-emerald-500" />,
       color: "border-emerald-500/20 hover:border-emerald-500/40 bg-emerald-500/[0.02]"
     },
     {
-      title: "Dancer Self-Registration",
-      domain: "registration.swingscore.com",
+      title: "Registration",
       path: "/registration",
       query: "?role=competitor",
-      passcode: "register",
-      description: "Autonomous registrar kiosk. Competitors can request a bib number and sign up directly into novice, intermediate, or advanced divisions.",
+      access: "Gateway code + passcode",
+      description: "Register dancers, assign bib numbers and enter them into divisions and contests. Only approved staff can add or edit a registration.",
       icon: <Users className="w-5 h-5 text-blue-500" />,
       color: "border-blue-500/20 hover:border-blue-500/40 bg-blue-500/[0.02]"
     },
     {
       title: "Public Results Terminal",
-      domain: "results.swingscore.com",
       path: "/results",
       query: "?role=results",
-      passcode: "Open Access",
+      access: "Gateway code",
       description: "Spectator scoreboard displaying relative placement rankings, judge vote matrices, callback cuts, and live score synchronization.",
       icon: <Landmark className="w-5 h-5 text-violet-500" />,
       color: "border-violet-500/20 hover:border-violet-500/40 bg-violet-500/[0.02]"
     },
     {
       title: "Scoring & Results Ledger",
-      domain: "scoring.swingscore.com",
       path: "/scoring",
       query: "?role=scoring",
-      passcode: "scoring",
+      access: "Gateway code + passcode",
       description: "Internal system of record for completed contests — every heat closed out by the admin's Complete Contest action lands here.",
       icon: <Sparkles className="w-5 h-5 text-indigo-500" />,
       color: "border-indigo-500/20 hover:border-indigo-500/40 bg-indigo-500/[0.02]"
@@ -141,53 +139,12 @@ export default function PlatformPortal({ isDarkMode, settings, onUpdateSettings,
     <div className="max-w-4xl mx-auto py-8">
       {/* Visual Header */}
       <div className="text-center mb-10">
-        <span className="inline-flex items-center gap-1.5 px-3 py-1 bg-violet-600/10 text-violet-500 rounded-full font-mono font-bold text-[10px] uppercase border border-violet-500/20">
-          <Globe className="w-3.5 h-3.5 animate-spin-slow" /> Isolated Virtual Domains Enabled
-        </span>
-        <h1 className="text-3xl font-extrabold tracking-tight mt-3 text-slate-900 dark:text-slate-100">
-          SwingScore Distributed Network
+        <h1 className="text-3xl font-extrabold tracking-tight text-slate-900 dark:text-slate-100">
+          {communityName || "SwingScore"}
         </h1>
         <p className="text-xs text-slate-400 mt-2 max-w-lg mx-auto leading-relaxed">
-          In alignment with modern security architectures, our sub-systems are hosted on fully segregated custom domains.
-          Dancers, coordinators, judges, and administrators operate on separate virtual environments with independent access keys.
+          Choose your portal. Dancers, coordinators, judges, and administrators each have their own workspace.
         </p>
-      </div>
-
-      {/* Registration Toggle Hub */}
-      <div className={`p-6 rounded-2xl border mb-10 transition-all ${
-        isDarkMode ? "bg-slate-900/60 border-slate-800" : "bg-white border-slate-200 shadow-sm"
-      }`}>
-        <div className="flex flex-col sm:flex-row items-center justify-between gap-4">
-          <div className="flex items-center gap-3">
-            <div className={`p-3 rounded-xl border ${
-              settings?.registrationEnabled !== false
-                ? "bg-emerald-500/10 border-emerald-500/25 text-emerald-500"
-                : "bg-amber-500/10 border-amber-500/25 text-amber-500"
-            }`}>
-              <Users className="w-6 h-6" />
-            </div>
-            <div className="text-left">
-              <h2 className="text-sm font-extrabold tracking-tight">Competitor Registration Control</h2>
-              <p className="text-xs text-slate-400 mt-1">
-                {settings?.registrationEnabled !== false
-                  ? "Status: OPEN — Competitors can self-register into rosters."
-                  : "Status: CLOSED — Dancer self-registration is suspended."}
-              </p>
-            </div>
-          </div>
-          {onUpdateSettings && (
-            <button
-              onClick={() => onUpdateSettings({ registrationEnabled: settings?.registrationEnabled === false ? true : false })}
-              className={`px-4 py-2 text-xs font-bold rounded-xl transition-all flex items-center gap-1.5 cursor-pointer ${
-                settings?.registrationEnabled !== false
-                  ? "bg-rose-600 hover:bg-rose-700 text-white shadow-md shadow-rose-600/10"
-                  : "bg-emerald-600 hover:bg-emerald-700 text-white shadow-md shadow-emerald-600/10"
-              }`}
-            >
-              {settings?.registrationEnabled !== false ? "Close Registration" : "Open Registration"}
-            </button>
-          )}
-        </div>
       </div>
 
       {/* Grid of separate systems */}
@@ -206,21 +163,17 @@ export default function PlatformPortal({ isDarkMode, settings, onUpdateSettings,
                 </div>
                 <span className="text-[10px] font-mono text-slate-500 bg-slate-500/5 px-2 py-0.5 rounded border border-slate-500/10 flex items-center gap-1">
                   <KeyRound className="w-3 h-3 text-slate-400" />
-                  Passcode: <strong className="text-slate-300">{sys.passcode}</strong>
+                  {sys.access}
                 </span>
               </div>
 
               <h3 className="text-base font-bold tracking-tight text-slate-900 dark:text-slate-100">{sys.title}</h3>
-              <p className="text-[10px] text-violet-400 font-mono mt-0.5">{sys.domain}</p>
-              
               <p className="text-xs text-slate-400 mt-2.5 leading-relaxed font-normal">
                 {sys.description}
               </p>
             </div>
 
-            <div className="mt-6 pt-4 border-t border-slate-100 dark:border-slate-800/80 flex items-center justify-between">
-              <span className="text-[10px] font-mono text-slate-500">Slug: {sys.query}</span>
-              
+            <div className="mt-6 pt-4 border-t border-slate-100 dark:border-slate-800/80 flex items-center justify-end">
               <button
                 onClick={() => handleNavigate(sys.path, sys.query)}
                 className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold transition-all ${
@@ -259,6 +212,7 @@ export default function PlatformPortal({ isDarkMode, settings, onUpdateSettings,
               const isExpanded = !!expandedHeatIds[contest.id];
               const isFinals = contest.heatType === "Finals";
               const rows = isExpanded ? getRecordedRows(contest) : [];
+              const contestType = heats.find((h) => h.id === contest.heatId)?.contestType;
               return (
                 <div
                   key={contest.id}
@@ -299,7 +253,7 @@ export default function PlatformPortal({ isDarkMode, settings, onUpdateSettings,
                           <thead>
                             <tr className="bg-slate-100/50 dark:bg-slate-900/40 text-[10px] font-mono text-slate-400 border-b border-slate-150 dark:border-slate-800">
                               {isFinals && <th className="p-2 w-12 text-center font-bold">Rank</th>}
-                              <th className="p-2 w-16 text-center font-bold">Bib</th>
+                              {showsBibs(contestType) && <th className="p-2 w-16 text-center font-bold">Bib</th>}
                               <th className="p-2 font-bold">Competitor / Couple Name</th>
                               <th className="p-2 text-right font-bold">Status</th>
                             </tr>
@@ -335,9 +289,11 @@ export default function PlatformPortal({ isDarkMode, settings, onUpdateSettings,
                                       )}
                                     </td>
                                   )}
-                                  <td className="p-2 text-center font-mono font-bold text-slate-400">
-                                    {getDisplayBib(ranking.bib, heats.find((h) => h.id === contest.heatId)?.contestType)}
-                                  </td>
+                                  {showsBibs(contestType) && (
+                                    <td className="p-2 text-center font-mono font-bold text-slate-400">
+                                      {getDisplayBib(ranking.bib, contestType)}
+                                    </td>
+                                  )}
                                   <td className="p-2 font-medium text-slate-300">
                                     {ranking.isNameHidden ? <span className="italic text-slate-400">Name hidden</span> : ranking.name}
                                   </td>
@@ -378,13 +334,6 @@ export default function PlatformPortal({ isDarkMode, settings, onUpdateSettings,
             })}
           </div>
         )}
-      </div>
-
-      {/* Production Domain Note */}
-      <div className={`mt-8 p-4 rounded-xl border text-center ${
-        isDarkMode ? "bg-slate-900/30 border-slate-800/60 text-slate-400" : "bg-white border-slate-200 text-slate-500"
-      } text-[11px] leading-relaxed max-w-2xl mx-auto`}>
-        💡 <strong>Multi-Tenant Architecture Note:</strong> When deployed to production, these endpoints map seamlessly to their respective DNS zones (e.g., <code className="text-violet-400 bg-violet-400/10 px-1 py-0.5 rounded">judge.swingscore.com</code>). For testing and debugging, selecting a portal above configures the virtual runtime instantly.
       </div>
     </div>
   );

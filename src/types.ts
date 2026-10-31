@@ -107,6 +107,7 @@ export interface ContestOptions {
 }
 
 export interface AppSettings {
+  eventName?: string;
   currentHeatId: string | null;
   judgingStyle: JudgingStyle;
   callbackCount: number;
@@ -207,3 +208,16 @@ export interface AppState {
 }
 
 export type ViewRole = "admin" | "coordinator" | "judge" | "competitor" | "results" | "scoring";
+
+// Portals that need a passcode on top of the gateway code. "competitor" is the
+// Registration portal, matching its ViewRole.
+export type StaffRole = "admin" | "judge" | "coordinator" | "scoring" | "competitor";
+
+export type GatewayStatus = "active" | "grace" | "locked";
+
+// What this device is signed in as, carried in its Firebase token.
+export interface GatewaySession {
+  communityId: string;
+  roles: StaffRole[];
+  judgeName?: string;
+}
