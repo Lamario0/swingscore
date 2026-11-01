@@ -1,6 +1,9 @@
 import React from "react";
-import { ShieldAlert, Award, UserCheck, Users, Landmark, ExternalLink, KeyRound, Trophy, ChevronDown, ChevronUp, Sparkles } from "lucide-react";
-import { AppSettings, Competitor, CompletedContestResult, Heat, ScoreRecord } from "../types";
+import { ShieldAlert, Award, UserCheck, Users, Landmark, ExternalLink, KeyRound, Trophy, ChevronDown, ChevronUp, Sparkles, Copy, Check } from "lucide-react";
+import { AppSettings, Competitor, CompletedContestResult, Heat, ScoreRecord, StaffRole } from "../types";
+import { apiRequest } from "../utils/api";
+import { getPortalLink, LinkedPortal } from "../utils/portalLinks";
+import PasscodeNote from "./PasscodeNote";
 import { getPublicHeatIds } from "../hooks/useCommunityState";
 import { formatPlacement, getContestOptions, getContestOutcome, getCutGroup, isResultNameHidden } from "../utils/calculations";
 import { getDisplayBib, isCouplesHeat, showsBibs } from "../utils/partners";
@@ -30,6 +33,23 @@ interface RecordedRow {
 
 export default function PlatformPortal({ isDarkMode, settings, competitors = [], heats = [], scores = [], canReadAllScores = false, communityName }: PlatformPortalProps) {
   const [expandedHeatIds, setExpandedHeatIds] = React.useState<Record<string, boolean>>({});
+  const [access, setAccess] = React.useState<{ slug: string; passcodes: Partial<Record<StaffRole, string>> } | null>(null);
+  const [accessError, setAccessError] = React.useState("");
+  const [copiedPortal, setCopiedPortal] = React.useState<LinkedPortal | null>(null);
+
+  React.useEffect(() => {
+    apiRequest("/api/gateway/portal-access", undefined, "GET")
+      .then(setAccess)
+      .catch((err) => setAccessError(err.message));
+  }, []);
+
+  // The link stays on the card too: browsers block copying on a plain http address.
+  const copyLink = async (portal: LinkedPortal) => {
+    if (!access) return;
+    await navigator.clipboard?.writeText(getPortalLink(access.slug, portal));
+    setCopiedPortal(portal);
+    setTimeout(() => setCopiedPortal((current) => (current === portal ? null : current)), 1500);
+  };
 
   const toggleHeatExpand = (id: string) => {
     setExpandedHeatIds(prev => ({
@@ -72,12 +92,13 @@ export default function PlatformPortal({ isDarkMode, settings, competitors = [],
     );
   };
 
-  const systems = [
+  const systems: { title: string; path: string; query: string; access: string; linkPortal: LinkedPortal | null; description: string; icon: React.ReactNode; color: string }[] = [
     {
       title: "Admin Control Panel",
       path: "/admin",
       query: "?role=admin",
       access: "Gateway code + passcode",
+      linkPortal: null,
       description: "Manage competitor databases, activate division heats, configure relative placement options, and toggle simulation modules.",
       icon: <ShieldAlert className="w-5 h-5 text-rose-500" />,
       color: "border-rose-500/20 hover:border-rose-500/40 bg-rose-500/[0.02]"
@@ -86,7 +107,8 @@ export default function PlatformPortal({ isDarkMode, settings, competitors = [],
       title: "Judge Station Portal",
       path: "/judge",
       query: "?role=judge",
-      access: "Gateway code + passcode",
+      access: "Link + passcode",
+      linkPortal: "judge",
       description: "Dedicated real-time digital sheet for registered adjudicators. Record scores or sequential placement rankings securely.",
       icon: <Award className="w-5 h-5 text-amber-500" />,
       color: "border-amber-500/20 hover:border-amber-500/40 bg-amber-500/[0.02]"
@@ -95,7 +117,8 @@ export default function PlatformPortal({ isDarkMode, settings, competitors = [],
       title: "Floor Coordinator Panel",
       path: "/floorcord",
       query: "?role=coordinator",
-      access: "Gateway code + passcode",
+      access: "Link + passcode",
+      linkPortal: "coordinator",
       description: "Dancer check-in dashboard and queue staging. Verify competitors as they report for their scheduled heats.",
       icon: <UserCheck className="w-5 h-5 text-emerald-500" />,
       color: "border-emerald-500/20 hover:border-emerald-500/40 bg-emerald-500/[0.02]"
@@ -104,7 +127,8 @@ export default function PlatformPortal({ isDarkMode, settings, competitors = [],
       title: "Registration",
       path: "/registration",
       query: "?role=competitor",
-      access: "Gateway code + passcode",
+      access: "Link + passcode",
+      linkPortal: "registration",
       description: "Register dancers, assign bib numbers and enter them into divisions and contests. Only approved staff can add or edit a registration.",
       icon: <Users className="w-5 h-5 text-blue-500" />,
       color: "border-blue-500/20 hover:border-blue-500/40 bg-blue-500/[0.02]"
@@ -113,7 +137,8 @@ export default function PlatformPortal({ isDarkMode, settings, competitors = [],
       title: "Public Results Terminal",
       path: "/results",
       query: "?role=results",
-      access: "Gateway code",
+      access: "Link only",
+      linkPortal: "results",
       description: "Spectator scoreboard displaying relative placement rankings, judge vote matrices, callback cuts, and live score synchronization.",
       icon: <Landmark className="w-5 h-5 text-violet-500" />,
       color: "border-violet-500/20 hover:border-violet-500/40 bg-violet-500/[0.02]"
@@ -122,7 +147,8 @@ export default function PlatformPortal({ isDarkMode, settings, competitors = [],
       title: "Scoring & Results Ledger",
       path: "/scoring",
       query: "?role=scoring",
-      access: "Gateway code + passcode",
+      access: "Link + passcode",
+      linkPortal: "scoring",
       description: "Internal system of record for completed contests — every heat closed out by the admin's Complete Contest action lands here.",
       icon: <Sparkles className="w-5 h-5 text-indigo-500" />,
       color: "border-indigo-500/20 hover:border-indigo-500/40 bg-indigo-500/[0.02]"
@@ -143,7 +169,7 @@ export default function PlatformPortal({ isDarkMode, settings, competitors = [],
           {communityName || "SwingScore"}
         </h1>
         <p className="text-xs text-slate-400 mt-2 max-w-lg mx-auto leading-relaxed">
-          Choose your portal. Dancers, coordinators, judges, and administrators each have their own workspace.
+          Only you can see this page. Send each person their portal's link, and give staff their passcode from the note in the corner.
         </p>
       </div>
 
@@ -173,7 +199,27 @@ export default function PlatformPortal({ isDarkMode, settings, competitors = [],
               </p>
             </div>
 
-            <div className="mt-6 pt-4 border-t border-slate-100 dark:border-slate-800/80 flex items-center justify-end">
+            {sys.linkPortal && access && (
+              <p id={`portal-link-${sys.linkPortal}`} className="mt-4 text-[10px] font-mono text-slate-400 break-all select-all">
+                {getPortalLink(access.slug, sys.linkPortal)}
+              </p>
+            )}
+
+            <div className="mt-6 pt-4 border-t border-slate-100 dark:border-slate-800/80 flex items-center justify-end gap-2">
+              {sys.linkPortal && access && (
+                <button
+                  id={`copy-link-${sys.linkPortal}`}
+                  onClick={() => copyLink(sys.linkPortal!)}
+                  className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold transition-all ${
+                    isDarkMode
+                      ? "bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700"
+                      : "bg-slate-100 hover:bg-slate-200 text-slate-700 border border-slate-200 shadow-sm"
+                  }`}
+                >
+                  {copiedPortal === sys.linkPortal ? <Check className="w-3.5 h-3.5 text-green-500" /> : <Copy className="w-3.5 h-3.5 text-slate-400" />}
+                  {copiedPortal === sys.linkPortal ? "Copied" : "Copy Link"}
+                </button>
+              )}
               <button
                 onClick={() => handleNavigate(sys.path, sys.query)}
                 className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold transition-all ${
@@ -189,6 +235,9 @@ export default function PlatformPortal({ isDarkMode, settings, competitors = [],
           </div>
         ))}
       </div>
+
+      {accessError && <p className="mt-6 text-xs text-rose-500 text-center">{accessError}</p>}
+      {access && <PasscodeNote isDarkMode={isDarkMode} passcodes={access.passcodes} />}
 
       {/* Official Results Panel */}
       <div className={`mt-10 p-6 rounded-2xl border transition-all ${

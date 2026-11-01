@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from "react";
+import React, { useState, useEffect, useRef } from "react";
 import { Award, RefreshCw, Moon, Sun, AlertCircle, ArrowLeft, Globe, ShieldAlert, UserCheck, Users, Landmark } from "lucide-react";
 import Header from "./components/Header";
 import RegisterCompetitor from "./components/RegisterCompetitor";
@@ -19,10 +19,12 @@ import { AppSettings, Competitor, ViewRole, CallbackValue, ContestEntryFields, S
 import { apiRequest } from "./utils/api";
 import { getScoreDocId, toDocId } from "./utils/ids";
 import { isCouplesHeat, projectCompetitorsForHeat } from "./utils/partners";
+import { parsePortalLink } from "./utils/portalLinks";
 
 export default function App() {
   // Navigation & Preferences (Dynamically detected via URL slug, query string, or subdomains)
-  const [currentRole, setCurrentRole] = useState<ViewRole | "portal">("portal");
+  const [portalLink] = useState(() => parsePortalLink(window.location.pathname));
+  const [currentRole, setCurrentRole] = useState<ViewRole | "portal">(portalLink?.role || "portal");
   const [selectedJudgeId, setSelectedJudgeIdState] = useState<string>(() => {
     try {
       return localStorage.getItem("swingscore_judge_claim") || "";
@@ -54,6 +56,8 @@ export default function App() {
   // Parse the current virtual environment at mount time
   useEffect(() => {
     const detectRole = (): ViewRole | "portal" => {
+      if (portalLink) return portalLink.role;
+
       const hostname = window.location.hostname.toLowerCase();
       const pathname = window.location.pathname.toLowerCase();
       const searchParams = new URLSearchParams(window.location.search);
@@ -99,12 +103,24 @@ export default function App() {
   }, []);
 
   // This device's gateway connection and its community's live data
-  const { session, isReady, connect, loginRole, logoutRole, applyToken, leaveGateway } = useGatewaySession();
+  const { session, isReady, connect, connectWithLink, loginRole, logoutRole, applyToken, leaveGateway } = useGatewaySession();
   const { communityName, competitors, heats, scores, settings, error, isOffline, hasUnsyncedScores, loading } = useCommunityState(session);
 
-  // Results and the portal page only need the gateway code.
-  const isOpenPortal = currentRole === "portal" || currentRole === "results";
-  const isAuthenticated = isOpenPortal || !!session?.roles.includes(currentRole as StaffRole);
+  // A portal link connects the device itself. Once it has, the session remembers
+  // the link, so a judge can reload the page without a connection.
+  const [linkError, setLinkError] = useState("");
+  const connectingSlugRef = useRef("");
+  const isOnLinkedSession = !!portalLink && session?.linkSlug === portalLink.slug;
+  useEffect(() => {
+    if (!isReady || !portalLink || isOnLinkedSession || connectingSlugRef.current === portalLink.slug) return;
+    connectingSlugRef.current = portalLink.slug;
+    connectWithLink(portalLink.slug).catch((err) => setLinkError(err.message));
+  }, [isReady, portalLink, isOnLinkedSession, connectWithLink]);
+
+  // Anyone connected can see Results. The Central Gateway is the Admin's alone.
+  const requiredRole: StaffRole | null = currentRole === "results" ? null : currentRole === "portal" ? "admin" : currentRole;
+  const isAuthenticated = !requiredRole || !!session?.roles.includes(requiredRole);
+  const isAdmin = !!session?.roles.includes("admin");
   const myClaimedJudge = session?.judgeName || "";
 
   // Live data arrives by itself, so the portals' refresh buttons have nothing to do.
@@ -379,8 +395,6 @@ export default function App() {
     setSelectedJudgeId("");
   };
 
-  const isTestingEnv = !window.location.hostname.includes("swingscore.com");
-
   return (
     <div className={isDarkMode ? "dark" : ""}>
       <div className={`min-h-screen transition-colors duration-300 flex flex-col ${
@@ -419,16 +433,16 @@ export default function App() {
 
         {/* Core Layout Stage */}
         <main className="flex-1 max-w-7xl w-full mx-auto px-4 py-8">
-          {/* Quick simulation exit button for sandbox test environments */}
-          {currentRole !== "portal" && isTestingEnv && (
+          {/* Only the Admin has a Central Gateway to return to */}
+          {currentRole !== "portal" && isAdmin && (
             <div className="mb-6 flex justify-start">
               <button
                 onClick={async () => {
-                  // Staff portals sign out on the way back to the directory
-                  if (session?.roles.includes(currentRole as StaffRole)) {
+                  // Other portals sign out on the way back to the directory
+                  if (currentRole !== "admin" && session?.roles.includes(currentRole as StaffRole)) {
                     await logoutRole(currentRole as StaffRole).catch(() => {});
                   }
-                  window.location.search = "?role=portal";
+                  window.location.href = "/?role=portal";
                 }}
                 className={`group flex items-center gap-1.5 text-xs font-semibold px-3 py-1.5 rounded-xl border transition-all ${
                   isDarkMode
@@ -446,6 +460,17 @@ export default function App() {
             <div className="flex flex-col items-center justify-center py-20 gap-4">
               <RefreshCw className="w-8 h-8 text-violet-500 animate-spin" />
             </div>
+          ) : portalLink && linkError && !isOnLinkedSession ? (
+            <div id="portal-link-error" className="max-w-md w-full mx-auto my-12 p-8 rounded-3xl border border-rose-500/20 bg-rose-500/5 text-center">
+              <AlertCircle className="w-10 h-10 mx-auto text-rose-500 mb-4" />
+              <h2 className="text-lg font-bold tracking-tight">This link isn't working</h2>
+              <p className="text-xs text-slate-400 mt-2 leading-relaxed">{linkError}</p>
+            </div>
+          ) : portalLink && !isOnLinkedSession ? (
+            <div className="flex flex-col items-center justify-center py-20 gap-4">
+              <RefreshCw className="w-8 h-8 text-violet-500 animate-spin" />
+              <p className="text-xs text-slate-400 font-mono">Opening your portal...</p>
+            </div>
           ) : !session ? (
             <GatewayConnect isDarkMode={isDarkMode} onConnect={connect} />
           ) : loading ? (
@@ -456,10 +481,10 @@ export default function App() {
           ) : !isAuthenticated ? (
             // Render the lock screen if the user has navigated to a protected domain slug and is unauthenticated
             <RoleLogin
-              role={currentRole as StaffRole}
+              role={requiredRole as StaffRole}
               isDarkMode={isDarkMode}
               onLogin={async (passcode) => {
-                await loginRole(currentRole as StaffRole, passcode);
+                await loginRole(requiredRole as StaffRole, passcode);
                 // Entering a passcode to get into the Judge domain means this
                 // browser wasn't already recognized (a fresh device, a cleared
                 // session, or someone new sitting down at this station) -- so
@@ -473,7 +498,7 @@ export default function App() {
             />
           ) : (
             <div className="transition-all duration-300">
-              {currentRole === "portal" && (
+              {currentRole === "portal" && isAdmin && (
                 <PlatformPortal
                   isDarkMode={isDarkMode}
                   settings={settings}
@@ -596,7 +621,7 @@ export default function App() {
               type="button"
               id="leave-gateway-btn"
               onClick={() => {
-                if (window.confirm("Disconnect this device from the gateway? You'll need the gateway code to reconnect.")) {
+                if (window.confirm("Disconnect this device from the gateway? You'll need your portal link or gateway code to reconnect.")) {
                   leaveGateway();
                 }
               }}

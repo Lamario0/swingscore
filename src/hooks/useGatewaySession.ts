@@ -11,7 +11,8 @@ async function readSession(user: User): Promise<GatewaySession | null> {
   return {
     communityId: claims.communityId,
     roles: (claims.roles as StaffRole[]) || [],
-    judgeName: claims.judgeName as string | undefined
+    judgeName: claims.judgeName as string | undefined,
+    linkSlug: claims.linkSlug as string | undefined
   };
 }
 
@@ -40,6 +41,11 @@ export function useGatewaySession() {
     await applyToken(token);
   }, [applyToken]);
 
+  const connectWithLink = useCallback(async (slug: string) => {
+    const { token } = await apiRequest("/api/gateway/connect-link", { slug });
+    await applyToken(token);
+  }, [applyToken]);
+
   const loginRole = useCallback(async (role: StaffRole, passcode: string) => {
     const { token } = await apiRequest("/api/gateway/role-login", { role, passcode });
     await applyToken(token);
@@ -65,5 +71,5 @@ export function useGatewaySession() {
     return () => window.removeEventListener(SESSION_EXPIRED_EVENT, leaveGateway);
   }, [leaveGateway]);
 
-  return { session, isReady, connect, loginRole, logoutRole, applyToken, leaveGateway };
+  return { session, isReady, connect, connectWithLink, loginRole, logoutRole, applyToken, leaveGateway };
 }

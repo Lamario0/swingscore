@@ -220,4 +220,5 @@ export interface GatewaySession {
   communityId: string;
   roles: StaffRole[];
   judgeName?: string;
+  linkSlug?: string;
 }

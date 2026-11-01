@@ -39,7 +39,7 @@ export default function GatewayConnect({ isDarkMode, onConnect }: GatewayConnect
             Connect to Your Gateway
           </h2>
           <p className="text-xs text-slate-400 mt-2 leading-relaxed">
-            Enter the gateway code from your community's organizer. This device will stay connected.
+            Organizers: enter your gateway code. Staff and spectators: use the portal link from your organizer.
           </p>
         </div>
 

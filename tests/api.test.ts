@@ -5,6 +5,7 @@ import type { Server } from "node:http";
 import { after, before, test } from "node:test";
 import { initializeApp } from "firebase/app";
 import { connectAuthEmulator, getAuth, signInWithCustomToken, type Auth } from "firebase/auth";
+import { FieldValue } from "firebase-admin/firestore";
 import { adminDb } from "../server/firebaseAdmin";
 import { createApp } from "../server/app";
 import { createCommunity } from "../server/gateway";
@@ -64,6 +65,104 @@ before(async () => {
 after(async () => {
   await new Promise((resolve) => server.close(resolve));
   await adminDb.terminate();
+});
+
+test("a portal link connects a device without the gateway code", async () => {
+  const community = await createCommunity("Western Michigan Westies");
+  assert.match(community.slug, /^western-michigan-westies-[a-z0-9]{6}$/);
+
+  const device = new Device();
+  assert.equal((await device.call("/api/gateway/connect-link", { slug: "no-such-link" })).status, 404);
+  await device.ok("/api/gateway/connect-link", { slug: community.slug });
+  const { claims } = await device.auth.currentUser!.getIdTokenResult();
+  assert.equal(claims.communityId, community.communityId);
+  assert.equal(claims.linkSlug, community.slug);
+  assert.deepEqual(claims.roles, []);
+
+  // The link alone opens no staff portal.
+  assert.equal((await device.call("/api/settings", { isPublished: true })).status, 403);
+  assert.equal((await device.call("/api/gateway/role-login", { role: "judge", passcode: "wrong" })).status, 403);
+  await device.login("judge", community.passcodes.judge);
+});
+
+test("an Admin keeps their roles when opening their own link", async () => {
+  const community = await createCommunity("Own Link Test");
+  const other = await createCommunity("Other Community");
+  const admin = new Device();
+  await admin.connect(community.gatewayCode);
+  await admin.login("admin", community.passcodes.admin);
+
+  await admin.ok("/api/gateway/connect-link", { slug: community.slug });
+  let { claims } = await admin.auth.currentUser!.getIdTokenResult(true);
+  assert.deepEqual(claims.roles, ["admin"]);
+
+  // Another community's link is a fresh start, with no roles carried across.
+  await admin.ok("/api/gateway/connect-link", { slug: other.slug });
+  ({ claims } = await admin.auth.currentUser!.getIdTokenResult(true));
+  assert.equal(claims.communityId, other.communityId);
+  assert.deepEqual(claims.roles, []);
+});
+
+test("only the Admin can read portal links and passcodes, and never the gateway code", async () => {
+  const community = await createCommunity("Access Test");
+  const judge = new Device();
+  await judge.connect(community.gatewayCode);
+  await judge.login("judge", community.passcodes.judge);
+  assert.equal((await judge.call("/api/gateway/portal-access", {}, "GET")).status, 403);
+
+  const admin = new Device();
+  await admin.connect(community.gatewayCode);
+  await admin.login("admin", community.passcodes.admin);
+  const access = await admin.ok("/api/gateway/portal-access", {}, "GET");
+  assert.equal(access.slug, community.slug);
+  assert.deepEqual(access.passcodes, community.passcodes);
+  assert.ok(!JSON.stringify(access).includes(community.gatewayCode.replace("-", "")));
+
+  await admin.ok("/api/gateway/passcode", { role: "judge", passcode: "newjudge1" });
+  assert.equal((await admin.ok("/api/gateway/portal-access", {}, "GET")).passcodes.judge, "newjudge1");
+});
+
+test("an older gateway gets a link, and passcodes fill in as people sign in", async () => {
+  const community = await createCommunity("Older Gateway");
+  const authPath = `communities/${community.communityId}/private/auth`;
+  await adminDb.doc(authPath).update({ slug: FieldValue.delete(), readablePasscodes: FieldValue.delete() });
+  await adminDb.doc(`gatewaySlugs/${community.slug}`).delete();
+
+  const admin = new Device();
+  await admin.connect(community.gatewayCode);
+  await admin.login("admin", community.passcodes.admin);
+  const access = await admin.ok("/api/gateway/portal-access", {}, "GET");
+  assert.deepEqual(access.passcodes, { admin: community.passcodes.admin });
+
+  const device = new Device();
+  await device.ok("/api/gateway/connect-link", { slug: access.slug });
+  await device.login("judge", community.passcodes.judge);
+  assert.equal((await admin.ok("/api/gateway/portal-access", {}, "GET")).passcodes.judge, community.passcodes.judge);
+});
+
+test("a new gateway code replaces the portal links too", async () => {
+  const community = await createCommunity("Rotate Test");
+  const admin = new Device();
+  await admin.connect(community.gatewayCode);
+  await admin.login("admin", community.passcodes.admin);
+  await admin.ok("/api/gateway/rotate-code");
+
+  const { slug } = await admin.ok("/api/gateway/portal-access", {}, "GET");
+  assert.notEqual(slug, community.slug);
+  const device = new Device();
+  assert.equal((await device.call("/api/gateway/connect-link", { slug: community.slug })).status, 404);
+  await device.ok("/api/gateway/connect-link", { slug });
+});
+
+test("failed attempts are counted per device address behind Hosting", async () => {
+  const connect = (address: string) => fetch(`${baseUrl}/api/gateway/connect`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", "Fastly-Client-IP": address },
+    body: JSON.stringify({ code: "NOPE-NOPE" })
+  });
+  for (let i = 0; i < 30; i++) assert.equal((await connect("203.0.113.1")).status, 404);
+  assert.equal((await connect("203.0.113.1")).status, 429);
+  assert.equal((await connect("203.0.113.2")).status, 404);
 });
 
 test("a wrong gateway code is refused and a right one connects", async () => {

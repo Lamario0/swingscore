@@ -14,6 +14,7 @@ export interface Session {
   roles: StaffRole[];
   epoch: number;
   judgeName?: string;
+  linkSlug?: string;
 }
 
 export interface CommunityRecord {
@@ -32,6 +33,7 @@ export const formatGatewayCode = (code: string) => `${code.slice(0, 4)}-${code.s
 
 export const communityRef = (communityId: string) => adminDb.collection("communities").doc(communityId);
 export const gatewayCodeRef = (code: string) => adminDb.collection("gatewayCodes").doc(code);
+export const gatewaySlugRef = (slug: string) => adminDb.collection("gatewaySlugs").doc(slug);
 export const privateAuthRef = (communityId: string) => communityRef(communityId).collection("private").doc("auth");
 
 export async function hashPasscode(passcode: string) {
@@ -48,23 +50,45 @@ export async function verifyPasscode(passcode: string, stored: string) {
 
 // A device's session: the community it joined, its staff roles and, once a judge
 // has claimed a name, that name. Security Rules and the API both read these.
-export function issueSessionToken({ uid, communityId, roles, epoch, judgeName }: Session) {
+export function issueSessionToken({ uid, communityId, roles, epoch, judgeName, linkSlug }: Session) {
   return adminAuth.createCustomToken(uid, {
     communityId,
     roles,
     epoch,
-    ...(judgeName ? { judgeName } : {})
+    ...(judgeName ? { judgeName } : {}),
+    ...(linkSlug ? { linkSlug } : {})
   });
 }
 
 export const newDeviceId = () => `device-${randomUUID()}`;
 
-// Creates a community with empty data. The codes it returns exist nowhere else
-// in readable form except the gateway code, so they're shown once.
+// Portal links carry this instead of the gateway code. The community's name
+// makes them recognizable, and the random ending keeps them unguessable.
+export function generateGatewaySlug(name: string) {
+  const readable = name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 30);
+  return `${readable || "gateway"}-${randomCode(6).toLowerCase()}`;
+}
+
+// Gateways created before portal links get their slug the first time it's needed.
+export function ensureGatewaySlug(communityId: string): Promise<string> {
+  return adminDb.runTransaction(async (tx) => {
+    const auth = (await tx.get(privateAuthRef(communityId))).data();
+    if (auth?.slug) return auth.slug as string;
+    const community = (await tx.get(communityRef(communityId))).data() as CommunityRecord;
+    const slug = generateGatewaySlug(community.name);
+    tx.set(gatewaySlugRef(slug), { communityId });
+    tx.update(privateAuthRef(communityId), { slug });
+    return slug;
+  });
+}
+
+// Creates a community with empty data. Passcodes stay readable in private/auth,
+// which only the server can reach, so the Admin can look them up and pass them on.
 export async function createCommunity(name: string) {
   const communityId = randomUUID();
   const gatewayCode = randomCode(8);
-  const passcodes = Object.fromEntries(STAFF_ROLES.map((role) => [role, randomCode(6)])) as Record<StaffRole, string>;
+  const slug = generateGatewaySlug(name);
+  const passcodes =Object.fromEntries(STAFF_ROLES.map((role) => [role, randomCode(6)])) as Record<StaffRole, string>;
   const hashes = Object.fromEntries(
     await Promise.all(STAFF_ROLES.map(async (role) => [role, await hashPasscode(passcodes[role])]))
   );
@@ -72,12 +96,13 @@ export async function createCommunity(name: string) {
   const batch = adminDb.batch();
   const community: CommunityRecord = { name, status: "active", sessionEpoch: 1 };
   batch.set(communityRef(communityId), community);
-  batch.set(privateAuthRef(communityId), { gatewayCode, passcodes: hashes });
+  batch.set(privateAuthRef(communityId), { gatewayCode, slug, passcodes: hashes, readablePasscodes: passcodes });
   batch.set(gatewayCodeRef(gatewayCode), { communityId });
+  batch.set(gatewaySlugRef(slug), { communityId });
   await batch.commit();
   await saveCommunityState(communityId, { competitors: [], heats: [], scores: [], settings: blankSettings() });
 
-  return { communityId, gatewayCode: formatGatewayCode(gatewayCode), passcodes };
+  return { communityId, gatewayCode: formatGatewayCode(gatewayCode), slug, passcodes };
 }
 
 // Guessing is limited by counting failed attempts in Firestore, since server

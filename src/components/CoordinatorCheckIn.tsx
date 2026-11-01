@@ -554,6 +554,102 @@ export default function CoordinatorCheckIn({
     return matchesSearch && c.role === "Follow";
   });
 
+  const visibleCouples = activeHeatCouples.filter((cp) => {
+    const q = search.toLowerCase();
+    return !q || [cp.lead, cp.follow].some((c) => c.name.toLowerCase().includes(q) || c.bib.includes(search));
+  });
+
+  const checkInButtonClass = (isOn: boolean) => `flex-1 min-h-[44px] sm:min-h-[36px] px-2 rounded-lg text-xs font-bold uppercase whitespace-nowrap transition-all border ${
+    isOn
+      ? "bg-green-500/10 text-green-500 border-green-500/20 hover:bg-green-500/20"
+      : "bg-violet-600 border-violet-600 text-white hover:bg-violet-500 disabled:opacity-50"
+  }`;
+  const scratchButtonClass = (isOn: boolean) => `min-h-[44px] sm:min-h-[36px] px-3 rounded-lg text-xs font-bold uppercase tracking-wider transition-all border ${
+    isOn
+      ? "bg-amber-500/10 text-amber-500 border-amber-500/20 hover:bg-amber-500/20"
+      : "bg-rose-500/10 text-rose-500 border-rose-500/10 hover:bg-rose-500/20"
+  }`;
+  const editButtonClass = "min-h-[44px] sm:min-h-[36px] px-3 rounded-lg text-xs font-bold uppercase tracking-wider transition-all border border-slate-200 dark:border-slate-800 hover:bg-slate-100 dark:hover:bg-slate-850 text-slate-500 hover:text-slate-300";
+
+  const renderHeatGap = (heatNumber: number) => (
+    <div className="print:break-before-page p-2.5 bg-violet-500/5 dark:bg-violet-500/15 border-y border-dashed border-violet-500/20 text-center font-mono text-[9px] font-bold text-violet-500 uppercase tracking-widest">
+      GAP: HEAT {heatNumber} STARTING HERE
+    </div>
+  );
+
+  // Cut-offs count rows on each side of the sheet separately.
+  const getHeatStartingAt = (c: Competitor) => {
+    const index = activeHeatCompetitors.filter((hc) => hc.role === c.role).findIndex((hc) => hc.bib === c.bib);
+    const splits = activeHeat?.splits || [];
+    return index !== -1 && splits.includes(index) ? splits.filter((s) => s <= index).length + 1 : null;
+  };
+
+  const renderDancerCard = (c: Competitor) => {
+    const heatStarting = getHeatStartingAt(c);
+    const isFollowOfStrictly = activeContestType === "Strictly Swing" && c.role === "Follow";
+    return (
+      <React.Fragment key={c.bib}>
+        {heatStarting && renderHeatGap(heatStarting)}
+        <div
+          id={`checkin-card-${c.bib}`}
+          className={`p-3 transition-all ${c.scratched ? "bg-slate-500/5 text-slate-400 dark:text-slate-500" : ""}`}
+        >
+          <div className="flex items-start gap-3">
+            {!isRoutineHeat && !isFollowOfStrictly && (
+              <span className={`font-mono font-bold text-sm md:text-base flex-shrink-0 ${c.scratched ? "text-slate-500" : "text-violet-500"}`}>#{c.bib}</span>
+            )}
+            <div className="min-w-0 flex-1">
+              <div className="text-sm md:text-base font-bold flex items-center gap-2 flex-wrap">
+                <span className={c.scratched ? "line-through decoration-rose-500/40" : ""}>{c.name}</span>
+              </div>
+              <div className="flex items-center gap-1.5 mt-1.5 flex-wrap">
+                {getDivBadge(c.division)}
+                {getRoleBadge(c.role)}
+                {getCheckInStatusBadge(c)}
+              </div>
+              {renderPartnerLine(c)}
+            </div>
+          </div>
+          <div className="flex items-stretch gap-2 mt-3">
+            <button
+              id={`checkin-card-toggle-${c.bib}`}
+              onClick={() => handleToggleCheckIn(c.bib, c.checkedIn)}
+              disabled={loadingBib === c.bib || c.scratched}
+              className={checkInButtonClass(c.checkedIn && !c.scratched)}
+            >
+              {c.checkedIn && !c.scratched ? "✓ Checked In" : "Check In"}
+            </button>
+            <button
+              id={`scratch-card-toggle-${c.bib}`}
+              onClick={() => handleToggleScratch(c.bib, c.scratched || false)}
+              disabled={loadingBib === c.bib}
+              className={scratchButtonClass(!!c.scratched)}
+            >
+              {c.scratched ? "Unscratch" : "Scratch"}
+            </button>
+            <button onClick={() => handleOpenEditModal(c)} className={editButtonClass}>
+              Edit
+            </button>
+          </div>
+        </div>
+      </React.Fragment>
+    );
+  };
+
+  const renderSideColumn = (title: string, list: Competitor[], isComplete: boolean, emptyText: string) => (
+    <div className={`p-3 sm:p-4 rounded-xl border ${isDarkMode ? "bg-slate-900/40 border-slate-800 text-slate-100" : "bg-white border-slate-200 shadow-sm text-slate-800"}`}>
+      <h3 className="text-sm font-bold font-mono text-slate-400 uppercase tracking-wider mb-3 flex items-center gap-1.5 border-b pb-2 border-slate-150 dark:border-slate-800">
+        <span className={`w-2.5 h-2.5 rounded-full ${isComplete ? "bg-green-500 animate-pulse" : "bg-amber-500"}`}></span>
+        {title} ({list.length})
+      </h3>
+      <div className="rounded-xl border border-slate-200 dark:border-slate-800 divide-y divide-slate-200 dark:divide-slate-800">
+        {list.length > 0 ? list.map((c) => renderDancerCard(c)) : (
+          <p className="p-4 text-center text-slate-500 text-[11px]">{emptyText}</p>
+        )}
+      </div>
+    </div>
+  );
+
   // Stats
   const activeCompetitors = activeHeatCompetitors.filter(c => !c.scratched);
   const totalCount = activeCompetitors.length;
@@ -594,10 +690,10 @@ export default function CoordinatorCheckIn({
       )}
 
       {/* Overview Stats Block */}
-      <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
+      <div className="grid grid-cols-2 md:grid-cols-4 gap-2 md:gap-4">
         {/* Master Check In Stats */}
-        <div className={`p-5 rounded-2xl border transition-all ${isDarkMode ? "bg-slate-900 border-slate-800" : "bg-white border-slate-100 shadow-sm"}`}>
-          <div className="flex items-center justify-between mb-2">
+        <div className={`p-3 sm:p-5 rounded-2xl border transition-all ${isDarkMode ? "bg-slate-900 border-slate-800" : "bg-white border-slate-100 shadow-sm"}`}>
+          <div className="flex flex-wrap items-center justify-between gap-x-2 mb-2">
             <span className="text-xs font-semibold text-slate-400 font-mono">Master Check-In</span>
             <span className="text-xs font-mono text-violet-500 font-bold">{checkedInCount} / {totalCount} ({getCheckInPercent(checkedInCount, totalCount)}%)</span>
           </div>
@@ -612,8 +708,8 @@ export default function CoordinatorCheckIn({
         {isRoutineHeat ? (
           <>
             {/* Couples Check In Stats */}
-            <div className={`p-5 rounded-2xl border transition-all ${isDarkMode ? "bg-slate-900 border-slate-800" : "bg-white border-slate-100 shadow-sm"}`}>
-              <div className="flex items-center justify-between mb-2">
+            <div className={`p-3 sm:p-5 rounded-2xl border transition-all ${isDarkMode ? "bg-slate-900 border-slate-800" : "bg-white border-slate-100 shadow-sm"}`}>
+              <div className="flex flex-wrap items-center justify-between gap-x-2 mb-2">
                 <span className="text-xs font-semibold text-slate-400 font-mono">Couples Checked-In</span>
                 <span className="text-xs font-mono text-emerald-500 font-bold">{couplesCheckedIn} / {activeCouples.length} ({getCheckInPercent(couplesCheckedIn, activeCouples.length)}%)</span>
               </div>
@@ -626,8 +722,8 @@ export default function CoordinatorCheckIn({
             </div>
 
             {/* Waiting For A Partner Stats */}
-            <div className={`p-5 rounded-2xl border transition-all ${isDarkMode ? "bg-slate-900 border-slate-800" : "bg-white border-slate-100 shadow-sm"}`}>
-              <div className="flex items-center justify-between mb-2">
+            <div className={`p-3 sm:p-5 rounded-2xl border transition-all ${isDarkMode ? "bg-slate-900 border-slate-800" : "bg-white border-slate-100 shadow-sm"}`}>
+              <div className="flex flex-wrap items-center justify-between gap-x-2 mb-2">
                 <span className="text-xs font-semibold text-slate-400 font-mono">Needs a Partner</span>
                 <span className="text-xs font-mono text-amber-500 font-bold">{waitingForPartnerCount} dancer{waitingForPartnerCount === 1 ? "" : "s"}</span>
               </div>
@@ -641,8 +737,8 @@ export default function CoordinatorCheckIn({
         ) : (
         <>
         {/* Leaders Check In Stats */}
-        <div className={`p-5 rounded-2xl border transition-all ${isDarkMode ? "bg-slate-900 border-slate-800" : "bg-white border-slate-100 shadow-sm"}`}>
-          <div className="flex items-center justify-between mb-2">
+        <div className={`p-3 sm:p-5 rounded-2xl border transition-all ${isDarkMode ? "bg-slate-900 border-slate-800" : "bg-white border-slate-100 shadow-sm"}`}>
+          <div className="flex flex-wrap items-center justify-between gap-x-2 mb-2">
             <span className="text-xs font-semibold text-slate-400 font-mono">Leaders Checked-In</span>
             <span className="text-xs font-mono text-emerald-500 font-bold">{leadsCheckedIn} / {leadsTotal} ({getCheckInPercent(leadsCheckedIn, leadsTotal)}%)</span>
           </div>
@@ -655,8 +751,8 @@ export default function CoordinatorCheckIn({
         </div>
 
         {/* Followers Check In Stats */}
-        <div className={`p-5 rounded-2xl border transition-all ${isDarkMode ? "bg-slate-900 border-slate-800" : "bg-white border-slate-100 shadow-sm"}`}>
-          <div className="flex items-center justify-between mb-2">
+        <div className={`p-3 sm:p-5 rounded-2xl border transition-all ${isDarkMode ? "bg-slate-900 border-slate-800" : "bg-white border-slate-100 shadow-sm"}`}>
+          <div className="flex flex-wrap items-center justify-between gap-x-2 mb-2">
             <span className="text-xs font-semibold text-slate-400 font-mono">Followers Checked-In</span>
             <span className="text-xs font-mono text-rose-500 font-bold">{followsCheckedIn} / {followsTotal} ({getCheckInPercent(followsCheckedIn, followsTotal)}%)</span>
           </div>
@@ -671,8 +767,8 @@ export default function CoordinatorCheckIn({
         )}
 
         {/* Scratch Count Stats */}
-        <div className={`p-5 rounded-2xl border transition-all ${isDarkMode ? "bg-slate-900 border-slate-800" : "bg-white border-slate-100 shadow-sm"}`}>
-          <div className="flex items-center justify-between mb-2">
+        <div className={`p-3 sm:p-5 rounded-2xl border transition-all ${isDarkMode ? "bg-slate-900 border-slate-800" : "bg-white border-slate-100 shadow-sm"}`}>
+          <div className="flex flex-wrap items-center justify-between gap-x-2 mb-2">
             <span className="text-xs font-semibold text-slate-400 font-mono">Scratched (Disqualified)</span>
             <span className="text-xs font-mono text-amber-500 font-bold">{scratchedCount} total</span>
           </div>
@@ -685,7 +781,7 @@ export default function CoordinatorCheckIn({
       </div>
 
       {/* Sheet Management Interface */}
-      <div className={`p-6 rounded-2xl border transition-all ${isDarkMode ? "bg-slate-900 border-slate-800 text-slate-100" : "bg-white border-slate-200 shadow-sm text-slate-800"}`}>
+      <div className={`p-3 sm:p-6 rounded-2xl border transition-all ${isDarkMode ? "bg-slate-900 border-slate-800 text-slate-100" : "bg-white border-slate-200 shadow-sm text-slate-800"}`}>
         <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 mb-6 border-b border-slate-200 dark:border-slate-800 pb-4">
           {/* Header Description */}
           <div>
@@ -716,11 +812,11 @@ export default function CoordinatorCheckIn({
 
           {/* Tab Selection */}
           {activeHeat && (
-            <div className="flex p-1 rounded-xl bg-slate-100 dark:bg-slate-800 border border-slate-200 dark:border-slate-700">
+            <div className="flex w-full sm:w-auto p-1 rounded-xl bg-slate-100 dark:bg-slate-800 border border-slate-200 dark:border-slate-700">
               <button
                 id="checkin-tab-master"
                 onClick={() => { setActiveTab("master"); }}
-                className={`px-3 py-1.5 rounded-lg text-xs font-medium transition-all ${
+                className={`flex-1 sm:flex-none px-2 sm:px-3 py-2.5 sm:py-1.5 rounded-lg text-xs font-medium transition-all ${
                   visibleTab === "master"
                     ? "bg-violet-600 text-white shadow-sm"
                     : "text-slate-600 dark:text-slate-300 hover:bg-slate-250 dark:hover:bg-slate-700/50"
@@ -732,7 +828,7 @@ export default function CoordinatorCheckIn({
               <button
                 id="checkin-tab-leads"
                 onClick={() => { setActiveTab("leaders"); }}
-                className={`px-3 py-1.5 rounded-lg text-xs font-medium transition-all ${
+                className={`flex-1 sm:flex-none px-2 sm:px-3 py-2.5 sm:py-1.5 rounded-lg text-xs font-medium transition-all ${
                   visibleTab === "leaders"
                     ? "bg-emerald-600 text-white shadow-sm"
                     : "text-slate-600 dark:text-slate-300 hover:bg-slate-250 dark:hover:bg-slate-700/50"
@@ -743,7 +839,7 @@ export default function CoordinatorCheckIn({
               <button
                 id="checkin-tab-follows"
                 onClick={() => { setActiveTab("followers"); }}
-                className={`px-3 py-1.5 rounded-lg text-xs font-medium transition-all ${
+                className={`flex-1 sm:flex-none px-2 sm:px-3 py-2.5 sm:py-1.5 rounded-lg text-xs font-medium transition-all ${
                   visibleTab === "followers"
                     ? "bg-rose-600 text-white shadow-sm"
                     : "text-slate-600 dark:text-slate-300 hover:bg-slate-250 dark:hover:bg-slate-700/50"
@@ -767,7 +863,7 @@ export default function CoordinatorCheckIn({
         ) : (
           <>
             {/* Search */}
-            <div className="mb-4 relative flex items-center">
+            <div className={`sticky top-0 z-10 py-1 mb-3 flex items-center ${isDarkMode ? "bg-slate-900" : "bg-white"}`}>
               <Search className="w-4 h-4 absolute left-3 text-slate-400" />
               <input
                 id="checkin-search-input"
@@ -820,225 +916,8 @@ export default function CoordinatorCheckIn({
 
             {!isActiveHeatPartnered ? (
               <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                {/* Leaders Column */}
-                <div className={`p-4 rounded-xl border ${isDarkMode ? "bg-slate-900/40 border-slate-800 text-slate-100" : "bg-white border-slate-200 shadow-sm text-slate-800"}`}>
-                  <h3 className="text-sm font-bold font-mono text-slate-400 uppercase tracking-wider mb-3 flex items-center gap-1.5 border-b pb-2 border-slate-150 dark:border-slate-800">
-                    <span className={`w-2.5 h-2.5 rounded-full ${leadsCheckedIn > 0 && leadsCheckedIn === leadsTotal ? "bg-green-500 animate-pulse" : "bg-amber-500"}`}></span>
-                    Leaders ({filteredLeads.length})
-                  </h3>
-                  <div className="overflow-x-auto rounded-xl border border-slate-200 dark:border-slate-800">
-                    <table className="w-full text-left border-collapse">
-                      <thead>
-                        <tr className={`${isDarkMode ? "bg-slate-800/50 text-slate-300" : "bg-slate-50 text-slate-500"} text-[10px] font-semibold font-mono border-b border-slate-200 dark:border-slate-800`}>
-                          <th className="p-3 w-16">Bib</th>
-                          <th className="p-3">Competitor & Badges</th>
-                        </tr>
-                      </thead>
-                      <tbody className="divide-y divide-slate-200 dark:divide-slate-800 text-xs">
-                        {filteredLeads.length > 0 ? (
-                          filteredLeads.map((c) => {
-                            const heatLeads = activeHeatCompetitors.filter(hl => hl.role === "Lead");
-                            const roleSpecificIndex = heatLeads.findIndex(hl => hl.bib === c.bib);
-                            const isSplitActive = roleSpecificIndex !== -1 && (activeHeat?.splits || []).includes(roleSpecificIndex);
-                            
-                            let nextHeatNum = 1;
-                            if (isSplitActive && activeHeat) {
-                              const splitsBefore = (activeHeat.splits || []).filter(s => s <= roleSpecificIndex).length;
-                              nextHeatNum = splitsBefore + 1;
-                            }
-
-                            return (
-                              <React.Fragment key={c.bib}>
-                                {isSplitActive && (
-                                  <tr className="print:break-before-page">
-                                    <td colSpan={2} className="p-2.5 bg-violet-500/5 dark:bg-violet-500/15 border-y border-dashed border-violet-500/20 text-center font-mono text-[9px] font-bold text-violet-500 uppercase tracking-widest">
-                                      GAP: HEAT {nextHeatNum} STARTING HERE
-                                    </td>
-                                  </tr>
-                                )}
-                                <tr 
-                                  className={`transition-all ${
-                                    c.scratched 
-                                      ? "bg-slate-500/5 dark:bg-slate-500/[0.02] text-slate-400 dark:text-slate-500 line-through decoration-rose-500/40" 
-                                      : "hover:bg-slate-50/50 dark:hover:bg-slate-800/20"
-                                  }`}
-                                >
-                                  <td className={`p-3 font-mono font-bold ${c.scratched ? "text-slate-500" : "text-violet-500"} align-top text-sm md:text-base`}>#{c.bib}</td>
-                                  <td className="p-3 align-top">
-                                    <div>
-                                      <div className="text-sm md:text-base font-bold flex items-center gap-2">
-                                        <span>{c.name}</span>
-                                        {c.scratched && (
-                                          <span className="text-[9px] bg-rose-500/10 text-rose-500 px-1 py-0.2 rounded font-mono font-bold uppercase">Scratched</span>
-                                        )}
-                                      </div>
-                                      <div className="flex items-center gap-1.5 mt-2 flex-wrap">
-                                        {getDivBadge(c.division)}
-                                        {getRoleBadge(c.role)}
-                                        {getCheckInStatusBadge(c)}
-                                      </div>
-                                      {renderPartnerLine(c)}
-                                      
-                                      {/* Quick actions on Master Sheet */}
-                                      <div className="flex items-center gap-1.5 mt-3 pt-2 border-t border-slate-100 dark:border-slate-800/40 flex-wrap">
-                                        <button
-                                          onClick={() => handleToggleCheckIn(c.bib, c.checkedIn)}
-                                          disabled={loadingBib === c.bib || c.scratched}
-                                          className={`px-2 py-1 rounded text-[9px] font-bold uppercase tracking-wider transition-all border ${
-                                            c.checkedIn && !c.scratched
-                                              ? "bg-green-500/10 text-green-500 border-green-500/20 hover:bg-green-500/20"
-                                              : isDarkMode
-                                                ? "bg-slate-800 border-slate-700 text-slate-300 hover:bg-slate-750 disabled:opacity-50"
-                                                : "bg-slate-50 border-slate-200 text-slate-600 hover:bg-slate-100 disabled:opacity-50"
-                                          }`}
-                                        >
-                                          {c.checkedIn && !c.scratched ? "Checked In" : "Check In"}
-                                        </button>
-                                        <button
-                                          onClick={() => handleToggleScratch(c.bib, c.scratched || false)}
-                                          disabled={loadingBib === c.bib}
-                                          className={`px-2 py-1 rounded text-[9px] font-bold uppercase tracking-wider transition-all border ${
-                                            c.scratched
-                                              ? "bg-amber-500/10 text-amber-500 border-amber-500/20 hover:bg-amber-500/20"
-                                              : "bg-rose-500/10 text-rose-500 border-rose-500/10 hover:bg-rose-500/20"
-                                          }`}
-                                        >
-                                          {c.scratched ? "Unscratch" : "Scratch"}
-                                        </button>
-                                        <button
-                                          onClick={() => handleOpenEditModal(c)}
-                                          className="px-2 py-1 rounded text-[9px] font-bold uppercase tracking-wider transition-all border border-slate-200 dark:border-slate-800 hover:bg-slate-100 dark:hover:bg-slate-850 text-slate-500 hover:text-slate-300"
-                                        >
-                                          Edit
-                                        </button>
-                                      </div>
-                                    </div>
-                                  </td>
-                                </tr>
-                              </React.Fragment>
-                            );
-                          })
-                        ) : (
-                          <tr>
-                            <td colSpan={2} className="p-4 text-center text-slate-500 text-[11px]">
-                              No leaders match search.
-                            </td>
-                          </tr>
-                        )}
-                      </tbody>
-                    </table>
-                  </div>
-                </div>
-
-                {/* Followers Column */}
-                <div className={`p-4 rounded-xl border ${isDarkMode ? "bg-slate-900/40 border-slate-800 text-slate-100" : "bg-white border-slate-200 shadow-sm text-slate-800"}`}>
-                  <h3 className="text-sm font-bold font-mono text-slate-400 uppercase tracking-wider mb-3 flex items-center gap-1.5 border-b pb-2 border-slate-150 dark:border-slate-800">
-                    <span className={`w-2.5 h-2.5 rounded-full ${followsCheckedIn > 0 && followsCheckedIn === followsTotal ? "bg-green-500 animate-pulse" : "bg-amber-500"}`}></span>
-                    Followers ({filteredFollows.length})
-                  </h3>
-                  <div className="overflow-x-auto rounded-xl border border-slate-200 dark:border-slate-800">
-                    <table className="w-full text-left border-collapse">
-                      <thead>
-                        <tr className={`${isDarkMode ? "bg-slate-800/50 text-slate-300" : "bg-slate-50 text-slate-500"} text-[10px] font-semibold font-mono border-b border-slate-200 dark:border-slate-800`}>
-                          <th className="p-3 w-16">Bib</th>
-                          <th className="p-3">Competitor & Badges</th>
-                        </tr>
-                      </thead>
-                      <tbody className="divide-y divide-slate-200 dark:divide-slate-800 text-xs">
-                        {filteredFollows.length > 0 ? (
-                          filteredFollows.map((c) => {
-                            const heatFollows = activeHeatCompetitors.filter(hf => hf.role === "Follow");
-                            const roleSpecificIndex = heatFollows.findIndex(hf => hf.bib === c.bib);
-                            const isSplitActive = roleSpecificIndex !== -1 && (activeHeat?.splits || []).includes(roleSpecificIndex);
-                            
-                            let nextHeatNum = 1;
-                            if (isSplitActive && activeHeat) {
-                              const splitsBefore = (activeHeat.splits || []).filter(s => s <= roleSpecificIndex).length;
-                              nextHeatNum = splitsBefore + 1;
-                            }
-
-                            return (
-                              <React.Fragment key={c.bib}>
-                                {isSplitActive && (
-                                  <tr className="print:break-before-page">
-                                    <td colSpan={2} className="p-2.5 bg-violet-500/5 dark:bg-violet-500/15 border-y border-dashed border-violet-500/20 text-center font-mono text-[9px] font-bold text-violet-500 uppercase tracking-widest">
-                                      GAP: HEAT {nextHeatNum} STARTING HERE
-                                    </td>
-                                  </tr>
-                                )}
-                                <tr 
-                                  className={`transition-all ${
-                                    c.scratched 
-                                      ? "bg-slate-500/5 dark:bg-slate-500/[0.02] text-slate-400 dark:text-slate-500 line-through decoration-rose-500/40" 
-                                      : "hover:bg-slate-50/50 dark:hover:bg-slate-800/20"
-                                  }`}
-                                >
-                                  <td className={`p-3 font-mono font-bold ${c.scratched ? "text-slate-500" : "text-violet-500"} align-top text-sm md:text-base`}>#{c.bib}</td>
-                                  <td className="p-3 align-top">
-                                    <div>
-                                      <div className="text-sm md:text-base font-bold flex items-center gap-2">
-                                        <span>{c.name}</span>
-                                        {c.scratched && (
-                                          <span className="text-[9px] bg-rose-500/10 text-rose-500 px-1 py-0.2 rounded font-mono font-bold uppercase">Scratched</span>
-                                        )}
-                                      </div>
-                                      <div className="flex items-center gap-1.5 mt-2 flex-wrap">
-                                        {getDivBadge(c.division)}
-                                        {getRoleBadge(c.role)}
-                                        {getCheckInStatusBadge(c)}
-                                      </div>
-                                      {renderPartnerLine(c)}
-                                      
-                                      {/* Quick actions on Master Sheet */}
-                                      <div className="flex items-center gap-1.5 mt-3 pt-2 border-t border-slate-100 dark:border-slate-800/40 flex-wrap">
-                                        <button
-                                          onClick={() => handleToggleCheckIn(c.bib, c.checkedIn)}
-                                          disabled={loadingBib === c.bib || c.scratched}
-                                          className={`px-2 py-1 rounded text-[9px] font-bold uppercase tracking-wider transition-all border ${
-                                            c.checkedIn && !c.scratched
-                                              ? "bg-green-500/10 text-green-500 border-green-500/20 hover:bg-green-500/20"
-                                              : isDarkMode
-                                                ? "bg-slate-800 border-slate-700 text-slate-300 hover:bg-slate-750 disabled:opacity-50"
-                                                : "bg-slate-50 border-slate-200 text-slate-600 hover:bg-slate-100 disabled:opacity-50"
-                                          }`}
-                                        >
-                                          {c.checkedIn && !c.scratched ? "Checked In" : "Check In"}
-                                        </button>
-                                        <button
-                                          onClick={() => handleToggleScratch(c.bib, c.scratched || false)}
-                                          disabled={loadingBib === c.bib}
-                                          className={`px-2 py-1 rounded text-[9px] font-bold uppercase tracking-wider transition-all border ${
-                                            c.scratched
-                                              ? "bg-amber-500/10 text-amber-500 border-amber-500/20 hover:bg-amber-500/20"
-                                              : "bg-rose-500/10 text-rose-500 border-rose-500/10 hover:bg-rose-500/20"
-                                          }`}
-                                        >
-                                          {c.scratched ? "Unscratch" : "Scratch"}
-                                        </button>
-                                        <button
-                                          onClick={() => handleOpenEditModal(c)}
-                                          className="px-2 py-1 rounded text-[9px] font-bold uppercase tracking-wider transition-all border border-slate-200 dark:border-slate-800 hover:bg-slate-100 dark:hover:bg-slate-850 text-slate-500 hover:text-slate-300"
-                                        >
-                                          Edit
-                                        </button>
-                                      </div>
-                                    </div>
-                                  </td>
-                                </tr>
-                              </React.Fragment>
-                            );
-                          })
-                        ) : (
-                          <tr>
-                            <td colSpan={2} className="p-4 text-center text-slate-500 text-[11px]">
-                              No followers match search.
-                            </td>
-                          </tr>
-                        )}
-                      </tbody>
-                    </table>
-                  </div>
-                </div>
+                {renderSideColumn("Leaders", filteredLeads, leadsCheckedIn > 0 && leadsCheckedIn === leadsTotal, "No leaders match search.")}
+                {renderSideColumn("Followers", filteredFollows, followsCheckedIn > 0 && followsCheckedIn === followsTotal, "No followers match search.")}
               </div>
             ) : (
               <div className="space-y-4">
@@ -1051,7 +930,56 @@ export default function CoordinatorCheckIn({
                   <p className="text-[11px] text-slate-400 mb-3">
                     Check a couple in only once both partners are present, and scratch couples who don't make it on time. Only checked-in couples that aren't scratched go on the judges' sheets.
                   </p>
-                  <div className="overflow-x-auto rounded-xl border border-slate-200 dark:border-slate-800">
+                  <div id="partnership-cards" className="md:hidden rounded-xl border border-slate-200 dark:border-slate-800 divide-y divide-slate-200 dark:divide-slate-800">
+                    {visibleCouples.map((cp) => {
+                      const index = activeHeat ? activeHeat.competitorBibs.indexOf(cp.id) : -1;
+                      const splits = activeHeat?.splits || [];
+                      const renderCouplePartner = (c: Competitor, label: string) => (
+                        <div className="flex items-center justify-between gap-2">
+                          <div className="min-w-0">
+                            <span className="block text-[9px] text-slate-400 font-mono uppercase tracking-wider">{label}</span>
+                            <span className="text-sm font-bold">
+                              {!isRoutineHeat && !(activeContestType === "Strictly Swing" && c.bib === cp.follow.bib) && (
+                                <span className={`font-mono mr-1.5 ${cp.scratched ? "text-slate-500" : "text-violet-500"}`}>#{c.bib}</span>
+                              )}
+                              <span className={cp.scratched ? "line-through decoration-rose-500/40" : ""}>{c.name}</span>
+                            </span>
+                          </div>
+                          <button onClick={() => handleOpenEditModal(c)} className={editButtonClass}>Edit</button>
+                        </div>
+                      );
+                      return (
+                        <React.Fragment key={cp.id}>
+                          {splits.includes(index) && renderHeatGap(splits.filter((s) => s <= index).length + 1)}
+                          <div id={`partnership-card-${cp.id}`} className={`p-3 space-y-2 ${cp.scratched ? "bg-slate-500/5 text-slate-400 dark:text-slate-500" : ""}`}>
+                            {renderCouplePartner(cp.lead, isRoutineHeat ? "Partner" : "Leader")}
+                            {renderCouplePartner(cp.follow, isRoutineHeat ? "Partner" : "Follower")}
+                            <div>{getCheckInStatusBadge({ ...cp.lead, checkedIn: cp.checkedIn, scratched: cp.scratched })}</div>
+                            <div className="flex items-stretch gap-2">
+                              <button
+                                onClick={() => handleToggleCheckIn(cp.id, cp.checkedIn)}
+                                disabled={loadingBib === cp.id || cp.scratched}
+                                className={checkInButtonClass(cp.checkedIn && !cp.scratched)}
+                              >
+                                {cp.checkedIn && !cp.scratched ? "✓ Checked In" : "Check In"}
+                              </button>
+                              <button
+                                onClick={() => handleToggleScratch(cp.id, cp.scratched)}
+                                disabled={loadingBib === cp.id}
+                                className={scratchButtonClass(cp.scratched)}
+                              >
+                                {cp.scratched ? "Unscratch" : "Scratch"}
+                              </button>
+                            </div>
+                          </div>
+                        </React.Fragment>
+                      );
+                    })}
+                    {activeHeatCouples.length === 0 && (
+                      <p className="p-4 text-center text-slate-500 text-[11px]">No partnerships on this sheet yet.</p>
+                    )}
+                  </div>
+                  <div className="hidden md:block overflow-x-auto rounded-xl border border-slate-200 dark:border-slate-800">
                     <table className="w-full text-left border-collapse">
                       <thead>
                         <tr className={`${isDarkMode ? "bg-slate-800/50 text-slate-300" : "bg-slate-50 text-slate-500"} text-[10px] font-semibold font-mono border-b border-slate-200 dark:border-slate-800`}>
@@ -1061,11 +989,7 @@ export default function CoordinatorCheckIn({
                         </tr>
                       </thead>
                       <tbody className="divide-y divide-slate-200 dark:divide-slate-800 text-xs">
-                        {activeHeatCouples
-                          .filter((cp) => {
-                            const q = search.toLowerCase();
-                            return !q || [cp.lead, cp.follow].some((c) => c.name.toLowerCase().includes(q) || c.bib.includes(search));
-                          })
+                        {visibleCouples
                           .map((cp) => {
                             const originalIndex = activeHeat ? activeHeat.competitorBibs.indexOf(cp.id) : -1;
                             const isSplitActive = originalIndex !== -1 && (activeHeat?.splits || []).includes(originalIndex);
@@ -1185,7 +1109,7 @@ export default function CoordinatorCheckIn({
                   </p>
                 </div>
 
-                <div className="flex items-center gap-3">
+                <div className="flex items-center gap-3 w-full sm:w-auto">
                   {isSheetFinalized ? (
                     <button
                       id="reopen-checkin-btn"
@@ -1193,7 +1117,7 @@ export default function CoordinatorCheckIn({
                         setFinalizeState("idle");
                         await setSheetFinalized(false);
                       }}
-                      className="px-4 py-2 bg-amber-600 hover:bg-amber-700 text-white rounded-xl text-xs font-bold uppercase tracking-wider transition-all shadow-sm cursor-pointer"
+                      className="w-full sm:w-auto px-4 py-3 sm:py-2 bg-amber-600 hover:bg-amber-700 text-white rounded-xl text-xs font-bold uppercase tracking-wider transition-all shadow-sm cursor-pointer"
                     >
                       Reopen Check-In
                     </button>
@@ -1209,7 +1133,7 @@ export default function CoordinatorCheckIn({
                           await setSheetFinalized(true);
                         }
                       }}
-                      className="px-4 py-2 bg-violet-600 hover:bg-violet-700 text-white rounded-xl text-xs font-bold uppercase tracking-wider transition-all shadow-sm cursor-pointer"
+                      className="w-full sm:w-auto px-4 py-3 sm:py-2 bg-violet-600 hover:bg-violet-700 text-white rounded-xl text-xs font-bold uppercase tracking-wider transition-all shadow-sm cursor-pointer"
                     >
                       Finalize Check-In
                     </button>
@@ -1270,7 +1194,13 @@ export default function CoordinatorCheckIn({
             </div>
           </div>
         ) : (
-          <div className="overflow-x-auto rounded-xl border border-slate-200 dark:border-slate-800">
+          <>
+          <div id="checkin-sheet-cards" className="md:hidden rounded-xl border border-slate-200 dark:border-slate-800 divide-y divide-slate-200 dark:divide-slate-800">
+            {filteredCompetitors.length > 0 ? filteredCompetitors.map((c) => renderDancerCard(c)) : (
+              <p className="p-6 text-center text-xs text-slate-500">No competitors match the search or selected sheet.</p>
+            )}
+          </div>
+          <div className="hidden md:block overflow-x-auto rounded-xl border border-slate-200 dark:border-slate-800">
             <table className="w-full text-left border-collapse">
               <thead>
                 <tr className={`${isDarkMode ? "bg-slate-800/50 text-slate-300" : "bg-slate-50 text-slate-500"} text-xs font-semibold font-mono border-b border-slate-200 dark:border-slate-800`}>
@@ -1392,6 +1322,7 @@ export default function CoordinatorCheckIn({
               </tbody>
             </table>
           </div>
+          </>
         )}
           </div>
         </div>
@@ -1440,8 +1371,8 @@ export default function CoordinatorCheckIn({
       })()}
 
       {editingCompetitor && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-xs p-4 animate-fade-in">
-          <div className={`w-full max-w-md rounded-2xl border p-6 shadow-2xl transition-all ${
+        <div className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto overscroll-contain bg-black/60 backdrop-blur-xs p-3 sm:p-4 animate-fade-in">
+          <div className={`w-full max-w-md my-auto rounded-2xl border p-4 sm:p-6 shadow-2xl transition-all ${
             isDarkMode ? "bg-slate-900 border-slate-800 text-slate-100" : "bg-white border-slate-200 text-slate-800"
           }`}>
             <div className="flex items-center justify-between border-b border-slate-200 dark:border-slate-800 pb-3 mb-4">

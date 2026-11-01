@@ -97,6 +97,7 @@ test("server-only documents can't be read by anyone", async () => {
   const db = device(A, ["admin"]);
   await assertFails(getDoc(doc(db, `communities/${A}/private/auth`)));
   await assertFails(getDoc(doc(db, "gatewayCodes/ABCD2345")));
+  await assertFails(getDoc(doc(db, "gatewaySlugs/westies-k3f9mp")));
   await assertFails(getDoc(doc(db, "rateLimits/anything")));
 });
 

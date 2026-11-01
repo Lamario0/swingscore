@@ -4,9 +4,9 @@ import { getJudgeHeatCompetitors, getJudgeRole, getQueuedPromotion } from "../sr
 import { getAllContestEntries, getContestEntry, getContestRole, getDivisionLockKey, isPartneredContest, oppositeRole, validateContestEntries, withAddedEntry, withEntryPartner } from "../src/utils/partners";
 import { adminAuth, adminDb } from "./firebaseAdmin";
 import {
-  assertNotRateLimited, clearFailedAttempts, communityRef, formatGatewayCode, gatewayCodeRef, generateGatewayCode,
-  hashPasscode, issueSessionToken, newDeviceId, normalizeGatewayCode, privateAuthRef, recordFailedAttempt,
-  STAFF_ROLES, verifyPasscode, type CommunityRecord, type Session
+  assertNotRateLimited, clearFailedAttempts, communityRef, ensureGatewaySlug, formatGatewayCode, gatewayCodeRef, gatewaySlugRef,
+  generateGatewayCode, generateGatewaySlug, hashPasscode, issueSessionToken, newDeviceId, normalizeGatewayCode, privateAuthRef,
+  recordFailedAttempt, STAFF_ROLES, verifyPasscode, type CommunityRecord, type Session
 } from "./gateway";
 import { autoPopulateHeats, blankSettings, HttpError, readCommunityState, setHeatStatus, withCommunitySettings, withCommunityState } from "./state";
 
@@ -54,6 +54,10 @@ function assertSettingsAllowed(session: Session, fields: string[]) {
   }
 }
 
+// Firebase Hosting sits in front of the live API, so without its header every
+// device would share one address and one set of failed attempts.
+const getClientIp = (req: Request) => String(req.headers["fastly-client-ip"] || req.ip);
+
 // Every signed-in request proves its community and roles with a Firebase ID
 // token. The community always comes from the token, never from the request.
 async function authenticate(req: Request): Promise<Session> {
@@ -77,7 +81,8 @@ async function authenticate(req: Request): Promise<Session> {
     communityId: token.communityId,
     roles: token.roles || [],
     epoch: token.epoch,
-    judgeName: token.judgeName
+    judgeName: token.judgeName,
+    linkSlug: token.linkSlug
   };
 }
 
@@ -187,7 +192,7 @@ export function createApp() {
   // Gateway access
   app.post("/api/gateway/connect", async (req, res) => {
     try {
-      const attemptKey = `connect:${req.ip}`;
+      const attemptKey = `connect:${getClientIp(req)}`;
       await assertNotRateLimited(attemptKey);
 
       const code = normalizeGatewayCode(String(req.body.code || ""));
@@ -214,19 +219,53 @@ export function createApp() {
     }
   });
 
+  // A portal link connects a device without the gateway code. A device already
+  // in this community keeps its roles, so an Admin can open their own links.
+  app.post("/api/gateway/connect-link", async (req, res) => {
+    try {
+      const attemptKey = `connect:${getClientIp(req)}`;
+      await assertNotRateLimited(attemptKey);
+
+      const slug = String(req.body.slug || "").toLowerCase();
+      const link = slug ? (await gatewaySlugRef(slug).get()).data() : undefined;
+      if (!link) {
+        await recordFailedAttempt(attemptKey);
+        throw new HttpError(404, "This link is no longer active. Ask your organizer for a new one.");
+      }
+
+      const community = (await communityRef(link.communityId).get()).data() as CommunityRecord;
+      if (community.status === "locked") {
+        throw new HttpError(403, "This gateway's subscription has lapsed", "gateway_locked");
+      }
+      const current = await authenticate(req).catch(() => null);
+      const session: Session = current?.communityId === link.communityId
+        ? current
+        : { uid: newDeviceId(), communityId: link.communityId, roles: [], epoch: community.sessionEpoch };
+      res.json({ token: await issueSessionToken({ ...session, linkSlug: slug }) });
+    } catch (error) {
+      sendError(res, error);
+    }
+  });
+
   app.post("/api/gateway/role-login", secured([], async (req, session) => {
     const role = req.body.role as StaffRole;
     if (!STAFF_ROLES.includes(role)) throw new HttpError(400, "Unknown portal");
 
-    const attemptKey = `role:${session.communityId}:${req.ip}`;
+    const attemptKey = `role:${session.communityId}:${getClientIp(req)}`;
     await assertNotRateLimited(attemptKey);
     const auth = (await privateAuthRef(session.communityId).get()).data();
     const stored = auth?.passcodes?.[role];
-    if (!stored || !(await verifyPasscode(String(req.body.passcode || ""), stored))) {
+    const passcode = String(req.body.passcode || "");
+    if (!stored || !(await verifyPasscode(passcode, stored))) {
       await recordFailedAttempt(attemptKey);
       throw new HttpError(403, "That passcode isn't correct");
     }
     await clearFailedAttempts(attemptKey);
+
+    // Older gateways only kept hashes: the first sign-in fills in the Admin's note.
+    if (!auth?.readablePasscodes?.[role]) {
+      await privateAuthRef(session.communityId).update({ [`readablePasscodes.${role}`]: passcode });
+    }
 
     const roles = session.roles.includes(role) ? session.roles : [...session.roles, role];
     return { token: await issueSessionToken({ ...session, roles }) };
@@ -240,6 +279,13 @@ export function createApp() {
   app.get("/api/gateway/settings", secured(["admin"], async (_req, session) => {
     const auth = (await privateAuthRef(session.communityId).get()).data();
     return { gatewayCode: formatGatewayCode(auth?.gatewayCode || "") };
+  }));
+
+  // What the Admin hands out from the Central Gateway. Never includes the gateway code.
+  app.get("/api/gateway/portal-access", secured(["admin"], async (_req, session) => {
+    const slug = await ensureGatewaySlug(session.communityId);
+    const auth = (await privateAuthRef(session.communityId).get()).data();
+    return { slug, passcodes: auth?.readablePasscodes || {} };
   }));
 
   app.post("/api/gateway/settings", secured(["admin"], async (req, session) => {
@@ -261,7 +307,7 @@ export function createApp() {
     const epoch = await adminDb.runTransaction(async (tx) => {
       const community = (await tx.get(communityRef(session.communityId))).data() as CommunityRecord;
       const nextEpoch = community.sessionEpoch + 1;
-      tx.update(privateAuthRef(session.communityId), { [`passcodes.${role}`]: hash });
+      tx.update(privateAuthRef(session.communityId), { [`passcodes.${role}`]: hash, [`readablePasscodes.${role}`]: passcode });
       tx.update(communityRef(session.communityId), { sessionEpoch: nextEpoch });
       return nextEpoch;
     });
@@ -274,9 +320,13 @@ export function createApp() {
       const community = (await tx.get(communityRef(session.communityId))).data() as CommunityRecord;
       const auth = (await tx.get(privateAuthRef(session.communityId))).data();
       const nextEpoch = community.sessionEpoch + 1;
+      // Portal links go with the code, so a leaked link stops working too.
+      const slug = generateGatewaySlug(community.name);
       if (auth?.gatewayCode) tx.delete(gatewayCodeRef(auth.gatewayCode));
+      if (auth?.slug) tx.delete(gatewaySlugRef(auth.slug));
       tx.set(gatewayCodeRef(gatewayCode), { communityId: session.communityId });
-      tx.update(privateAuthRef(session.communityId), { gatewayCode });
+      tx.set(gatewaySlugRef(slug), { communityId: session.communityId });
+      tx.update(privateAuthRef(session.communityId), { gatewayCode, slug });
       tx.update(communityRef(session.communityId), { sessionEpoch: nextEpoch });
       return nextEpoch;
     });

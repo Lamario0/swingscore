@@ -11,7 +11,7 @@ interface GatewaySettingsProps {
   onApplyToken: (token: string) => Promise<void>;
 }
 
-const ROLE_LABELS: { role: StaffRole; label: string }[] = [
+export const ROLE_LABELS: { role: StaffRole; label: string }[] = [
   { role: "admin", label: "Admin" },
   { role: "judge", label: "Judge" },
   { role: "coordinator", label: "Floor Coordinator" },
@@ -62,12 +62,12 @@ export default function GatewaySettings({ isDarkMode, communityName, settings, o
   });
 
   const rotateCode = () => {
-    if (!window.confirm(`Create a new gateway code? ${SIGN_OUT_WARNING}`)) return;
+    if (!window.confirm(`Create a new gateway code? This also replaces every portal link, so you'll need to share the new ones. ${SIGN_OUT_WARNING}`)) return;
     run(async () => {
       const data = await apiRequest("/api/gateway/rotate-code");
       await onApplyToken(data.token);
       setGatewayCode(data.gatewayCode);
-      return "New gateway code created.";
+      return "New gateway code and portal links created.";
     });
   };
 
@@ -126,7 +126,7 @@ export default function GatewaySettings({ isDarkMode, communityName, settings, o
                 Create New Code
               </button>
             </div>
-            <p className="text-[11px] text-slate-400 mt-2">Share this with dancers, spectators and staff. It connects a device to your community.</p>
+            <p className="text-[11px] text-slate-400 mt-2">Keep this to yourself. It opens the Central Gateway, where you'll find the portal links to share with staff and spectators.</p>
           </div>
 
           <div>
