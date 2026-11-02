@@ -1,9 +1,10 @@
 import React from "react";
-import { ShieldAlert, Award, UserCheck, Users, Landmark, ExternalLink, KeyRound, Trophy, ChevronDown, ChevronUp, Sparkles, Copy, Check } from "lucide-react";
+import { ShieldAlert, Award, UserCheck, Users, Landmark, ExternalLink, KeyRound, Trophy, ChevronDown, ChevronUp, Sparkles, Copy, Check, QrCode, X } from "lucide-react";
 import { AppSettings, Competitor, CompletedContestResult, Heat, ScoreRecord, StaffRole } from "../types";
-import { apiRequest } from "../utils/api";
+import { apiRequest, copyText } from "../utils/api";
 import { getPortalLink, LinkedPortal } from "../utils/portalLinks";
 import PasscodeNote from "./PasscodeNote";
+import PortalQrDialog from "./PortalQrDialog";
 import { getPublicHeatIds } from "../hooks/useCommunityState";
 import { formatPlacement, getContestOptions, getContestOutcome, getCutGroup, isResultNameHidden } from "../utils/calculations";
 import { getDisplayBib, isCouplesHeat, showsBibs } from "../utils/partners";
@@ -35,7 +36,8 @@ export default function PlatformPortal({ isDarkMode, settings, competitors = [],
   const [expandedHeatIds, setExpandedHeatIds] = React.useState<Record<string, boolean>>({});
   const [access, setAccess] = React.useState<{ slug: string; passcodes: Partial<Record<StaffRole, string>> } | null>(null);
   const [accessError, setAccessError] = React.useState("");
-  const [copiedPortal, setCopiedPortal] = React.useState<LinkedPortal | null>(null);
+  const [copyResult, setCopyResult] = React.useState<{ portal: LinkedPortal; ok: boolean } | null>(null);
+  const [qrPortal, setQrPortal] = React.useState<{ portal: LinkedPortal; title: string } | null>(null);
 
   React.useEffect(() => {
     apiRequest("/api/gateway/portal-access", undefined, "GET")
@@ -46,9 +48,9 @@ export default function PlatformPortal({ isDarkMode, settings, competitors = [],
   // The link stays on the card too: browsers block copying on a plain http address.
   const copyLink = async (portal: LinkedPortal) => {
     if (!access) return;
-    await navigator.clipboard?.writeText(getPortalLink(access.slug, portal));
-    setCopiedPortal(portal);
-    setTimeout(() => setCopiedPortal((current) => (current === portal ? null : current)), 1500);
+    const ok = await copyText(getPortalLink(access.slug, portal));
+    setCopyResult({ portal, ok });
+    setTimeout(() => setCopyResult((current) => (current?.portal === portal ? null : current)), 1500);
   };
 
   const toggleHeatExpand = (id: string) => {
@@ -107,7 +109,7 @@ export default function PlatformPortal({ isDarkMode, settings, competitors = [],
       title: "Judge Station Portal",
       path: "/judge",
       query: "?role=judge",
-      access: "Link + passcode",
+      access: "QR or link + passcode",
       linkPortal: "judge",
       description: "Dedicated real-time digital sheet for registered adjudicators. Record scores or sequential placement rankings securely.",
       icon: <Award className="w-5 h-5 text-amber-500" />,
@@ -117,7 +119,7 @@ export default function PlatformPortal({ isDarkMode, settings, competitors = [],
       title: "Floor Coordinator Panel",
       path: "/floorcord",
       query: "?role=coordinator",
-      access: "Link + passcode",
+      access: "QR or link + passcode",
       linkPortal: "coordinator",
       description: "Dancer check-in dashboard and queue staging. Verify competitors as they report for their scheduled heats.",
       icon: <UserCheck className="w-5 h-5 text-emerald-500" />,
@@ -127,7 +129,7 @@ export default function PlatformPortal({ isDarkMode, settings, competitors = [],
       title: "Registration",
       path: "/registration",
       query: "?role=competitor",
-      access: "Link + passcode",
+      access: "QR or link + passcode",
       linkPortal: "registration",
       description: "Register dancers, assign bib numbers and enter them into divisions and contests. Only approved staff can add or edit a registration.",
       icon: <Users className="w-5 h-5 text-blue-500" />,
@@ -137,7 +139,7 @@ export default function PlatformPortal({ isDarkMode, settings, competitors = [],
       title: "Public Results Terminal",
       path: "/results",
       query: "?role=results",
-      access: "Link only",
+      access: "QR or link",
       linkPortal: "results",
       description: "Spectator scoreboard displaying relative placement rankings, judge vote matrices, callback cuts, and live score synchronization.",
       icon: <Landmark className="w-5 h-5 text-violet-500" />,
@@ -147,7 +149,7 @@ export default function PlatformPortal({ isDarkMode, settings, competitors = [],
       title: "Scoring & Results Ledger",
       path: "/scoring",
       query: "?role=scoring",
-      access: "Link + passcode",
+      access: "QR or link + passcode",
       linkPortal: "scoring",
       description: "Internal system of record for completed contests — every heat closed out by the admin's Complete Contest action lands here.",
       icon: <Sparkles className="w-5 h-5 text-indigo-500" />,
@@ -169,7 +171,7 @@ export default function PlatformPortal({ isDarkMode, settings, competitors = [],
           {communityName || "SwingScore"}
         </h1>
         <p className="text-xs text-slate-400 mt-2 max-w-lg mx-auto leading-relaxed">
-          Only you can see this page. Send each person their portal's link, and give staff their passcode from the note in the corner.
+          Only you can see this page. Show staff their portal's QR code to sign them in, or send the link with the passcode from the note in the corner.
         </p>
       </div>
 
@@ -205,7 +207,21 @@ export default function PlatformPortal({ isDarkMode, settings, competitors = [],
               </p>
             )}
 
-            <div className="mt-6 pt-4 border-t border-slate-100 dark:border-slate-800/80 flex items-center justify-end gap-2">
+            <div className="mt-6 pt-4 border-t border-slate-100 dark:border-slate-800/80 flex flex-wrap items-center justify-end gap-2">
+              {sys.linkPortal && access && (
+                <button
+                  id={`show-qr-${sys.linkPortal}`}
+                  onClick={() => setQrPortal({ portal: sys.linkPortal!, title: sys.title })}
+                  className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold transition-all ${
+                    isDarkMode
+                      ? "bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700"
+                      : "bg-slate-100 hover:bg-slate-200 text-slate-700 border border-slate-200 shadow-sm"
+                  }`}
+                >
+                  <QrCode className="w-3.5 h-3.5 text-slate-400" />
+                  QR Code
+                </button>
+              )}
               {sys.linkPortal && access && (
                 <button
                   id={`copy-link-${sys.linkPortal}`}
@@ -216,8 +232,10 @@ export default function PlatformPortal({ isDarkMode, settings, competitors = [],
                       : "bg-slate-100 hover:bg-slate-200 text-slate-700 border border-slate-200 shadow-sm"
                   }`}
                 >
-                  {copiedPortal === sys.linkPortal ? <Check className="w-3.5 h-3.5 text-green-500" /> : <Copy className="w-3.5 h-3.5 text-slate-400" />}
-                  {copiedPortal === sys.linkPortal ? "Copied" : "Copy Link"}
+                  {copyResult?.portal !== sys.linkPortal
+                    ? <Copy className="w-3.5 h-3.5 text-slate-400" />
+                    : copyResult.ok ? <Check className="w-3.5 h-3.5 text-green-500" /> : <X className="w-3.5 h-3.5 text-rose-500" />}
+                  {copyResult?.portal !== sys.linkPortal ? "Copy Link" : copyResult.ok ? "Copied" : "Couldn't copy"}
                 </button>
               )}
               <button
@@ -238,6 +256,15 @@ export default function PlatformPortal({ isDarkMode, settings, competitors = [],
 
       {accessError && <p className="mt-6 text-xs text-rose-500 text-center">{accessError}</p>}
       {access && <PasscodeNote isDarkMode={isDarkMode} passcodes={access.passcodes} />}
+      {access && qrPortal && (
+        <PortalQrDialog
+          isDarkMode={isDarkMode}
+          slug={access.slug}
+          portal={qrPortal.portal}
+          title={qrPortal.title}
+          onClose={() => setQrPortal(null)}
+        />
+      )}
 
       {/* Official Results Panel */}
       <div className={`mt-10 p-6 rounded-2xl border transition-all ${

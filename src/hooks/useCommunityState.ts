@@ -30,7 +30,7 @@ const ROLE_CHANGE_RETRY_DELAYS_MS = [500, 1000, 2000, 4000];
 // A token with new roles takes a moment to reach Firestore, longer when another
 // tab holds the connection, so a listener that needs a role just gained can be
 // refused at first. A refused listener stays closed, so start it again.
-function listenThroughRoleChange(
+export function listenThroughRoleChange(
   listen: (onError: (err: FirestoreError) => void) => Unsubscribe,
   giveUp: (err: FirestoreError) => void
 ): Unsubscribe {

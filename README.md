@@ -1,6 +1,6 @@
 # SwingScore
 
-West Coast Swing competition scoring for small communities. Each community has its own private gateway. The Admin signs in with the gateway code and sees the Central Gateway, then shares a link to each portal and the staff passcodes.
+West Coast Swing competition scoring for small communities. Each community has its own private gateway. The Admin signs in with the gateway code and sees the Central Gateway, then shows staff a QR code that signs them in to their portal, or shares a link and passcode.
 
 ## Run locally
 

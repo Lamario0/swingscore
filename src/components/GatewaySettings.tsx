@@ -28,6 +28,9 @@ export default function GatewaySettings({ isDarkMode, communityName, settings, o
   const [eventInput, setEventInput] = useState(settings.eventName || "");
   const [passcodeRole, setPasscodeRole] = useState<StaffRole>("admin");
   const [passcodeInput, setPasscodeInput] = useState("");
+  const [sheetEmail, setSheetEmail] = useState("");
+  const [sheetUrl, setSheetUrl] = useState("");
+  const [sheetTitle, setSheetTitle] = useState("");
   const [isBusy, setIsBusy] = useState(false);
   const [notice, setNotice] = useState("");
   const [error, setError] = useState("");
@@ -41,6 +44,17 @@ export default function GatewaySettings({ isDarkMode, communityName, settings, o
       .then((data) => setGatewayCode(data.gatewayCode))
       .catch((err) => setError(err.message));
   }, [isOpen, gatewayCode]);
+
+  useEffect(() => {
+    if (!isOpen || sheetEmail) return;
+    apiRequest("/api/sheets", undefined, "GET")
+      .then((data) => {
+        setSheetEmail(data.serviceAccountEmail);
+        setSheetUrl(data.url);
+        setSheetTitle(data.title);
+      })
+      .catch((err) => setError(err.message));
+  }, [isOpen, sheetEmail]);
 
   const run = async (action: () => Promise<string>) => {
     setIsBusy(true);
@@ -80,6 +94,18 @@ export default function GatewaySettings({ isDarkMode, communityName, settings, o
       return "Passcode changed.";
     });
   };
+
+  const connectSheet = (url: string) => run(async () => {
+    const data = await apiRequest("/api/sheets/connect", { url });
+    setSheetUrl(data.url);
+    setSheetTitle(data.title);
+    return url ? `Connected to ${data.title}. Published contests will save there.` : "Spreadsheet disconnected.";
+  });
+
+  const resaveAll = () => run(async () => {
+    const { queued } = await apiRequest("/api/sheets/resave");
+    return `Saving ${queued} published contest${queued === 1 ? "" : "s"} to the spreadsheet.`;
+  });
 
   const inputClass = `w-full text-sm px-3 py-2 rounded-xl border focus:outline-none focus:ring-1 focus:ring-violet-500 transition-all ${
     isDarkMode ? "bg-slate-800 border-slate-700 text-slate-100" : "bg-slate-50 border-slate-200 text-slate-800"
@@ -155,6 +181,51 @@ export default function GatewaySettings({ isDarkMode, communityName, settings, o
                 Change Passcode
               </button>
             </div>
+          </div>
+
+          <div>
+            <p className={labelClass}>Results Spreadsheet</p>
+            <ol className="text-[11px] text-slate-400 mb-3 space-y-1 list-decimal list-inside">
+              <li>Create a Google Sheet.</li>
+              <li>
+                Share it as an Editor with <span id="sheets-service-email" className="font-mono text-violet-400 break-all select-all">{sheetEmail || "..."}</span>
+              </li>
+              <li>Paste its link below. Published contests then save there automatically.</li>
+            </ol>
+            <div className="flex flex-col sm:flex-row gap-3">
+              <input
+                id="sheet-url-input"
+                aria-label="Google Sheet link"
+                value={sheetUrl}
+                onChange={(e) => setSheetUrl(e.target.value)}
+                placeholder="https://docs.google.com/spreadsheets/d/..."
+                className={inputClass}
+              />
+              <button type="button" id="connect-sheet-btn" disabled={isBusy || !sheetUrl.trim()} onClick={() => connectSheet(sheetUrl)} className={buttonClass}>
+                Test &amp; Connect
+              </button>
+            </div>
+            {sheetTitle && (
+              <div className="mt-3 flex flex-wrap items-center gap-3">
+                <span id="sheet-connected-title" className="text-xs text-slate-400">
+                  Saving to <a href={sheetUrl} target="_blank" rel="noreferrer" className="font-semibold text-violet-400 underline">{sheetTitle}</a>
+                </span>
+                <button type="button" id="resave-all-btn" disabled={isBusy} onClick={resaveAll} className={buttonClass}>
+                  Re-save All
+                </button>
+                <button
+                  type="button"
+                  id="disconnect-sheet-btn"
+                  disabled={isBusy}
+                  onClick={() => {
+                    if (window.confirm("Stop saving to this spreadsheet? What's already in it stays there.")) connectSheet("");
+                  }}
+                  className="text-[11px] font-semibold text-slate-400 underline"
+                >
+                  Disconnect
+                </button>
+              </div>
+            )}
           </div>
 
           {notice && <p className="text-xs font-semibold text-emerald-500">{notice}</p>}

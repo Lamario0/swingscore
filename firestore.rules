@@ -50,6 +50,11 @@ service cloud.firestore {
         allow read: if connected() && request.auth.token.roles.hasAny(["admin", "coordinator", "scoring", "competitor"]);
       }
 
+      // Written only by the server, so the ledger can show each contest's save.
+      match /sheetJobs/{heatId} {
+        allow read: if connected() && request.auth.token.roles.hasAny(["admin", "scoring"]);
+      }
+
       match /heats/{heatId} {
         allow read: if connected();
 

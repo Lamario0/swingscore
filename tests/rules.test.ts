@@ -138,6 +138,19 @@ test("Registration staff read emails but not unpublished scores", async () => {
   await assertFails(scoresOf(db, A, HIDDEN_HEAT));
 });
 
+test("only Admin and Scoring read spreadsheet saves, and nobody writes them", async () => {
+  await env.withSecurityRulesDisabled(async (context) => {
+    await setDoc(doc(context.firestore(), `communities/${A}/sheetJobs/h1`), { heatId: "h1", status: "saved" });
+  });
+  const path = `communities/${A}/sheetJobs/h1`;
+  await assertSucceeds(getDoc(doc(device(A, ["scoring"]), path)));
+  await assertSucceeds(getDoc(doc(device(A, ["admin"]), path)));
+  await assertFails(getDoc(doc(device(A, ["judge"]), path)));
+  await assertFails(getDoc(doc(device(A), path)));
+  await assertFails(setDoc(doc(device(A, ["admin"]), path), { status: "saved" }));
+  await assertFails(getDoc(doc(device(A, ["admin"]), `communities/${A}/private/integrations`)));
+});
+
 test("a judge writes only their own scores", async () => {
   const db = device(A, ["judge"], { judgeName: "Judge A" });
   const mine = score(LIVE_HEAT, "Judge A", "2");

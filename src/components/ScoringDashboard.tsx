@@ -1,10 +1,15 @@
-import React, { useState, useMemo } from "react";
-import { Trophy, RefreshCw, ChevronDown, ChevronUp, BarChart3, ListOrdered, CheckCircle2, Filter, ArrowDownAZ, ArrowDownWideNarrow, EyeOff } from "lucide-react";
-import { AppSettings, Competitor, ContestOptions, Heat, ScoreRecord, CompletedContestResult } from "../types";
+import React, { useEffect, useState, useMemo } from "react";
+import { collection, onSnapshot } from "firebase/firestore";
+import { Trophy, RefreshCw, ChevronDown, ChevronUp, BarChart3, ListOrdered, CheckCircle2, Filter, ArrowDownAZ, ArrowDownWideNarrow, EyeOff, Download } from "lucide-react";
+import { db } from "../firebase";
+import { listenThroughRoleChange } from "../hooks/useCommunityState";
+import { AppSettings, Competitor, ContestOptions, Heat, ScoreRecord, CompletedContestResult, SheetJob } from "../types";
+import { apiDownload, apiRequest } from "../utils/api";
 import { formatPlacement, formatRelativePlacements, getContestOptions, getContestOutcome, getCutGroup, isResultNameHidden } from "../utils/calculations";
 import { getDisplayBib, isCouplesHeat, showsBibs } from "../utils/partners";
 
 interface ScoringDashboardProps {
+  communityId: string;
   settings: AppSettings;
   competitors: Competitor[];
   heats: Heat[];
@@ -202,10 +207,68 @@ function buildMatrix(
   return { judgeNames, rows, resultColumnLabel, hasDistinctRoles, isFinals, showBibs, chiefJudgeName, chiefSides, changedLabels, tieGroups, chiefTieLabels };
 }
 
-export default function ScoringDashboard({ settings, competitors, heats, scores, isDarkMode, onRefresh, onUpdateSettings }: ScoringDashboardProps) {
+export default function ScoringDashboard({ communityId, settings, competitors, heats, scores, isDarkMode, onRefresh, onUpdateSettings }: ScoringDashboardProps) {
   const [expandedIds, setExpandedIds] = useState<Record<string, boolean>>({});
   const [divisionFilter, setDivisionFilter] = useState<string>("All");
   const [publishBusyId, setPublishBusyId] = useState<string | null>(null);
+  const [sheetJobs, setSheetJobs] = useState<Record<string, SheetJob>>({});
+  const [isDownloading, setIsDownloading] = useState(false);
+  const [sheetError, setSheetError] = useState("");
+
+  useEffect(() => listenThroughRoleChange(
+    (onError) => onSnapshot(collection(db, `communities/${communityId}/sheetJobs`), (snapshot) => {
+      setSheetJobs(Object.fromEntries(snapshot.docs.map((d) => [d.id, d.data() as SheetJob])));
+    }, onError),
+    (err) => console.error("Could not load spreadsheet saves", err)
+  ), [communityId]);
+
+  const resaveContest = async (heatId: string) => {
+    setSheetError("");
+    try {
+      await apiRequest("/api/sheets/resave", { heatId });
+    } catch (err: any) {
+      setSheetError(err.message);
+    }
+  };
+
+  const downloadWorkbook = async () => {
+    setSheetError("");
+    setIsDownloading(true);
+    try {
+      await apiDownload("/api/sheets/workbook", "swingscore-results.xlsx");
+    } catch (err: any) {
+      setSheetError(err.message);
+    } finally {
+      setIsDownloading(false);
+    }
+  };
+
+  const renderSheetStatus = (heatId: string) => {
+    const job = sheetJobs[heatId];
+    const isBusy = job?.status === "queued" || job?.status === "saving";
+    const label = isBusy ? "Saving..." : job?.status === "saved" ? "Saved to Sheet" : job?.status === "failed" ? "Save Failed" : "Not Saved";
+    const color = job?.status === "saved" ? "bg-emerald-500/10 text-emerald-500" : job?.status === "failed" ? "bg-rose-500/10 text-rose-500" : "bg-amber-500/10 text-amber-500";
+    return (
+      <>
+        <span id={`sheet-status-${heatId}`} title={job?.error || undefined} className={`text-[9px] px-2 py-0.5 rounded-full font-semibold font-mono ${color}`}>
+          {label}
+        </span>
+        {!isBusy && (
+          <button
+            type="button"
+            id={`sheet-resave-${heatId}`}
+            onClick={(e) => {
+              e.stopPropagation();
+              resaveContest(heatId);
+            }}
+            className="text-[10px] font-bold text-indigo-400 underline cursor-pointer"
+          >
+            Re-save
+          </button>
+        )}
+      </>
+    );
+  };
 
   const completed = settings.completedResults || [];
 
@@ -286,6 +349,21 @@ export default function ScoringDashboard({ settings, competitors, heats, scores,
           </div>
         </div>
 
+        <div className="flex items-center gap-2">
+        <button
+          id="download-excel-btn"
+          disabled={isDownloading || !(settings.publishedHeatIds || []).length}
+          onClick={downloadWorkbook}
+          title="Every published contest, as an Excel workbook"
+          className={`flex items-center gap-1.5 px-3 py-2 rounded-xl text-xs font-semibold transition-all disabled:opacity-50 ${
+            isDarkMode
+              ? "bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700"
+              : "bg-white hover:bg-slate-100 text-slate-700 border border-slate-200 shadow-sm"
+          }`}
+        >
+          <Download className="w-3.5 h-3.5" />
+          {isDownloading ? "Preparing..." : "Download Excel"}
+        </button>
         {onRefresh && (
           <button
             onClick={onRefresh}
@@ -299,7 +377,12 @@ export default function ScoringDashboard({ settings, competitors, heats, scores,
             Refresh
           </button>
         )}
+        </div>
       </div>
+
+      {sheetError && (
+        <p id="sheet-error" className="mb-4 p-3 rounded-xl bg-rose-500/10 border border-rose-500/20 text-rose-500 text-xs font-medium">{sheetError}</p>
+      )}
 
       {/* Stat strip */}
       <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 mb-6">
@@ -389,9 +472,13 @@ export default function ScoringDashboard({ settings, competitors, heats, scores,
                         {styleIcon(contest.judgingStyle)} {styleLabel(contest.judgingStyle)}
                       </span>
                       <span className="text-[9px] px-2 py-0.5 rounded-full bg-slate-500/10 text-slate-400 font-semibold font-mono">
-                        {contest.timestamp}
+                        {contest.completedAt || contest.timestamp}
                       </span>
+                      {isPublished && settings.spreadsheetConnected && renderSheetStatus(contest.heatId)}
                     </div>
+                    {isPublished && settings.spreadsheetConnected && sheetJobs[contest.heatId]?.status === "failed" && (
+                      <p className="text-[11px] text-rose-500">{sheetJobs[contest.heatId].error}</p>
+                    )}
                   </div>
 
                   <div className="flex items-center gap-2 flex-shrink-0">

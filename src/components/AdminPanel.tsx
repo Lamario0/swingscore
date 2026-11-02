@@ -1444,6 +1444,8 @@ export default function AdminPanel({
         division: liveHeatToComplete.division,
         heatType: liveHeatToComplete.heatType || "Prelim",
         timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+        completedAt: new Date().toLocaleString([], { dateStyle: "medium", timeStyle: "short" }),
+        eventName: settings.eventName || "",
         judgingStyle: settings.judgingStyle || "raw",
         rankings: results.map((r, index) => ({
           rank: r.rank || (index + 1),

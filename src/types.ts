@@ -108,6 +108,7 @@ export interface ContestOptions {
 
 export interface AppSettings {
   eventName?: string;
+  spreadsheetConnected?: boolean;
   currentHeatId: string | null;
   judgingStyle: JudgingStyle;
   callbackCount: number;
@@ -160,10 +161,19 @@ export interface AppSettings {
   claimedJudges?: string[];
 }
 
+export interface SheetJob {
+  heatId: string;
+  status: "queued" | "saving" | "saved" | "failed";
+  error?: string | null;
+}
+
 export interface CompletedContestResult {
   id: string;
   heatId: string;
   name: string;
+  // Stamped at completion: renaming the event later doesn't alter past contests.
+  eventName?: string;
+  completedAt?: string;
   division: string;
   heatType: "Prelim" | "Semi-Final" | "Quarter Final" | "Finals";
   timestamp: string;

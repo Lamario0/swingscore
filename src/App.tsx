@@ -11,19 +11,21 @@ import PlatformPortal from "./components/PlatformPortal";
 import RoleLogin from "./components/RoleLogin";
 import GatewayConnect from "./components/GatewayConnect";
 import GatewaySettings from "./components/GatewaySettings";
+import SampleDancersButton from "./components/SampleDancersButton";
 import { doc, setDoc, waitForPendingWrites, writeBatch } from "firebase/firestore";
 import { db } from "./firebase";
 import { canReadAllScores, useCommunityState } from "./hooks/useCommunityState";
 import { useGatewaySession } from "./hooks/useGatewaySession";
-import { AppSettings, Competitor, ViewRole, CallbackValue, ContestEntryFields, ScoreRecord, StaffRole } from "./types";
+import { AppSettings, Competitor, Division, ViewRole, CallbackValue, ContestEntryFields, ScoreRecord, StaffRole } from "./types";
 import { apiRequest } from "./utils/api";
 import { getScoreDocId, toDocId } from "./utils/ids";
 import { isCouplesHeat, projectCompetitorsForHeat } from "./utils/partners";
-import { parsePortalLink } from "./utils/portalLinks";
+import { parsePortalLink, readPortalPass } from "./utils/portalLinks";
 
 export default function App() {
   // Navigation & Preferences (Dynamically detected via URL slug, query string, or subdomains)
   const [portalLink] = useState(() => parsePortalLink(window.location.pathname));
+  const [portalPass, setPortalPass] = useState(() => (portalLink ? readPortalPass(window.location.hash) : ""));
   const [currentRole, setCurrentRole] = useState<ViewRole | "portal">(portalLink?.role || "portal");
   const [selectedJudgeId, setSelectedJudgeIdState] = useState<string>(() => {
     try {
@@ -52,6 +54,7 @@ export default function App() {
   };
   const [isDarkMode, setIsDarkMode] = useState<boolean>(true);
   const [actionError, setActionError] = useState("");
+  const [registrationDivision, setRegistrationDivision] = useState<Division>("Novice");
 
   // Parse the current virtual environment at mount time
   useEffect(() => {
@@ -103,7 +106,7 @@ export default function App() {
   }, []);
 
   // This device's gateway connection and its community's live data
-  const { session, isReady, connect, connectWithLink, loginRole, logoutRole, applyToken, leaveGateway } = useGatewaySession();
+  const { session, isReady, connect, connectWithLink, connectWithPass, loginRole, logoutRole, applyToken, leaveGateway } = useGatewaySession();
   const { communityName, competitors, heats, scores, settings, error, isOffline, hasUnsyncedScores, loading } = useCommunityState(session);
 
   // A portal link connects the device itself. Once it has, the session remembers
@@ -112,16 +115,51 @@ export default function App() {
   const connectingSlugRef = useRef("");
   const isOnLinkedSession = !!portalLink && session?.linkSlug === portalLink.slug;
   useEffect(() => {
-    if (!isReady || !portalLink || isOnLinkedSession || connectingSlugRef.current === portalLink.slug) return;
+    if (!isReady || !portalLink || portalPass || isOnLinkedSession || connectingSlugRef.current === portalLink.slug) return;
     connectingSlugRef.current = portalLink.slug;
     connectWithLink(portalLink.slug).catch((err) => setLinkError(err.message));
-  }, [isReady, portalLink, isOnLinkedSession, connectWithLink]);
+  }, [isReady, portalLink, portalPass, isOnLinkedSession, connectWithLink]);
+
+  // A QR code signs the device straight in. If it can't, the plain link above
+  // takes over and the passcode screen says why. Either way the pass leaves the
+  // address, so it can't be reloaded, shared or left in the browser's history.
+  const [passError, setPassError] = useState("");
+  const isUsingPassRef = useRef(false);
+  useEffect(() => {
+    if (!isReady || !portalLink || !portalPass || isUsingPassRef.current) return;
+    isUsingPassRef.current = true;
+    const finish = () => {
+      window.history.replaceState(null, "", window.location.pathname);
+      isUsingPassRef.current = false;
+      setPortalPass("");
+    };
+    if (isOnLinkedSession && session?.roles.includes(portalLink.role as StaffRole)) {
+      finish();
+      return;
+    }
+    connectWithPass(portalLink.slug, portalLink.role, portalPass)
+      .then(() => {
+        // Like a passcode sign-in: a new arrival picks their judge name themselves.
+        if (portalLink.role === "judge") setSelectedJudgeId("");
+      })
+      .catch((err) => setPassError(err.message))
+      .finally(finish);
+  }, [isReady, portalLink, portalPass, isOnLinkedSession, session, connectWithPass]);
+
+  // Opening a QR link on its own portal's page doesn't reload the app.
+  useEffect(() => {
+    if (!portalLink) return;
+    const readPass = () => setPortalPass(readPortalPass(window.location.hash));
+    window.addEventListener("hashchange", readPass);
+    return () => window.removeEventListener("hashchange", readPass);
+  }, [portalLink]);
 
   // Anyone connected can see Results. The Central Gateway is the Admin's alone.
   const requiredRole: StaffRole | null = currentRole === "results" ? null : currentRole === "portal" ? "admin" : currentRole;
   const isAuthenticated = !requiredRole || !!session?.roles.includes(requiredRole);
   const isAdmin = !!session?.roles.includes("admin");
   const myClaimedJudge = session?.judgeName || "";
+  const isOnOpenRegistration = currentRole === "competitor" && !!session && isAuthenticated && !loading && settings.registrationEnabled !== false;
 
   // Live data arrives by itself, so the portals' refresh buttons have nothing to do.
   const refreshState = async () => {};
@@ -159,6 +197,10 @@ export default function App() {
 
   const handleAddSampleDancers = async (division: string) => {
     await apiRequest("/api/register/samples", { division });
+  };
+
+  const handleDeleteCompetitor = async (bib: string) => {
+    await apiRequest("/api/competitor/delete", { bib });
   };
 
   // Check-in and scratch apply to one contest (heat); registry points are global.
@@ -466,7 +508,7 @@ export default function App() {
               <h2 className="text-lg font-bold tracking-tight">This link isn't working</h2>
               <p className="text-xs text-slate-400 mt-2 leading-relaxed">{linkError}</p>
             </div>
-          ) : portalLink && !isOnLinkedSession ? (
+          ) : portalLink && (portalPass || !isOnLinkedSession) ? (
             <div className="flex flex-col items-center justify-center py-20 gap-4">
               <RefreshCw className="w-8 h-8 text-violet-500 animate-spin" />
               <p className="text-xs text-slate-400 font-mono">Opening your portal...</p>
@@ -483,6 +525,7 @@ export default function App() {
             <RoleLogin
               role={requiredRole as StaffRole}
               isDarkMode={isDarkMode}
+              notice={passError}
               onLogin={async (passcode) => {
                 await loginRole(requiredRole as StaffRole, passcode);
                 // Entering a passcode to get into the Judge domain means this
@@ -524,6 +567,7 @@ export default function App() {
 
               {currentRole === "scoring" && (
                 <ScoringDashboard
+                  communityId={session.communityId}
                   settings={settings}
                   competitors={competitors}
                   heats={heats}
@@ -538,8 +582,10 @@ export default function App() {
                 <RegisterCompetitor
                   competitors={competitors}
                   onRegister={handleRegisterCompetitor}
-                  onAddSampleDancers={handleAddSampleDancers}
                   onUpdateCompetitor={handleUpdateCompetitor}
+                  onDeleteCompetitor={handleDeleteCompetitor}
+                  division={registrationDivision}
+                  setDivision={setRegistrationDivision}
                   isDarkMode={isDarkMode}
                   settings={settings}
                 />
@@ -611,9 +657,10 @@ export default function App() {
         </main>
 
         {/* Footer */}
-        <footer className={`py-6 border-t text-center text-[10px] font-mono ${
+        <footer className={`pt-6 px-4 border-t text-center text-[10px] font-mono ${isOnOpenRegistration ? "pb-20 lg:pb-6" : "pb-6"} ${
           isDarkMode ? "bg-slate-900/50 border-slate-900 text-slate-500" : "bg-white border-slate-200 text-slate-400"
         }`}>
+          {isOnOpenRegistration && <SampleDancersButton division={registrationDivision} onAdd={handleAddSampleDancers} />}
           <div>WCS Real-Time Scoring Engine</div>
           <div className="mt-1 opacity-75">Designed with Desktop precision and Mobile optimized tactile controls</div>
           {session && (

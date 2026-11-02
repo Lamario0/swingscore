@@ -6,9 +6,10 @@ interface RoleLoginProps {
   role: StaffRole;
   isDarkMode: boolean;
   onLogin: (passcode: string) => Promise<void>;
+  notice?: string;
 }
 
-export default function RoleLogin({ role, isDarkMode, onLogin }: RoleLoginProps) {
+export default function RoleLogin({ role, isDarkMode, onLogin, notice = "" }: RoleLoginProps) {
   const [password, setPassword] = useState("");
   const [showPassword, setShowPassword] = useState(false);
   const [error, setError] = useState("");
@@ -55,6 +56,7 @@ export default function RoleLogin({ role, isDarkMode, onLogin }: RoleLoginProps)
   };
 
   const details = getRoleDetails();
+  const message = error || notice;
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -119,10 +121,10 @@ export default function RoleLogin({ role, isDarkMode, onLogin }: RoleLoginProps)
             </div>
           </div>
 
-          {error && (
-            <div className="p-3 rounded-xl bg-rose-500/10 border border-rose-500/20 text-[11px] text-rose-400 flex items-start gap-2 leading-relaxed">
+          {message && (
+            <div id="role-login-message" className="p-3 rounded-xl bg-rose-500/10 border border-rose-500/20 text-[11px] text-rose-400 flex items-start gap-2 leading-relaxed">
               <AlertCircle className="w-4 h-4 flex-shrink-0 mt-0.5 text-rose-500" />
-              <span>{error}</span>
+              <span>{message}</span>
             </div>
           )}
 

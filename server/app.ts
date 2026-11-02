@@ -1,12 +1,16 @@
 import express, { type Request, type Response } from "express";
+import { FieldValue } from "firebase-admin/firestore";
 import { CONTEST_ENTRY_KEYS, type AppSettings, type AppState, type Competitor, type Heat, type StaffRole } from "../src/types";
 import { getJudgeHeatCompetitors, getJudgeRole, getQueuedPromotion } from "../src/utils/calculations";
 import { getAllContestEntries, getContestEntry, getContestRole, getDivisionLockKey, isPartneredContest, oppositeRole, validateContestEntries, withAddedEntry, withEntryPartner } from "../src/utils/partners";
 import { adminAuth, adminDb } from "./firebaseAdmin";
+import { getSheetsClient, parseSpreadsheetId, prepareSpreadsheet, SHEETS_SERVICE_ACCOUNT } from "./results/googleSheets";
+import { describeSheetsError, enqueueSheetJobs, integrationsRef } from "./results/sheetJobs";
+import { buildWorkbook } from "./results/workbook";
 import {
   assertNotRateLimited, clearFailedAttempts, communityRef, ensureGatewaySlug, formatGatewayCode, gatewayCodeRef, gatewaySlugRef,
-  generateGatewayCode, generateGatewaySlug, hashPasscode, issueSessionToken, newDeviceId, normalizeGatewayCode, privateAuthRef,
-  recordFailedAttempt, STAFF_ROLES, verifyPasscode, type CommunityRecord, type Session
+  generateGatewayCode, generateGatewaySlug, generatePortalPass, hashPasscode, isSamePass, issueSessionToken, newDeviceId, normalizeGatewayCode,
+  PORTAL_PASS_ROLES, privateAuthRef, recordFailedAttempt, STAFF_ROLES, verifyPasscode, type CommunityRecord, type Session
 } from "./gateway";
 import { autoPopulateHeats, blankSettings, HttpError, readCommunityState, setHeatStatus, withCommunitySettings, withCommunityState } from "./state";
 
@@ -86,15 +90,34 @@ async function authenticate(req: Request): Promise<Session> {
   };
 }
 
+// A device already in this community keeps its roles, so an Admin can open
+// their own links.
+async function getLinkSession(req: Request, communityId: string): Promise<Session> {
+  const community = (await communityRef(communityId).get()).data() as CommunityRecord;
+  if (community.status === "locked") {
+    throw new HttpError(403, "This gateway's subscription has lapsed", "gateway_locked");
+  }
+  const current = await authenticate(req).catch(() => null);
+  return current?.communityId === communityId
+    ? current
+    : { uid: newDeviceId(), communityId, roles: [], epoch: community.sessionEpoch };
+}
+
+const addRole = (roles: StaffRole[], role: StaffRole) => (roles.includes(role) ? roles : [...roles, role]);
+
 type Handler = (req: Request, session: Session) => Promise<unknown>;
 
 // Admin can do everything; an empty role list means any connected device.
+function assertAllowed(session: Session, allowedRoles: StaffRole[]) {
+  const isAllowed = allowedRoles.length === 0 || session.roles.includes("admin") ||
+    allowedRoles.some((role) => session.roles.includes(role));
+  if (!isAllowed) throw new HttpError(403, "Your portal doesn't have access to this");
+}
+
 const secured = (allowedRoles: StaffRole[], handler: Handler) => async (req: Request, res: Response) => {
   try {
     const session = await authenticate(req);
-    const isAllowed = allowedRoles.length === 0 || session.roles.includes("admin") ||
-      allowedRoles.some((role) => session.roles.includes(role));
-    if (!isAllowed) throw new HttpError(403, "Your portal doesn't have access to this");
+    assertAllowed(session, allowedRoles);
     res.json(await handler(req, session));
   } catch (error) {
     sendError(res, error);
@@ -161,6 +184,39 @@ function addCompetitor(state: AppState, competitor: Competitor) {
   state.competitors.push(competitor);
 }
 
+// A dancer who has competed is part of that contest's record, and taking them
+// out would change everyone else's results. Couples are stored as "lead_follow".
+function assertCanDelete(state: AppState, competitor: Competitor) {
+  const { bib, name } = competitor;
+  const isDancerIn = (id: string) => id.split("_").includes(bib);
+
+  const score = state.scores.find((s) => isDancerIn(s.competitorBib));
+  const result = (state.settings.completedResults || []).find((r) => r.rankings.some((ranking) => isDancerIn(ranking.bib)));
+  const contestName = result?.name || state.heats.find((h) => h.id === score?.heatId)?.name;
+  if (contestName) {
+    throw new HttpError(400, `${name} competed in ${contestName}, so deleting them would change its results. Delete that contest first.`);
+  }
+
+  const { currentHeatId, queuedHeatId } = state.settings;
+  const runningHeat = state.heats.find((h) =>
+    (h.id === currentHeatId || h.id === queuedHeatId) &&
+    [...h.competitorBibs, ...(h.unpairedBibs || []), ...(h.finalistBibs || [])].some(isDancerIn));
+  if (runningHeat) {
+    throw new HttpError(400, `${name} is on the check-in sheet for ${runningHeat.name}. Scratch them there instead.`);
+  }
+}
+
+function deleteCompetitor(state: AppState, competitor: Competitor) {
+  const isNotDancer = (id: string) => !id.split("_").includes(competitor.bib);
+  state.competitors = state.competitors.filter((c) => c.bib !== competitor.bib);
+  state.heats.forEach((heat) => {
+    heat.competitorBibs = heat.competitorBibs.filter(isNotDancer);
+    if (heat.couples) heat.couples = heat.couples.filter((couple) => isNotDancer(couple.id));
+    if (heat.unpairedBibs) heat.unpairedBibs = heat.unpairedBibs.filter(isNotDancer);
+    if (heat.finalistBibs) heat.finalistBibs = heat.finalistBibs.filter(isNotDancer);
+  });
+}
+
 const SAMPLE_DANCERS_PER_ROLE = 5;
 
 // Sample dancers are named as such, so they can't be mistaken for real entries.
@@ -219,8 +275,7 @@ export function createApp() {
     }
   });
 
-  // A portal link connects a device without the gateway code. A device already
-  // in this community keeps its roles, so an Admin can open their own links.
+  // A portal link connects a device without the gateway code.
   app.post("/api/gateway/connect-link", async (req, res) => {
     try {
       const attemptKey = `connect:${getClientIp(req)}`;
@@ -233,15 +288,32 @@ export function createApp() {
         throw new HttpError(404, "This link is no longer active. Ask your organizer for a new one.");
       }
 
-      const community = (await communityRef(link.communityId).get()).data() as CommunityRecord;
-      if (community.status === "locked") {
-        throw new HttpError(403, "This gateway's subscription has lapsed", "gateway_locked");
-      }
-      const current = await authenticate(req).catch(() => null);
-      const session: Session = current?.communityId === link.communityId
-        ? current
-        : { uid: newDeviceId(), communityId: link.communityId, roles: [], epoch: community.sessionEpoch };
+      const session = await getLinkSession(req, link.communityId);
       res.json({ token: await issueSessionToken({ ...session, linkSlug: slug }) });
+    } catch (error) {
+      sendError(res, error);
+    }
+  });
+
+  // A QR code does the work of both the portal link and the passcode.
+  app.post("/api/gateway/connect-pass", async (req, res) => {
+    try {
+      const attemptKey = `connect:${getClientIp(req)}`;
+      await assertNotRateLimited(attemptKey);
+
+      const slug = String(req.body.slug || "").toLowerCase();
+      const role = req.body.role as StaffRole;
+      const link = slug ? (await gatewaySlugRef(slug).get()).data() : undefined;
+      const auth = link ? (await privateAuthRef(link.communityId).get()).data() : undefined;
+      const stored = PORTAL_PASS_ROLES.includes(role) ? auth?.portalPasses?.[role] : undefined;
+      const isMatch = !!stored && isSamePass(String(req.body.pass || ""), stored.pass);
+      if (!isMatch) await recordFailedAttempt(attemptKey);
+      if (!isMatch || stored.expiresAt <= Date.now()) {
+        throw new HttpError(403, "This QR code is no longer active. Enter the passcode, or ask your organizer for a new code.");
+      }
+
+      const session = await getLinkSession(req, link!.communityId);
+      res.json({ token: await issueSessionToken({ ...session, roles: addRole(session.roles, role), linkSlug: slug }) });
     } catch (error) {
       sendError(res, error);
     }
@@ -267,8 +339,7 @@ export function createApp() {
       await privateAuthRef(session.communityId).update({ [`readablePasscodes.${role}`]: passcode });
     }
 
-    const roles = session.roles.includes(role) ? session.roles : [...session.roles, role];
-    return { token: await issueSessionToken({ ...session, roles }) };
+    return { token: await issueSessionToken({ ...session, roles: addRole(session.roles, role) }) };
   }));
 
   app.post("/api/gateway/role-logout", secured([], async (req, session) => {
@@ -286,6 +357,21 @@ export function createApp() {
     const slug = await ensureGatewaySlug(session.communityId);
     const auth = (await privateAuthRef(session.communityId).get()).data();
     return { slug, passcodes: auth?.readablePasscodes || {} };
+  }));
+
+  // Reopening a portal's QR code shows the same code, so one already handed out
+  // keeps working unless the Admin chooses to replace it.
+  app.post("/api/gateway/portal-pass", secured(["admin"], async (req, session) => {
+    const role = req.body.role as StaffRole;
+    if (!PORTAL_PASS_ROLES.includes(role)) throw new HttpError(400, "This portal has no QR code");
+    return adminDb.runTransaction(async (tx) => {
+      const ref = privateAuthRef(session.communityId);
+      const stored = (await tx.get(ref)).data()?.portalPasses?.[role];
+      if (stored && stored.expiresAt > Date.now() && !req.body.replace) return stored;
+      const portalPass = generatePortalPass();
+      tx.update(ref, { [`portalPasses.${role}`]: portalPass });
+      return portalPass;
+    });
   }));
 
   app.post("/api/gateway/settings", secured(["admin"], async (req, session) => {
@@ -307,7 +393,11 @@ export function createApp() {
     const epoch = await adminDb.runTransaction(async (tx) => {
       const community = (await tx.get(communityRef(session.communityId))).data() as CommunityRecord;
       const nextEpoch = community.sessionEpoch + 1;
-      tx.update(privateAuthRef(session.communityId), { [`passcodes.${role}`]: hash, [`readablePasscodes.${role}`]: passcode });
+      tx.update(privateAuthRef(session.communityId), {
+        [`passcodes.${role}`]: hash,
+        [`readablePasscodes.${role}`]: passcode,
+        [`portalPasses.${role}`]: FieldValue.delete()
+      });
       tx.update(communityRef(session.communityId), { sessionEpoch: nextEpoch });
       return nextEpoch;
     });
@@ -320,13 +410,13 @@ export function createApp() {
       const community = (await tx.get(communityRef(session.communityId))).data() as CommunityRecord;
       const auth = (await tx.get(privateAuthRef(session.communityId))).data();
       const nextEpoch = community.sessionEpoch + 1;
-      // Portal links go with the code, so a leaked link stops working too.
+      // Portal links and QR codes go with the code, so a leaked one stops working too.
       const slug = generateGatewaySlug(community.name);
       if (auth?.gatewayCode) tx.delete(gatewayCodeRef(auth.gatewayCode));
       if (auth?.slug) tx.delete(gatewaySlugRef(auth.slug));
       tx.set(gatewayCodeRef(gatewayCode), { communityId: session.communityId });
       tx.set(gatewaySlugRef(slug), { communityId: session.communityId });
-      tx.update(privateAuthRef(session.communityId), { gatewayCode, slug });
+      tx.update(privateAuthRef(session.communityId), { gatewayCode, slug, portalPasses: FieldValue.delete() });
       tx.update(communityRef(session.communityId), { sessionEpoch: nextEpoch });
       return nextEpoch;
     });
@@ -335,6 +425,59 @@ export function createApp() {
       token: await issueSessionToken({ ...session, epoch })
     };
   }));
+
+  // Results spreadsheet
+  app.get("/api/sheets", secured(["admin"], async (_req, session) => {
+    const integration = (await integrationsRef(session.communityId).get()).data();
+    return { serviceAccountEmail: SHEETS_SERVICE_ACCOUNT, url: integration?.url || "", title: integration?.title || "" };
+  }));
+
+  // Connecting also tests the sheet, by setting up its Summary tab. A blank link disconnects it.
+  app.post("/api/sheets/connect", secured(["admin"], async (req, session) => {
+    const url = String(req.body.url || "").trim();
+    const setConnected = (isConnected: boolean) => withCommunitySettings(session.communityId, (settings) => {
+      settings.spreadsheetConnected = isConnected;
+    });
+    if (!url) {
+      await integrationsRef(session.communityId).delete();
+      await setConnected(false);
+      return { url: "", title: "" };
+    }
+
+    const spreadsheetId = parseSpreadsheetId(url);
+    if (!spreadsheetId) throw new HttpError(400, "Paste the full link from your Google Sheet's address bar");
+    const { title } = await prepareSpreadsheet(getSheetsClient(), spreadsheetId).catch((error) => {
+      console.error("Sheet connection failed", error);
+      throw new HttpError(400, describeSheetsError(error));
+    });
+    const connection = { spreadsheetId, title, url: `https://docs.google.com/spreadsheets/d/${spreadsheetId}/edit` };
+    await integrationsRef(session.communityId).set(connection);
+    await setConnected(true);
+    return { url: connection.url, title };
+  }));
+
+  // One contest, or with no heatId, every published contest.
+  app.post("/api/sheets/resave", secured(["scoring"], async (req, session) => {
+    const { heatId } = req.body;
+    const { settings } = await readCommunityState(session.communityId, []);
+    const published = settings.publishedHeatIds || [];
+    if (heatId && !published.includes(heatId)) throw new HttpError(400, "Publish this contest first");
+    if (!settings.spreadsheetConnected) throw new HttpError(400, "Connect a spreadsheet in Gateway Settings first");
+    return { queued: await enqueueSheetJobs(session.communityId, heatId ? [heatId] : published) };
+  }));
+
+  app.get("/api/sheets/workbook", async (req, res) => {
+    try {
+      const session = await authenticate(req);
+      assertAllowed(session, ["scoring"]);
+      const workbook = await buildWorkbook(await readCommunityState(session.communityId, "all"));
+      res.setHeader("Content-Type", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
+      res.setHeader("Content-Disposition", 'attachment; filename="swingscore-results.xlsx"');
+      res.send(workbook);
+    } catch (error) {
+      sendError(res, error);
+    }
+  });
 
   // Judges
   app.post("/api/judge/claim", secured(["judge"], async (req, session) => {
@@ -468,6 +611,19 @@ export function createApp() {
       return found;
     }, { scores: oldBib !== newBib ? "all" : undefined });
     return { success: true, competitor };
+  }));
+
+  app.post("/api/competitor/delete", secured(["competitor"], async (req, session) => {
+    const { bib } = req.body;
+    if (!bib) throw new HttpError(400, "Missing bib parameter");
+
+    await withCommunityState(session.communityId, (state) => {
+      const found = state.competitors.find((c) => c.bib === bib);
+      if (!found) throw new HttpError(404, "Competitor not found");
+      assertCanDelete(state, found);
+      deleteCompetitor(state, found);
+    }, { scores: "all" });
+    return { success: true };
   }));
 
   app.post("/api/heats/create", secured(["admin"], async (req, session) => {
@@ -648,7 +804,11 @@ export function createApp() {
   app.post("/api/settings", secured(["coordinator", "scoring"], async (req, session) => {
     assertSettingsAllowed(session, Object.keys(req.body));
 
+    let newlyPublished: string[] = [];
     const settings = await withCommunityState(session.communityId, (state) => {
+      const alreadyPublished = state.settings.publishedHeatIds || [];
+      newlyPublished = (req.body.publishedHeatIds || []).filter((id: string) => !alreadyPublished.includes(id));
+
       const oldHeatId = state.settings.currentHeatId;
       const newHeatId = req.body.currentHeatId;
       const isNewHeatActivated = newHeatId !== undefined && newHeatId !== oldHeatId && newHeatId !== null;
@@ -701,6 +861,8 @@ export function createApp() {
 
       return state.settings;
     });
+    // Publishing has worked by now, whatever happens with the spreadsheet.
+    await enqueueSheetJobs(session.communityId, newlyPublished).catch((error) => console.error("Couldn't queue a sheet save", error));
     return { success: true, settings };
   }));
 
@@ -710,7 +872,7 @@ export function createApp() {
     await withCommunityState(session.communityId, (state) => {
       state.heats = [];
       state.scores = [];
-      state.settings = { ...blankSettings(), eventName: state.settings.eventName };
+      state.settings = { ...blankSettings(), eventName: state.settings.eventName, spreadsheetConnected: !!state.settings.spreadsheetConnected };
       state.competitors.forEach((c) => {
         c.heatStatus = {};
         c.checkedIn = false;
@@ -725,7 +887,7 @@ export function createApp() {
       state.competitors = [];
       state.heats = [];
       state.scores = [];
-      state.settings = blankSettings();
+      state.settings = { ...blankSettings(), spreadsheetConnected: !!state.settings.spreadsheetConnected };
     }, { scores: "all" });
     return { success: true };
   }));

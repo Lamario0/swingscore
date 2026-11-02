@@ -8,6 +8,9 @@ const scryptAsync = promisify(scrypt) as (password: string, salt: string, keylen
 
 export const STAFF_ROLES: StaffRole[] = ["admin", "judge", "coordinator", "scoring", "competitor"];
 
+// The Admin portal has no QR code: full control stays behind the gateway code.
+export const PORTAL_PASS_ROLES: StaffRole[] = ["judge", "coordinator", "scoring", "competitor"];
+
 export interface Session {
   uid: string;
   communityId: string;
@@ -61,6 +64,20 @@ export function issueSessionToken({ uid, communityId, roles, epoch, judgeName, l
 }
 
 export const newDeviceId = () => `device-${randomUUID()}`;
+
+// A QR code signs staff in with this pass, so the passcode never appears in a
+// link. It lasts through a three-day event, and the Admin can replace it at any time.
+const PORTAL_PASS_LIFETIME_MS = 3 * 24 * 60 * 60 * 1000;
+
+export const generatePortalPass = () => ({
+  pass: randomCode(20),
+  expiresAt: Date.now() + PORTAL_PASS_LIFETIME_MS
+});
+
+export function isSamePass(pass: string, stored: string) {
+  const [a, b] = [pass, stored].map((value) => createHash("sha256").update(value).digest());
+  return timingSafeEqual(a, b);
+}
 
 // Portal links carry this instead of the gateway code. The community's name
 // makes them recognizable, and the random ending keeps them unguessable.

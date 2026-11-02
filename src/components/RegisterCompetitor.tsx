@@ -1,5 +1,5 @@
 import React, { useEffect, useRef, useState } from "react";
-import { UserPlus, Search, ListFilter, Users, PlusCircle, Sparkles, Edit, Save, X } from "lucide-react";
+import { UserPlus, Search, ListFilter, Users, PlusCircle, Edit, Save, Trash2, X } from "lucide-react";
 import { Competitor, Division, AppSettings, ContestEntryFields } from "../types";
 import { getAllContestEntries, getDivisionLockKey, getEntryLockKeys, validateContestEntries } from "../utils/partners";
 import ContestEntryInputs, { emptyContestEntries, contestEntriesFrom } from "./ContestEntryInputs";
@@ -9,17 +9,19 @@ type CompetitorDetails = { bib: string; name: string; email: string; division: s
 interface RegisterCompetitorProps {
   competitors: Competitor[];
   onRegister: (competitor: CompetitorDetails) => Promise<void>;
-  onAddSampleDancers: (division: string) => Promise<void>;
   onUpdateCompetitor?: (oldBib: string, updates: CompetitorDetails) => Promise<void>;
+  onDeleteCompetitor: (bib: string) => Promise<void>;
+  // Held by the App, because the footer's sample dancers go into this division too.
+  division: Division;
+  setDivision: (division: Division) => void;
   isDarkMode: boolean;
   settings: AppSettings;
 }
 
-export default function RegisterCompetitor({ competitors, onRegister, onAddSampleDancers, onUpdateCompetitor, isDarkMode, settings }: RegisterCompetitorProps) {
+export default function RegisterCompetitor({ competitors, onRegister, onUpdateCompetitor, onDeleteCompetitor, division, setDivision, isDarkMode, settings }: RegisterCompetitorProps) {
   const [bib, setBib] = useState("");
   const [name, setName] = useState("");
   const [email, setEmail] = useState("");
-  const [division, setDivision] = useState<Division>("Novice");
   const [role, setRole] = useState<"Lead" | "Follow">("Lead");
   const [entryFields, setEntryFields] = useState<ContestEntryFields>(emptyContestEntries());
   // When set, the sign-up form is editing this already-registered dancer.
@@ -29,6 +31,9 @@ export default function RegisterCompetitor({ competitors, onRegister, onAddSampl
   const [error, setError] = useState("");
   const [success, setSuccess] = useState("");
   const [loading, setLoading] = useState(false);
+  const [deletingBib, setDeletingBib] = useState("");
+  // Floats over the page, since the form's messages are out of sight on phones.
+  const [deleteError, setDeleteError] = useState("");
   // Phones show the form as a full-screen sheet over the list; larger screens
   // keep it beside the list, so this only matters below the lg breakpoint.
   const [isFormOpen, setIsFormOpen] = useState(false);
@@ -165,17 +170,19 @@ export default function RegisterCompetitor({ competitors, onRegister, onAddSampl
     }
   };
 
-  const handleAddSamples = async () => {
-    setError("");
+  const handleDelete = async (c: Competitor) => {
+    if (!window.confirm(`Delete ${c.name} (Bib ${c.bib})? This removes their registration and can't be undone.`)) return;
+    setDeleteError("");
     setSuccess("");
-    setLoading(true);
+    setDeletingBib(c.bib);
     try {
-      await onAddSampleDancers(division);
-      setSuccess(`Added 5 sample leaders and 5 sample followers to ${division}.`);
+      await onDeleteCompetitor(c.bib);
+      if (editingCompetitor?.bib === c.bib) resetForm();
+      setSuccess(`${c.name} (Bib ${c.bib}) was deleted.`);
     } catch (err: any) {
-      setError(err.message || "Failed to add sample dancers.");
+      setDeleteError(err.message || "Failed to delete this dancer.");
     } finally {
-      setLoading(false);
+      setDeletingBib("");
     }
   };
 
@@ -286,31 +293,49 @@ export default function RegisterCompetitor({ competitors, onRegister, onAddSampl
           {/* Phones: one card per dancer, tapped to edit */}
           <div id="competitor-cards" className="lg:hidden space-y-2">
             {filtered.map((c) => (
-              <button
+              <div
                 key={c.bib}
-                type="button"
-                id={`edit-dancer-${c.bib}`}
-                disabled={!onUpdateCompetitor}
-                onClick={() => handleStartEdit(c)}
-                className={`w-full min-h-[60px] p-3 rounded-xl border text-left flex items-center gap-3 transition-all ${
+                className={`w-full min-h-[60px] rounded-xl border flex items-stretch transition-all ${
                   editingCompetitor?.bib === c.bib
                     ? "border-violet-500 bg-violet-500/10"
-                    : isDarkMode ? "bg-slate-950/40 border-slate-800 active:bg-slate-800" : "bg-slate-50 border-slate-200 active:bg-slate-100"
+                    : isDarkMode ? "bg-slate-950/40 border-slate-800" : "bg-slate-50 border-slate-200"
                 }`}
               >
-                <span className="font-mono font-bold text-violet-500 text-sm w-9 flex-shrink-0">{c.bib}</span>
-                <span className="flex-1 min-w-0">
-                  <span className="block text-sm font-semibold truncate">{c.name}</span>
-                  <span className="flex items-center gap-1.5 mt-1 flex-wrap">
-                    <span className={`px-2 py-0.5 rounded-full text-[10px] font-semibold border ${getDivisionClass(c.division)}`}>{c.division}</span>
-                    <span className={`px-2 py-0.5 rounded-full text-[10px] font-semibold ${getRoleClass(c.role)}`}>{c.role}</span>
+                <button
+                  type="button"
+                  id={`edit-dancer-${c.bib}`}
+                  disabled={!onUpdateCompetitor}
+                  onClick={() => handleStartEdit(c)}
+                  className={`flex-1 min-w-0 p-3 rounded-l-xl text-left flex items-center gap-3 transition-all ${isDarkMode ? "active:bg-slate-800" : "active:bg-slate-100"}`}
+                >
+                  <span className="font-mono font-bold text-violet-500 text-sm w-9 flex-shrink-0">{c.bib}</span>
+                  <span className="flex-1 min-w-0">
+                    <span className="block text-sm font-semibold truncate">{c.name}</span>
+                    <span className="flex items-center gap-1.5 mt-1 flex-wrap">
+                      <span className={`px-2 py-0.5 rounded-full text-[10px] font-semibold border ${getDivisionClass(c.division)}`}>{c.division}</span>
+                      <span className={`px-2 py-0.5 rounded-full text-[10px] font-semibold ${getRoleClass(c.role)}`}>{c.role}</span>
+                    </span>
+                    {(c.jjSecond || c.strictlySwing || c.routine) && (
+                      <span className="block mt-1 text-[10px] text-slate-400">{renderOtherEntries(c)}</span>
+                    )}
                   </span>
-                  {(c.jjSecond || c.strictlySwing || c.routine) && (
-                    <span className="block mt-1 text-[10px] text-slate-400">{renderOtherEntries(c)}</span>
-                  )}
-                </span>
-                {onUpdateCompetitor && <Edit className="w-4 h-4 text-slate-400 flex-shrink-0" />}
-              </button>
+                  {onUpdateCompetitor && <Edit className="w-4 h-4 text-slate-400 flex-shrink-0" />}
+                </button>
+                {onUpdateCompetitor && (
+                  <button
+                    type="button"
+                    id={`delete-dancer-${c.bib}`}
+                    disabled={deletingBib === c.bib}
+                    onClick={() => handleDelete(c)}
+                    aria-label={`Delete ${c.name}`}
+                    className={`w-12 flex-shrink-0 rounded-r-xl border-l flex items-center justify-center text-slate-400 hover:text-rose-500 active:text-rose-500 transition-all disabled:opacity-50 ${
+                      isDarkMode ? "border-slate-800" : "border-slate-200"
+                    }`}
+                  >
+                    <Trash2 className="w-4 h-4" />
+                  </button>
+                )}
+              </div>
             ))}
             {filtered.length === 0 && (
               <p className="p-6 text-center text-xs text-slate-500">No dancers found. Tap Add Dancer to register someone.</p>
@@ -328,7 +353,7 @@ export default function RegisterCompetitor({ competitors, onRegister, onAddSampl
                   <th className="p-3">Division</th>
                   <th className="p-3">Role</th>
                   <th className="p-3">Other Entries</th>
-                  {onUpdateCompetitor && <th className="p-3 text-right">Edit</th>}
+                  {onUpdateCompetitor && <th className={`p-3 text-right sticky right-0 ${isDarkMode ? "bg-slate-800" : "bg-slate-50"}`}>Actions</th>}
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-200 dark:divide-slate-800 text-xs">
@@ -356,7 +381,7 @@ export default function RegisterCompetitor({ competitors, onRegister, onAddSampl
                         {!c.jjSecond && !c.strictlySwing && !c.routine && "—"}
                       </td>
                       {onUpdateCompetitor && (
-                        <td className="p-3 text-right">
+                        <td className={`p-3 text-right whitespace-nowrap sticky right-0 ${isDarkMode ? "bg-slate-900" : "bg-white"}`}>
                           <button
                             type="button"
                             onClick={() => handleStartEdit(c)}
@@ -364,6 +389,16 @@ export default function RegisterCompetitor({ competitors, onRegister, onAddSampl
                           >
                             <Edit className="w-3 h-3" />
                             Edit
+                          </button>
+                          <button
+                            type="button"
+                            id={`delete-dancer-row-${c.bib}`}
+                            disabled={deletingBib === c.bib}
+                            onClick={() => handleDelete(c)}
+                            className="ml-1.5 inline-flex items-center gap-1 px-2 py-1 rounded-lg text-[10px] font-bold border border-slate-200 dark:border-slate-700 text-slate-500 hover:text-rose-500 hover:border-rose-500/40 transition-all disabled:opacity-50"
+                          >
+                            <Trash2 className="w-3 h-3" />
+                            Delete
                           </button>
                         </td>
                       )}
@@ -386,6 +421,15 @@ export default function RegisterCompetitor({ competitors, onRegister, onAddSampl
       {success && !isFormOpen && (
         <div id="registration-saved-note" role="status" className="lg:hidden fixed top-3 inset-x-4 z-40 p-3 rounded-xl bg-green-600 text-white text-xs font-semibold shadow-xl">
           {success}
+        </div>
+      )}
+
+      {deleteError && (
+        <div id="dancer-delete-error" role="alert" className="fixed top-3 inset-x-4 lg:inset-x-auto lg:right-4 lg:w-96 z-40 p-3 rounded-xl bg-rose-600 text-white text-xs font-semibold shadow-xl flex items-start gap-2">
+          <span className="flex-1">{deleteError}</span>
+          <button type="button" onClick={() => setDeleteError("")} aria-label="Dismiss" className="flex-shrink-0">
+            <X className="w-4 h-4" />
+          </button>
         </div>
       )}
 
@@ -590,18 +634,6 @@ export default function RegisterCompetitor({ competitors, onRegister, onAddSampl
                 className="w-full py-2 rounded-xl border border-slate-200 dark:border-slate-700 text-xs font-semibold text-slate-500 hover:text-slate-300 transition-all"
               >
                 Cancel Editing
-              </button>
-            )}
-            {!editingCompetitor && (
-              <button
-                id="add-sample-dancers-btn"
-                type="button"
-                onClick={handleAddSamples}
-                disabled={loading}
-                className="w-full py-2 rounded-xl border border-slate-200 dark:border-slate-700 text-xs font-semibold text-slate-500 hover:text-violet-500 hover:border-violet-500/40 flex items-center justify-center gap-2 transition-all disabled:opacity-50 disabled:cursor-not-allowed"
-              >
-                <Sparkles className="w-3.5 h-3.5" />
-                Generate 5 Sample Leaders &amp; 5 Followers
               </button>
             )}
           </form>

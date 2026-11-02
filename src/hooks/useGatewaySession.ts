@@ -2,7 +2,7 @@ import { useCallback, useEffect, useState } from "react";
 import { onIdTokenChanged, signInWithCustomToken, signOut, type User } from "firebase/auth";
 import { clearIndexedDbPersistence, terminate } from "firebase/firestore";
 import { auth, db } from "../firebase";
-import { GatewaySession, StaffRole } from "../types";
+import { GatewaySession, StaffRole, ViewRole } from "../types";
 import { apiRequest, SESSION_EXPIRED_EVENT } from "../utils/api";
 
 async function readSession(user: User): Promise<GatewaySession | null> {
@@ -46,6 +46,11 @@ export function useGatewaySession() {
     await applyToken(token);
   }, [applyToken]);
 
+  const connectWithPass = useCallback(async (slug: string, role: ViewRole, pass: string) => {
+    const { token } = await apiRequest("/api/gateway/connect-pass", { slug, role, pass });
+    await applyToken(token);
+  }, [applyToken]);
+
   const loginRole = useCallback(async (role: StaffRole, passcode: string) => {
     const { token } = await apiRequest("/api/gateway/role-login", { role, passcode });
     await applyToken(token);
@@ -71,5 +76,5 @@ export function useGatewaySession() {
     return () => window.removeEventListener(SESSION_EXPIRED_EVENT, leaveGateway);
   }, [leaveGateway]);
 
-  return { session, isReady, connect, connectWithLink, loginRole, logoutRole, applyToken, leaveGateway };
+  return { session, isReady, connect, connectWithLink, connectWithPass, loginRole, logoutRole, applyToken, leaveGateway };
 }

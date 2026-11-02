@@ -2,7 +2,7 @@ import { ViewRole } from "../types";
 
 // Staff and spectators reach their portal through a link the Admin shares, such
 // as /g/westies-k3f9mp/judge, so only the Admin ever needs the gateway code.
-const LINKED_PORTALS = {
+export const LINKED_PORTALS = {
   judge: "judge",
   coordinator: "coordinator",
   registration: "competitor",
@@ -20,3 +20,10 @@ export function parsePortalLink(pathname: string): { slug: string; role: ViewRol
 
 export const getPortalLink = (slug: string, portal: LinkedPortal) =>
   `${window.location.origin}/g/${slug}/${portal}`;
+
+// A QR code's pass travels after the #, which browsers never send to a server,
+// so it stays out of request logs. The app removes it from the address on arrival.
+export const getPassLink = (slug: string, portal: LinkedPortal, pass: string) =>
+  `${getPortalLink(slug, portal)}#pass=${pass}`;
+
+export const readPortalPass = (hash: string) => new URLSearchParams(hash.slice(1)).get("pass") || "";
