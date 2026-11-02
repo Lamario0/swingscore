@@ -25,7 +25,7 @@ export interface CompetitorResult {
   isAlternate?: boolean;
   alternateRank?: number;
   tieGroup?: number; // set when scores can't separate dancers at a cut line
-  isChiefCounted: boolean; // a side uses all of the Chief Judge's scores or none
+  isChiefCounted: boolean; // the Chief Judge's scores are on this side, counted or settling ties
   isTieSettledByChief?: boolean; // tied with another dancer until the Chief Judge decided
   majorityCalculatedRank?: number; // WSDC relative placement rank
 }
@@ -226,9 +226,12 @@ export function calculateHeatResults(
   // judge's placements come from the order of their scores.
   const ranksByPlacement = judgingStyle === "placement" || (judgingStyle === "raw" && heat.heatType === "Finals");
 
-  // Scores the sheet with or without the Chief Judge. Only scores rank dancers:
-  // those they can't separate share a rank, and bib order just lists them.
-  const scoreUnits = (isChiefCounted: boolean): CompetitorResult[] => {
+  // Scores the sheet with the Chief Judge left out, settling only ties, or
+  // counted like any judge. Only scores rank dancers: those they can't separate
+  // share a rank, and bib order just lists them.
+  type ChiefUse = "none" | "tiebreak" | "counted";
+  const scoreUnits = (chiefUse: ChiefUse): CompetitorResult[] => {
+    const isChiefCounted = chiefUse !== "none";
     const doesChiefBreakTies = isChiefCounted && isChiefWeighted;
 
     // 3. Map units to their results
@@ -263,8 +266,10 @@ export function calculateHeatResults(
         };
       });
 
-      // Aggregate totals and counts from resolved scoresByJudge
+      // Aggregate totals and counts from resolved scoresByJudge. A tie-breaking
+      // Chief Judge is shown but left out of every total.
       Object.keys(scoresByJudge).forEach((judgeId) => {
+        if (chiefUse === "tiebreak" && judgeId === chiefJudgeName) return;
         const s = scoresByJudge[judgeId];
         if (s.score > 0) {
           totalScore += s.score;
@@ -418,38 +423,23 @@ export function calculateHeatResults(
     return results;
   };
 
-  // A side uses all of the Chief Judge's scores or none of them. They're needed
-  // when fewer than two other judges score the side (one judge alone can't be
-  // the whole panel), or when the other judges tie. Manual toggles override that.
+  // The Chief Judge's scores count in two cases only: they're the only judge
+  // scoring this side, or the other judges' scores tie. A tie is settled by the
+  // Chief Judge's score alone, so they never change the order of anyone the
+  // other judges separated. Show Scores puts their scores on the sheet the same
+  // way, without counting them.
   const hasChiefScores = heatScores.some((s) => s.judgeId === chiefJudgeName && units.some((u) => u.bib === s.competitorBib));
-  if (!hasChiefScores || !isChiefIncluded || chiefShownOption === false) return scoreUnits(false);
+  if (!hasChiefScores || !isChiefIncluded || chiefShownOption === false) return scoreUnits("none");
   const otherJudgeCount = judges.filter((judgeId) => judgeId !== chiefJudgeName).length;
-  if (otherJudgeCount < 2) return scoreUnits(true);
+  if (otherJudgeCount === 0) return scoreUnits("counted");
 
-  // Dancers the other judges tied, whichever way that's counted for the round
-  const withoutChief = scoreUnits(false);
+  // Finals have no cut line, so only a shared placement is a tie there.
+  const withoutChief = scoreUnits("none");
   const isFinalsRound = heat.heatType === "Finals";
-  const getTieKey = (r: CompetitorResult) => (isFinalsRound ? r.rank : r.tieGroup);
-  const tiedWithoutChief = withoutChief.filter((r) =>
-    getTieKey(r) !== undefined && withoutChief.some((other) => other !== r && getTieKey(other) === getTieKey(r))
+  const hasTies = withoutChief.some((r) =>
+    (!isFinalsRound && r.tieGroup !== undefined) || withoutChief.some((other) => other !== r && other.rank === r.rank)
   );
-  if (chiefShownOption !== true && !(isChiefWeighted && tiedWithoutChief.length > 0)) return withoutChief;
-
-  // Adding the Chief Judge's scores can separate them through the totals alone,
-  // which is still a tie the Chief Judge settled.
-  const withChief = scoreUnits(true);
-  tiedWithoutChief.forEach((tied) => {
-    const res = withChief.find((r) => r.competitor.bib === tied.competitor.bib);
-    if (!res) return;
-    const wasSettled = isFinalsRound
-      ? !tiedWithoutChief.some((other) =>
-          other !== tied && getTieKey(other) === getTieKey(tied) &&
-          withChief.find((r) => r.competitor.bib === other.competitor.bib)?.rank === res.rank
-        )
-      : res.tieGroup === undefined;
-    if (wasSettled) res.isTieSettledByChief = true;
-  });
-  return withChief;
+  return chiefShownOption === true || (isChiefWeighted && hasTies) ? scoreUnits("tiebreak") : withoutChief;
 }
 
 export function getContestOptions(settings: AppSettings | undefined, heatId: string): ContestOptions {

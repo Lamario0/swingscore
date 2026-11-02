@@ -644,7 +644,7 @@ export default function ScoringDashboard({ communityId, settings, competitors, h
                             </div>
                           ))}
                         </div>
-                        <p className="text-[10px] text-slate-400 mt-2">CJ Weighted Scores lets their score settle a tie.</p>
+                        <p className="text-[10px] text-slate-400 mt-2">Their scores count only when they're the only judge scoring a side, or to settle a tie with CJ Weighted Scores on. Show Scores lists them without counting them.</p>
                       </div>
 
                       {matrix.tieGroups.length > 0 && (

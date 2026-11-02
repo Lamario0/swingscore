@@ -78,15 +78,51 @@ test("a raw-scored Prelim still ranks by average", () => {
   assert.deepEqual(results.map((r) => [r.competitor.bib, r.rank]).slice(0, 2), [["1", 1], ["2", 2]]);
 });
 
-test("a split raw-scored Finals goes to the Chief Judge's score", () => {
-  const panel: AppSettings = { ...rawPanel, judgeNames: ["Judge A"], judgeRoles: ["Finals"] };
+// One Finals judge and the Chief Judge.
+const soloPanel: AppSettings = { ...rawPanel, judgeNames: ["Judge A"], judgeRoles: ["Finals"] };
+
+test("the Chief Judge never overrules a judge whose scores don't tie", () => {
   const scores = [
-    score("Judge A", "1", 81.25), score("Judge A", "2", 78.25),
-    score("Chief Judge", "1", 79), score("Chief Judge", "2", 81.25)
+    score("Judge A", "1", 81.25), score("Judge A", "2", 78.25), score("Judge A", "3", 70),
+    score("Chief Judge", "1", 79), score("Chief Judge", "2", 81.25), score("Chief Judge", "3", 90)
   ];
-  const results = getContestOutcome(heat, competitors, scores, panel).results.filter((r) => r.competitor.bib !== "3");
-  assert.deepEqual(results.map((r) => [r.competitor.bib, r.rank]), [["2", 1], ["1", 2]]);
-  assert.ok(results.every((r) => r.isTieSettledByChief));
+  const { results } = getContestOutcome(heat, competitors, scores, soloPanel);
+  assert.deepEqual(results.map((r) => [r.competitor.bib, r.rank]), [["1", 1], ["2", 2], ["3", 3]]);
+  assert.ok(results.every((r) => !r.isTieSettledByChief && !r.isChiefCounted));
+});
+
+test("the Chief Judge settles a tie and leaves everyone else in place", () => {
+  const scores = [
+    score("Judge A", "1", 90), score("Judge A", "2", 80), score("Judge A", "3", 80),
+    score("Chief Judge", "1", 60), score("Chief Judge", "2", 70), score("Chief Judge", "3", 95)
+  ];
+  const { results } = getContestOutcome(heat, competitors, scores, soloPanel);
+  assert.deepEqual(results.map((r) => [r.competitor.bib, r.rank]), [["1", 1], ["3", 2], ["2", 3]]);
+  assert.deepEqual(results.filter((r) => r.isTieSettledByChief).map((r) => r.competitor.bib).sort(), ["2", "3"]);
+  // Their scores show on the sheet but stay out of the averages.
+  assert.equal(results.find((r) => r.competitor.bib === "3")!.averageScore, 80);
+});
+
+test("the Chief Judge's scores count when nobody else judges that side", () => {
+  const dancers: Competitor[] = [
+    ...competitors,
+    ...["4", "5"].map((bib) => ({ bib, name: `Dancer ${bib}`, division: "Novice", role: "Follow" as const, checkedIn: true, heatStatus: { h: { checkedIn: true } } }))
+  ];
+  const prelim: Heat = { ...heat, name: "Novice Prelim", heatType: "Prelim", role: "Mixed", competitorBibs: ["1", "2", "4", "5"] };
+  const panel: AppSettings = { ...settings("raw"), judgeNames: ["Judge A"], judgeRoles: ["Leaders"], chiefJudgeRole: "Both" };
+  const scores = [
+    score("Judge A", "1", 90), score("Judge A", "2", 80),
+    score("Chief Judge", "1", 70), score("Chief Judge", "2", 95),
+    score("Chief Judge", "4", 60), score("Chief Judge", "5", 85)
+  ];
+  const { results } = getContestOutcome(prelim, dancers, scores, panel);
+  const rankOf = (bib: string) => results.find((r) => r.competitor.bib === bib)!.rank;
+  // Leaders follow Judge A alone; followers have only the Chief Judge.
+  assert.deepEqual([rankOf("1"), rankOf("2")], [1, 2]);
+  assert.deepEqual([rankOf("5"), rankOf("4")], [1, 2]);
+
+  const withoutChief = getContestOutcome(prelim, dancers, scores, { ...panel, contestOptions: { h: { includeChiefScores: false } } });
+  assert.ok(withoutChief.results.filter((r) => r.competitor.role === "Follow").every((r) => r.rank === 1));
 });
 
 test("relative placements list each judge's placement, best first", () => {

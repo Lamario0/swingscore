@@ -1555,9 +1555,17 @@ export default function JudgePortal({
         <div className={`lg:hidden fixed bottom-0 inset-x-0 z-30 border-t px-4 pt-3 pb-[max(0.75rem,env(safe-area-inset-bottom))] flex items-center justify-between gap-3 ${
           isDarkMode ? "bg-slate-900 border-slate-800" : "bg-white border-slate-200"
         }`}>
-          <span className={`text-sm font-bold font-mono ${isSheetComplete ? "text-green-500" : "text-amber-500"}`}>
-            {scoredCount} / {heatCompetitors.length} scored
-          </span>
+          <div id="judge-mobile-progress" className="min-w-0 font-mono">
+            <span className={`block text-sm font-bold ${isSheetComplete ? "text-green-500" : "text-amber-500"}`}>
+              {scoredCount} / {heatCompetitors.length} scored
+            </span>
+            {showQuotas && quotaStatuses.map(({ quota, yesCount, altCount, isMet }) => (
+              <span key={quota.side || "all"} className={`block text-[11px] font-bold ${isMet ? "text-green-500" : unmetQuotaColor}`}>
+                {quota.side && quotaStatuses.length > 1 ? `${quota.side === "Lead" ? "Leaders" : "Followers"}: ` : ""}
+                Callbacks {yesCount}/{quota.callbackCount} · Alts {altCount}/{quota.alternateCount}
+              </span>
+            ))}
+          </div>
           <button
             id="judge-finalize-btn-mobile"
             disabled={!canFinalize}
@@ -1611,7 +1619,7 @@ export default function JudgePortal({
                     </h3>
                     {showQuotas && (
                       <span className={`text-[11px] font-bold font-mono text-right ${isMet ? "text-green-500" : unmetQuotaColor}`}>
-                        {yesCount}/{quota.callbackCount} · Alts {altCount}/{quota.alternateCount}
+                        Callbacks {yesCount}/{quota.callbackCount} · Alts {altCount}/{quota.alternateCount}
                       </span>
                     )}
                   </div>

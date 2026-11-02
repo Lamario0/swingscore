@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useRef, useMemo } from "react";
 import { Shield, Sparkles, RefreshCw, Trash2, PlusCircle, CheckSquare, Settings, AlertTriangle, Play, Eye, EyeOff, Lock, Unlock, Trophy, Calendar, ArrowUp, ArrowDown, Plus, ChevronDown, ChevronUp, SortAsc, Scissors, Edit, X, FileText, Award, ExternalLink } from "lucide-react";
 import { Competitor, Heat, JudgingStyle, AppSettings, ScoreRecord, CallbackValue, CompletedContestResult, ContestEntryFields } from "../types";
-import { calculateHeatResults, checkSheetQuota, formatRelativePlacements, getJudgeHeatCompetitors, getQueuedPromotion, getSheetQuotas } from "../utils/calculations";
+import { calculateHeatResults, checkSheetQuota, formatRelativePlacements, getContestOptions, getJudgeHeatCompetitors, getQueuedPromotion, getSheetQuotas } from "../utils/calculations";
 import { buildRegisteredCouples, findRegisteredPartner, getDisplayBib, getDivisionLockKey, getEntrantSides, isActiveInHeat, isCouplesHeat, isPartneredContest, isRegisteredFor, projectCompetitorsForHeat, roleUpdateForEntry, showsBibs, validateContestEntries } from "../utils/partners";
 import ContestEntryInputs, { emptyContestEntries, contestEntriesFrom } from "./ContestEntryInputs";
 
@@ -45,6 +45,11 @@ interface AdminPanelProps {
   isDarkMode: boolean;
   onUpdateCompetitor?: (oldBib: string, updates: { bib: string; name: string; email?: string; division: string; role: "Lead" | "Follow"; checkedIn?: boolean; scratched?: boolean; heatId?: string } & ContestEntryFields) => Promise<void>;
 }
+
+type GuideStatus = "todo" | "done" | "waiting" | null;
+
+const guideRing = (status: GuideStatus) =>
+  status === "todo" ? "ring-2 ring-amber-400" : status === "done" ? "ring-2 ring-green-500" : status === "waiting" ? "ring-2 ring-rose-500" : "";
 
 export default function AdminPanel({
   competitors,
@@ -171,6 +176,7 @@ export default function AdminPanel({
     heatsCatalog: true,
     scoringSheetEditor: true,
     heatFlowControls: true,
+    advanceCompleted: true,
   });
 
   // Local states for Judging Configuration
@@ -884,6 +890,27 @@ export default function AdminPanel({
     if (activeHeatControlTab === "next" && !isNextTabAvailable) setActiveHeatControlTab("live");
   }, [activeHeatControlTab, isNextTabAvailable]);
 
+  // Where the selected contest is in its setup. Each setup panel is outlined
+  // yellow when it's the next step, green once done, and red while the Floor
+  // Coordinator still has to finalize check-in. The yellow panel opens and the
+  // rest close whenever a step is reached; between steps the Admin can open
+  // and close them freely.
+  const isContestCreated = !!activeHeat || (isNextTab ? !!settings.nextContestConfigLocked : !!settings.contestConfigLocked);
+  const isScoringConfigured = !!activeHeat || (isNextTab ? !!settings.nextScoringConfirmed : !!settings.scoringConfirmed);
+  const guide: Record<"contestConfig" | "scoringConfig" | "createHeat" | "scoringSheetEditor", GuideStatus> = {
+    contestConfig: isContestCreated ? "done" : "todo",
+    scoringConfig: !isContestCreated ? null : isScoringConfigured ? "done" : "todo",
+    createHeat: !isScoringConfigured || !isContestCreated ? null : !activeHeat ? "todo" : isSheetCheckInFinalized ? "done" : "waiting",
+    scoringSheetEditor: isNextTab || !activeHeat ? null : isAllJudgesComplete ? "done" : "todo"
+  };
+  const guideStep = `${activeHeatControlTab}|${Object.values(guide).join("|")}`;
+  useEffect(() => {
+    setCollapsedCards((prev) => ({
+      ...prev,
+      ...Object.fromEntries(Object.entries(guide).map(([card, status]) => [card, status !== "todo"]))
+    }));
+  }, [guideStep]);
+
   const liveHeat = heats.find((h) => h.id === settings.currentHeatId);
   const isLiveHeatComplete = !!(
     liveHeat && 
@@ -944,6 +971,7 @@ export default function AdminPanel({
   // Mixed, non-Finals heats are computed as separate Leader/Follower fields
   // (see calculateHeatResults), so group the ranked list the same way.
   const liveHeatHasDistinctRoles = !!liveHeat && liveHeat.role === "Mixed" && !isCouplesHeat(liveHeat);
+  const liveHeatHasChiefScores = !!liveHeat && scores.some((s) => s.heatId === liveHeat.id && s.judgeId === (settings.chiefJudgeName || "Chief Judge"));
   const liveHeatRankedLeads = liveHeatHasDistinctRoles
     ? [...liveHeatResults].filter(r => r.competitor.role === "Lead").sort((a, b) => a.rank - b.rank)
     : [];
@@ -1221,15 +1249,10 @@ export default function AdminPanel({
           contestType,
           division,
           heatType,
-          contestConfigLocked: true
+          contestConfigLocked: true,
+          scoringConfirmed: false
         });
       }
-      // Collapse Contest Config & Expand Create Heat Sheet
-      setCollapsedCards((prev) => ({
-        ...prev,
-        contestConfig: true,
-        createHeat: false,
-      }));
     } catch (err) {
       alert("Failed to update contest parameters.");
     } finally {
@@ -1248,16 +1271,12 @@ export default function AdminPanel({
         nextDivision: division,
         nextHeatType: heatType,
         nextJudgingStyle: heatType === "Finals" ? "placement" : "raw",
-        nextContestConfigLocked: true
+        nextContestConfigLocked: true,
+        nextScoringConfirmed: false
       } as any);
       setNewHeatName(`${division} ${contestType} - ${heatType}`);
       setNewHeatRole("Mixed");
       setActiveHeatControlTab("next");
-      setCollapsedCards((prev) => ({
-        ...prev,
-        contestConfig: true,
-        createHeat: false
-      }));
     } catch (err) {
       console.error("Failed to queue the next contest:", err);
       alert("Failed to queue the next contest.");
@@ -1741,11 +1760,6 @@ export default function AdminPanel({
       setFormSuccess(`Heat "${newHeatName}" created successfully with ${selectedBibs.length} dancers! Registration for ${division} ${contestType} is now closed.`);
       setNewHeatName("");
       setSelectedBibs([]);
-      setCollapsedCards((prev) => ({
-        ...prev,
-        createHeat: true,
-        scoringSheetEditor: false
-      }));
     } catch (err: any) {
       setFormError(err.message || "Failed to create heat.");
     } finally {
@@ -1980,8 +1994,122 @@ export default function AdminPanel({
           </div>
         )}
 
-        {/* Contest Parameters Setup */}
+        {/* Orchestration & Permissions Control */}
         <div className={`p-6 rounded-2xl border transition-all ${isDarkMode ? "bg-slate-900 border-slate-800 text-slate-100" : "bg-white border-slate-200 shadow-sm text-slate-800"}`}>
+          <div 
+            className="flex items-center justify-between mb-3 cursor-pointer select-none"
+            onClick={() => toggleCard("portalAccess")}
+          >
+            <div className="flex items-center gap-2">
+              <Lock className="w-5 h-5 text-violet-500" />
+              <h2 className="text-base font-bold tracking-tight">Active Portal Access</h2>
+            </div>
+            {collapsedCards.portalAccess ? (
+              <ChevronDown className="w-4 h-4 text-slate-400" />
+            ) : (
+              <ChevronUp className="w-4 h-4 text-slate-400" />
+            )}
+          </div>
+
+          {!collapsedCards.portalAccess && (
+            <>
+              <p className="text-[11px] text-slate-400 mb-4 leading-relaxed">
+                Lock down or open up modules in real-time. Changes apply instantly to active dancer, staff, or public sessions.
+              </p>
+
+              <div className="space-y-2.5">
+                {/* Registration Permission */}
+                <div className="flex items-center justify-between p-2 rounded-xl border border-slate-200 dark:border-slate-800 bg-slate-50/50 dark:bg-slate-950/40">
+                  <div>
+                    <span className="text-xs font-bold block">Competitor Registration</span>
+                    <span className="text-[9px] text-slate-400">Registration system</span>
+                  </div>
+                  <button
+                    id="toggle-reg-permission-btn"
+                    onClick={() => onUpdateSettings({ registrationEnabled: settings.registrationEnabled === false ? true : false })}
+                    className={`px-2.5 py-1 text-[9px] font-bold rounded-lg uppercase tracking-wider border cursor-pointer ${
+                      settings.registrationEnabled !== false
+                        ? "bg-green-600/10 border-green-500/20 text-green-500"
+                        : "bg-rose-600/10 border-rose-500/20 text-rose-500"
+                    }`}
+                  >
+                    {settings.registrationEnabled !== false ? "Open" : "Locked"}
+                  </button>
+                </div>
+
+                {/* Check-In Permission */}
+                <div className="flex items-center justify-between p-2 rounded-xl border border-slate-200 dark:border-slate-800 bg-slate-50/50 dark:bg-slate-950/40">
+                  <div>
+                    <span className="text-xs font-bold block">Staff Check-In Portal</span>
+                    <span className="text-[9px] text-slate-400">Coordinator check-ins</span>
+                  </div>
+                  <button
+                    id="toggle-checkin-permission-btn"
+                    onClick={() => onUpdateSettings({ checkInEnabled: settings.checkInEnabled === false ? true : false })}
+                    className={`px-2.5 py-1 text-[9px] font-bold rounded-lg uppercase tracking-wider border cursor-pointer ${
+                      settings.checkInEnabled !== false
+                        ? "bg-green-600/10 border-green-500/20 text-green-500"
+                        : "bg-rose-600/10 border-rose-500/20 text-rose-500"
+                    }`}
+                  >
+                    {settings.checkInEnabled !== false ? "Open" : "Locked"}
+                  </button>
+                </div>
+
+                {/* Judging Permission */}
+                <div className="flex items-center justify-between p-2 rounded-xl border border-slate-200 dark:border-slate-800 bg-slate-50/50 dark:bg-slate-950/40">
+                  <div>
+                    <span className="text-xs font-bold block">Judges Live Scoring</span>
+                    <span className="text-[9px] text-slate-400">Allow sheet submissions</span>
+                  </div>
+                  <button
+                    id="toggle-judging-permission-btn"
+                    onClick={() => onUpdateSettings({ judgingEnabled: settings.judgingEnabled === false ? true : false })}
+                    className={`px-2.5 py-1 text-[9px] font-bold rounded-lg uppercase tracking-wider border cursor-pointer ${
+                      settings.judgingEnabled !== false
+                        ? "bg-green-600/10 border-green-500/20 text-green-500"
+                        : "bg-rose-600/10 border-rose-500/20 text-rose-500"
+                    }`}
+                  >
+                    {settings.judgingEnabled !== false ? "Open" : "Locked"}
+                  </button>
+                </div>
+
+                {/* Scoresheet Publication */}
+                <div className="flex items-center justify-between p-2 rounded-xl border border-violet-500/25 bg-violet-600/5 mt-1">
+                  <div>
+                    <span className="text-xs font-bold text-violet-500 block">Scoresheet Publication</span>
+                    <span className="text-[9px] text-slate-400 font-mono">Results Dashboard status</span>
+                  </div>
+                  <button
+                    id="toggle-publish-scoreboard-btn"
+                    onClick={() => onUpdateSettings({ isPublished: settings.isPublished === false ? true : false })}
+                    className={`px-2.5 py-1 text-[9px] font-bold rounded-lg uppercase tracking-wider border flex items-center gap-1.5 cursor-pointer ${
+                      settings.isPublished !== false
+                        ? "bg-violet-600 border-violet-600 text-white"
+                        : "bg-slate-800 border-slate-700 text-slate-300 hover:bg-slate-750"
+                    }`}
+                  >
+                    {settings.isPublished !== false ? (
+                      <>
+                        <Eye className="w-3.5 h-3.5" />
+                        Published
+                      </>
+                    ) : (
+                      <>
+                        <EyeOff className="w-3.5 h-3.5" />
+                        Draft
+                      </>
+                    )}
+                  </button>
+                </div>
+              </div>
+            </>
+          )}
+        </div>
+
+        {/* Contest Parameters Setup */}
+        <div className={`p-6 rounded-2xl border transition-all ${guideRing(guide.contestConfig)} ${isDarkMode ? "bg-slate-900 border-slate-800 text-slate-100" : "bg-white border-slate-200 shadow-sm text-slate-800"}`}>
           <div 
             className="flex items-center justify-between mb-3 cursor-pointer select-none"
             onClick={() => toggleCard("contestConfig")}
@@ -2177,123 +2305,8 @@ export default function AdminPanel({
           )}
         </div>
 
-        {/* Orchestration & Permissions Control */}
-        <div className={`p-6 rounded-2xl border transition-all ${isDarkMode ? "bg-slate-900 border-slate-800 text-slate-100" : "bg-white border-slate-200 shadow-sm text-slate-800"}`}>
-          <div 
-            className="flex items-center justify-between mb-3 cursor-pointer select-none"
-            onClick={() => toggleCard("portalAccess")}
-          >
-            <div className="flex items-center gap-2">
-              <Lock className="w-5 h-5 text-violet-500" />
-              <h2 className="text-base font-bold tracking-tight">Active Portal Access</h2>
-            </div>
-            {collapsedCards.portalAccess ? (
-              <ChevronDown className="w-4 h-4 text-slate-400" />
-            ) : (
-              <ChevronUp className="w-4 h-4 text-slate-400" />
-            )}
-          </div>
-
-          {!collapsedCards.portalAccess && (
-            <>
-              <p className="text-[11px] text-slate-400 mb-4 leading-relaxed">
-                Lock down or open up modules in real-time. Changes apply instantly to active dancer, staff, or public sessions.
-              </p>
-
-              <div className="space-y-2.5">
-                {/* Registration Permission */}
-                <div className="flex items-center justify-between p-2 rounded-xl border border-slate-200 dark:border-slate-800 bg-slate-50/50 dark:bg-slate-950/40">
-                  <div>
-                    <span className="text-xs font-bold block">Competitor Registration</span>
-                    <span className="text-[9px] text-slate-400">Registration system</span>
-                  </div>
-                  <button
-                    id="toggle-reg-permission-btn"
-                    onClick={() => onUpdateSettings({ registrationEnabled: settings.registrationEnabled === false ? true : false })}
-                    className={`px-2.5 py-1 text-[9px] font-bold rounded-lg uppercase tracking-wider border cursor-pointer ${
-                      settings.registrationEnabled !== false
-                        ? "bg-green-600/10 border-green-500/20 text-green-500"
-                        : "bg-rose-600/10 border-rose-500/20 text-rose-500"
-                    }`}
-                  >
-                    {settings.registrationEnabled !== false ? "Open" : "Locked"}
-                  </button>
-                </div>
-
-                {/* Check-In Permission */}
-                <div className="flex items-center justify-between p-2 rounded-xl border border-slate-200 dark:border-slate-800 bg-slate-50/50 dark:bg-slate-950/40">
-                  <div>
-                    <span className="text-xs font-bold block">Staff Check-In Portal</span>
-                    <span className="text-[9px] text-slate-400">Coordinator check-ins</span>
-                  </div>
-                  <button
-                    id="toggle-checkin-permission-btn"
-                    onClick={() => onUpdateSettings({ checkInEnabled: settings.checkInEnabled === false ? true : false })}
-                    className={`px-2.5 py-1 text-[9px] font-bold rounded-lg uppercase tracking-wider border cursor-pointer ${
-                      settings.checkInEnabled !== false
-                        ? "bg-green-600/10 border-green-500/20 text-green-500"
-                        : "bg-rose-600/10 border-rose-500/20 text-rose-500"
-                    }`}
-                  >
-                    {settings.checkInEnabled !== false ? "Open" : "Locked"}
-                  </button>
-                </div>
-
-                {/* Judging Permission */}
-                <div className="flex items-center justify-between p-2 rounded-xl border border-slate-200 dark:border-slate-800 bg-slate-50/50 dark:bg-slate-950/40">
-                  <div>
-                    <span className="text-xs font-bold block">Judges Live Scoring</span>
-                    <span className="text-[9px] text-slate-400">Allow sheet submissions</span>
-                  </div>
-                  <button
-                    id="toggle-judging-permission-btn"
-                    onClick={() => onUpdateSettings({ judgingEnabled: settings.judgingEnabled === false ? true : false })}
-                    className={`px-2.5 py-1 text-[9px] font-bold rounded-lg uppercase tracking-wider border cursor-pointer ${
-                      settings.judgingEnabled !== false
-                        ? "bg-green-600/10 border-green-500/20 text-green-500"
-                        : "bg-rose-600/10 border-rose-500/20 text-rose-500"
-                    }`}
-                  >
-                    {settings.judgingEnabled !== false ? "Open" : "Locked"}
-                  </button>
-                </div>
-
-                {/* Scoresheet Publication */}
-                <div className="flex items-center justify-between p-2 rounded-xl border border-violet-500/25 bg-violet-600/5 mt-1">
-                  <div>
-                    <span className="text-xs font-bold text-violet-500 block">Scoresheet Publication</span>
-                    <span className="text-[9px] text-slate-400 font-mono">Results Dashboard status</span>
-                  </div>
-                  <button
-                    id="toggle-publish-scoreboard-btn"
-                    onClick={() => onUpdateSettings({ isPublished: settings.isPublished === false ? true : false })}
-                    className={`px-2.5 py-1 text-[9px] font-bold rounded-lg uppercase tracking-wider border flex items-center gap-1.5 cursor-pointer ${
-                      settings.isPublished !== false
-                        ? "bg-violet-600 border-violet-600 text-white"
-                        : "bg-slate-800 border-slate-700 text-slate-300 hover:bg-slate-750"
-                    }`}
-                  >
-                    {settings.isPublished !== false ? (
-                      <>
-                        <Eye className="w-3.5 h-3.5" />
-                        Published
-                      </>
-                    ) : (
-                      <>
-                        <EyeOff className="w-3.5 h-3.5" />
-                        Draft
-                      </>
-                    )}
-                  </button>
-                </div>
-              </div>
-            </>
-          )}
-        </div>
-
-
         {/* Scoring Style */}
-        <div className={`p-6 rounded-2xl border transition-all ${isDarkMode ? "bg-slate-900 border-slate-800 text-slate-100" : "bg-white border-slate-200 shadow-sm text-slate-800"}`}>
+        <div className={`p-6 rounded-2xl border transition-all ${guideRing(guide.scoringConfig)} ${isDarkMode ? "bg-slate-900 border-slate-800 text-slate-100" : "bg-white border-slate-200 shadow-sm text-slate-800"}`}>
           <div 
             className="flex items-center justify-between mb-4 cursor-pointer select-none"
             onClick={() => toggleCard("scoringConfig")}
@@ -2609,17 +2622,17 @@ export default function AdminPanel({
                           nextJudgeNames: localJudgeNames,
                           nextJudgeRoles: localJudgeRoles,
                           nextChiefJudgeName: localChiefJudgeName,
-                          nextChiefJudgeRole: localChiefJudgeRole
+                          nextChiefJudgeRole: localChiefJudgeRole,
+                          nextScoringConfirmed: true
                         } : {
                           judgeNames: localJudgeNames,
                           judgeRoles: localJudgeRoles,
                           chiefJudgeName: localChiefJudgeName,
-                          chiefJudgeRole: localChiefJudgeRole
+                          chiefJudgeRole: localChiefJudgeRole,
+                          scoringConfirmed: true
                         };
                         await onUpdateSettings(updatePayload);
                         alert("Scoring & Judging configurations saved successfully.");
-                        // Collapse Scoring Config
-                        setCollapsedCards((prev) => ({ ...prev, scoringConfig: true }));
                       } catch (err) {
                         alert("Failed to save scoring configurations.");
                       } finally {
@@ -2637,7 +2650,7 @@ export default function AdminPanel({
           )}
         </div>
 
-        <div className={`p-6 rounded-2xl border transition-all ${isDarkMode ? "bg-slate-900 border-slate-800 text-slate-100" : "bg-white border-slate-200 shadow-sm text-slate-800"}`}>
+        <div className={`p-6 rounded-2xl border transition-all ${guideRing(guide.createHeat)} ${isDarkMode ? "bg-slate-900 border-slate-800 text-slate-100" : "bg-white border-slate-200 shadow-sm text-slate-800"}`}>
           <div 
             className="flex items-center justify-between mb-4 cursor-pointer select-none"
             onClick={() => toggleCard("createHeat")}
@@ -3263,7 +3276,7 @@ export default function AdminPanel({
       {/* Active Heat Editor (Full Width at Bottom) */}
       {activeHeatControlTab === "live" && (
         <>
-        <div className={`p-6 rounded-2xl border transition-all ${isDarkMode ? "bg-slate-900 border-slate-800 text-slate-100" : "bg-white border-slate-200 shadow-sm text-slate-800"}`}>
+        <div className={`p-6 rounded-2xl border transition-all ${guideRing(guide.scoringSheetEditor)} ${isDarkMode ? "bg-slate-900 border-slate-800 text-slate-100" : "bg-white border-slate-200 shadow-sm text-slate-800"}`}>
           <div className="flex items-center justify-between mb-4 flex-wrap gap-2">
             <div>
               <div className="flex items-center gap-2">
@@ -4546,7 +4559,7 @@ export default function AdminPanel({
 
     {/* Live Heat Rankings & Advancement (non-Finals only) */}
     {liveHeat && !liveHeatIsFinals && canCompleteHeat && (
-      <div className={`p-6 rounded-2xl border transition-all ${isDarkMode ? "bg-slate-900 border-slate-800 text-slate-100" : "bg-white border-slate-200 shadow-sm text-slate-800"}`}>
+      <div className={`p-6 rounded-2xl border transition-all ${guideRing("todo")} ${isDarkMode ? "bg-slate-900 border-slate-800 text-slate-100" : "bg-white border-slate-200 shadow-sm text-slate-800"}`}>
         <h2 className="text-sm font-bold tracking-tight mb-1 flex items-center gap-1.5">
           <Trophy className="w-4 h-4 text-violet-500" />
           Live Heat Rankings
@@ -4557,6 +4570,27 @@ export default function AdminPanel({
           <span className="text-amber-500 font-semibold">amber</span> rows are alternates, and{" "}
           <span className="text-slate-400 font-semibold">grey</span> rows did not pass.
         </p>
+
+        {liveHeatHasChiefScores && (
+          <label className="mb-4 flex items-start gap-2 text-[11px] text-slate-400 cursor-pointer select-none">
+            <input
+              id="live-chief-scores-toggle"
+              type="checkbox"
+              checked={getContestOptions(settings, liveHeat.id).includeChiefScores !== false}
+              onChange={(e) => onUpdateSettings({
+                contestOptions: {
+                  ...(settings.contestOptions || {}),
+                  [liveHeat.id]: { ...getContestOptions(settings, liveHeat.id), includeChiefScores: e.target.checked }
+                }
+              })}
+              className="mt-0.5 cursor-pointer"
+            />
+            <span>
+              <span className="font-semibold text-slate-300">Include {settings.chiefJudgeName || "Chief Judge"}'s Scores</span>
+              <span className="block">They count only when they're the only judge scoring a side, or to settle a tie.</span>
+            </span>
+          </label>
+        )}
 
         {liveHeatHasDistinctRoles ? (
           <div className="space-y-5">
@@ -4639,12 +4673,23 @@ export default function AdminPanel({
         (so the round above is no longer `liveHeat`), but its finalists haven't
         been carried into a Next Contest yet. */}
     {showAdvanceCompletedCard && lastCompletedResult && (
-      <div className={`p-6 rounded-2xl border transition-all ${isDarkMode ? "bg-slate-900 border-slate-800 text-slate-100" : "bg-white border-slate-200 shadow-sm text-slate-800"}`}>
-        <h2 className="text-sm font-bold tracking-tight mb-1 flex items-center gap-1.5">
-          <Trophy className="w-4 h-4 text-violet-500" />
-          Advance Last Completed Contest
-        </h2>
-        <p className="text-[11px] text-slate-400 mb-4 leading-relaxed">
+      <div className={`p-6 rounded-2xl border transition-all ${guideRing("done")} ${isDarkMode ? "bg-slate-900 border-slate-800 text-slate-100" : "bg-white border-slate-200 shadow-sm text-slate-800"}`}>
+        <button
+          type="button"
+          id="advance-completed-toggle"
+          onClick={() => toggleCard("advanceCompleted")}
+          aria-expanded={!collapsedCards.advanceCompleted}
+          className="w-full flex items-center justify-between gap-2 cursor-pointer select-none text-left"
+        >
+          <h2 className="text-sm font-bold tracking-tight flex items-center gap-1.5">
+            <Trophy className="w-4 h-4 text-violet-500" />
+            Advance Last Completed Contest
+          </h2>
+          {collapsedCards.advanceCompleted ? <ChevronDown className="w-4 h-4 text-slate-400" /> : <ChevronUp className="w-4 h-4 text-slate-400" />}
+        </button>
+        {!collapsedCards.advanceCompleted && (
+        <>
+        <p className="mt-1 text-[11px] text-slate-400 mb-4 leading-relaxed">
           <span className="font-semibold text-slate-300">{lastCompletedResult.name}</span> was completed at {lastCompletedResult.timestamp}.{" "}
           <span className="text-green-500 font-semibold">green</span> rows made the callback cut,{" "}
           <span className="text-amber-500 font-semibold">amber</span> rows are alternates, and{" "}
@@ -4724,6 +4769,8 @@ export default function AdminPanel({
               ))}
             </div>
           </div>
+        )}
+        </>
         )}
       </div>
     )}

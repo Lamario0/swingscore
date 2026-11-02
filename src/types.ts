@@ -132,6 +132,10 @@ export interface AppSettings {
   // fields for that slot (live vs queued) become read-only until the
   // matching Reset button clears the slot back to defaults.
   contestConfigLocked?: boolean;
+  // Scoring Configuration was confirmed for the Live or Next contest. Once its
+  // check-in sheet exists that step is done anyway.
+  scoringConfirmed?: boolean;
+  nextScoringConfirmed?: boolean;
   nextContestConfigLocked?: boolean;
   publishedHeatIds?: string[];
   contestOptions?: Record<string, ContestOptions>;
