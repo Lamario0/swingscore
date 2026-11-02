@@ -306,7 +306,10 @@ export function calculateHeatResults(
         qualified: false, // to be calculated
         isChiefCounted
       };
-      resObj.prelimPoints = getPrelimPoints(resObj);
+      // A tie-breaking Chief Judge stays out of the callback points too.
+      resObj.prelimPoints = getPrelimPoints(chiefUse === "tiebreak"
+        ? { scoresByJudge: Object.fromEntries(Object.entries(scoresByJudge).filter(([judgeId]) => judgeId !== chiefJudgeName)) }
+        : resObj);
       return resObj;
     });
 
@@ -423,19 +426,22 @@ export function calculateHeatResults(
     return results;
   };
 
-  // The Chief Judge's scores count in two cases only: they're the only judge
-  // scoring this side, or the other judges' scores tie. A tie is settled by the
-  // Chief Judge's score alone, so they never change the order of anyone the
-  // other judges separated. Show Scores puts their scores on the sheet the same
-  // way, without counting them.
+  // In a Finals, or on a side of their own (Leaders or Followers), the Chief
+  // Judge is one of the panel: their scores count, and settle a tie. Judging
+  // Both sides of an earlier round, they back up the other judges instead, so
+  // their scores count only where nobody else scores that side, or to settle a
+  // tie. That tie is settled by the Chief Judge's score alone, so they never
+  // change the order of anyone the other judges separated. Show Scores puts
+  // their scores on the sheet the same way, without counting them.
   const hasChiefScores = heatScores.some((s) => s.judgeId === chiefJudgeName && units.some((u) => u.bib === s.competitorBib));
   if (!hasChiefScores || !isChiefIncluded || chiefShownOption === false) return scoreUnits("none");
-  const otherJudgeCount = judges.filter((judgeId) => judgeId !== chiefJudgeName).length;
-  if (otherJudgeCount === 0) return scoreUnits("counted");
-
-  // Finals have no cut line, so only a shared placement is a tie there.
-  const withoutChief = scoreUnits("none");
   const isFinalsRound = heat.heatType === "Finals";
+  const isChiefBackingUp = !isFinalsRound && (settings?.chiefJudgeRole || "Both") === "Both";
+  const otherJudgeCount = judges.filter((judgeId) => judgeId !== chiefJudgeName).length;
+  if (!isChiefBackingUp || otherJudgeCount === 0) return scoreUnits("counted");
+
+  // Earlier rounds can also tie at a cut line.
+  const withoutChief = scoreUnits("none");
   const hasTies = withoutChief.some((r) =>
     (!isFinalsRound && r.tieGroup !== undefined) || withoutChief.some((other) => other !== r && other.rank === r.rank)
   );

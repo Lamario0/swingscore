@@ -2616,6 +2616,14 @@ export default function AdminPanel({
                     id="save-scoring-config-btn"
                     type="button"
                     onClick={async () => {
+                      // A Finals needs a panel of at least two, and the Chief Judge can be the second.
+                      const slotHeatType = isNextTab ? settings.nextHeatType : settings.heatType;
+                      const judgesFinals = (role: string) => role === "Finals" || role === "Both";
+                      const finalsPanelSize = localJudgeRoles.filter(judgesFinals).length + (judgesFinals(localChiefJudgeRole) ? 1 : 0);
+                      if (slotHeatType === "Finals" && finalsPanelSize < 2) {
+                        alert("A Finals needs at least 2 judges. Give another judge the Finals role, or set the Chief Judge to Finals or Both.");
+                        return;
+                      }
                       setLoading(true);
                       try {
                         const updatePayload = isNextTab ? {
@@ -4587,7 +4595,7 @@ export default function AdminPanel({
             />
             <span>
               <span className="font-semibold text-slate-300">Include {settings.chiefJudgeName || "Chief Judge"}'s Scores</span>
-              <span className="block">They count only when they're the only judge scoring a side, or to settle a tie.</span>
+              <span className="block">Judging Both sides, they count only where nobody else scores a side, or to settle a tie. Given one side, they count like any judge and settle ties.</span>
             </span>
           </label>
         )}

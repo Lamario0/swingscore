@@ -78,29 +78,54 @@ test("a raw-scored Prelim still ranks by average", () => {
   assert.deepEqual(results.map((r) => [r.competitor.bib, r.rank]).slice(0, 2), [["1", 1], ["2", 2]]);
 });
 
-// One Finals judge and the Chief Judge.
-const soloPanel: AppSettings = { ...rawPanel, judgeNames: ["Judge A"], judgeRoles: ["Finals"] };
-
-test("the Chief Judge never overrules a judge whose scores don't tie", () => {
+test("in a Finals the Chief Judge counts like any judge and settles the tie", () => {
+  const panel: AppSettings = { ...rawPanel, judgeNames: ["Judge A"], judgeRoles: ["Finals"] };
   const scores = [
-    score("Judge A", "1", 81.25), score("Judge A", "2", 78.25), score("Judge A", "3", 70),
-    score("Chief Judge", "1", 79), score("Chief Judge", "2", 81.25), score("Chief Judge", "3", 90)
+    score("Judge A", "1", 81.25), score("Judge A", "2", 78.25),
+    score("Chief Judge", "1", 79), score("Chief Judge", "2", 81.25)
   ];
-  const { results } = getContestOutcome(heat, competitors, scores, soloPanel);
-  assert.deepEqual(results.map((r) => [r.competitor.bib, r.rank]), [["1", 1], ["2", 2], ["3", 3]]);
+  const results = getContestOutcome(heat, competitors, scores, panel).results.filter((r) => r.competitor.bib !== "3");
+  assert.deepEqual(results.map((r) => [r.competitor.bib, r.rank]), [["2", 1], ["1", 2]]);
+  assert.ok(results.every((r) => r.isTieSettledByChief && r.isChiefCounted));
+});
+
+// A leaders prelim judged on Yes/No/Alt by Judge A and the Chief Judge.
+const prelim: Heat = { ...heat, name: "Novice Prelim", heatType: "Prelim" };
+const prelimPanel = (chiefJudgeRole: AppSettings["chiefJudgeRole"], callbackCount = 1): AppSettings => ({
+  ...settings("callback"), judgeNames: ["Judge A"], judgeRoles: ["Leaders"], chiefJudgeRole, callbackCount
+});
+const mark = (judgeId: string, competitorBib: string, isCallback: ScoreRecord["isCallback"]): ScoreRecord =>
+  ({ ...score(judgeId, competitorBib, 0), isCallback });
+const disagreement = [
+  mark("Judge A", "1", "Yes"), mark("Judge A", "2", "Alt 1"), mark("Judge A", "3", "No"),
+  mark("Chief Judge", "1", "No"), mark("Chief Judge", "2", "Yes"), mark("Chief Judge", "3", "No")
+];
+const order = (results: { competitor: { bib: string }; rank: number }[]) =>
+  [...results].sort((a, b) => a.rank - b.rank).map((r) => r.competitor.bib);
+
+test("a Chief Judge on both sides never overrules a judge whose scores don't tie", () => {
+  const { results } = getContestOutcome(prelim, competitors, disagreement, prelimPanel("Both"));
+  assert.deepEqual(order(results), ["1", "2", "3"]);
   assert.ok(results.every((r) => !r.isTieSettledByChief && !r.isChiefCounted));
 });
 
-test("the Chief Judge settles a tie and leaves everyone else in place", () => {
+test("a Chief Judge given one side counts like any judge on it", () => {
+  const { results } = getContestOutcome(prelim, competitors, disagreement, prelimPanel("Leaders"));
+  assert.deepEqual(order(results), ["2", "1", "3"]);
+  assert.ok(results.every((r) => r.isChiefCounted));
+});
+
+test("a Chief Judge on both sides settles a tie and leaves everyone else in place", () => {
   const scores = [
-    score("Judge A", "1", 90), score("Judge A", "2", 80), score("Judge A", "3", 80),
-    score("Chief Judge", "1", 60), score("Chief Judge", "2", 70), score("Chief Judge", "3", 95)
+    mark("Judge A", "1", "Yes"), mark("Judge A", "2", "No"), mark("Judge A", "3", "No"),
+    mark("Chief Judge", "1", "No"), mark("Chief Judge", "2", "No"), mark("Chief Judge", "3", "Yes")
   ];
-  const { results } = getContestOutcome(heat, competitors, scores, soloPanel);
-  assert.deepEqual(results.map((r) => [r.competitor.bib, r.rank]), [["1", 1], ["3", 2], ["2", 3]]);
+  const { results } = getContestOutcome(prelim, competitors, scores, prelimPanel("Both", 2));
+  assert.deepEqual(order(results), ["1", "3", "2"]);
+  assert.deepEqual(results.filter((r) => r.qualified).map((r) => r.competitor.bib).sort(), ["1", "3"]);
   assert.deepEqual(results.filter((r) => r.isTieSettledByChief).map((r) => r.competitor.bib).sort(), ["2", "3"]);
-  // Their scores show on the sheet but stay out of the averages.
-  assert.equal(results.find((r) => r.competitor.bib === "3")!.averageScore, 80);
+  // Their marks show on the sheet but stay out of the points.
+  assert.equal(results.find((r) => r.competitor.bib === "3")!.prelimPoints, 0);
 });
 
 test("the Chief Judge's scores count when nobody else judges that side", () => {
