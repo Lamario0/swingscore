@@ -229,6 +229,18 @@ export type StaffRole = "admin" | "judge" | "coordinator" | "scoring" | "competi
 
 export type GatewayStatus = "active" | "grace" | "locked";
 
+// A gateway as the platform owner's app sees it.
+export interface OwnerGateway {
+  communityId: string;
+  name: string;
+  status: GatewayStatus;
+  isMine: boolean;
+  createdAt?: number;
+  gatewayCode: string;
+  slug: string;
+  passcodes: Partial<Record<StaffRole, string>>;
+}
+
 // What this device is signed in as, carried in its Firebase token.
 export interface GatewaySession {
   communityId: string;

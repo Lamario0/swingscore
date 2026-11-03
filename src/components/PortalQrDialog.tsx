@@ -1,7 +1,8 @@
 import React, { useEffect, useMemo, useState } from "react";
 import { Check, Copy, RefreshCw, X } from "lucide-react";
 import qrcode from "qrcode-generator";
-import { apiRequest, copyText } from "../utils/api";
+import { apiRequest } from "../utils/api";
+import { copyText } from "../utils/clipboard";
 import { getPassLink, getPortalLink, LINKED_PORTALS, LinkedPortal } from "../utils/portalLinks";
 
 interface PortalQrDialogProps {

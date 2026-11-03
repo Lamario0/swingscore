@@ -10,8 +10,7 @@ if (!isLive) {
   process.env.FIREBASE_AUTH_EMULATOR_HOST ||= "127.0.0.1:9099";
 }
 
-const { FieldValue } = await import("firebase-admin/firestore");
-const { communityRef, createCommunity, gatewayCodeRef, hashPasscode, normalizeGatewayCode, privateAuthRef, STAFF_ROLES } = await import("../server/gateway");
+const { communityRef, createCommunity, gatewayCodeRef, normalizeGatewayCode, setRolePasscode, STAFF_ROLES } = await import("../server/gateway");
 
 const positional = args.filter((arg) => !arg.startsWith("--"));
 
@@ -22,13 +21,8 @@ if (args.includes("--reset-passcode")) {
   }
   const gateway = (await gatewayCodeRef(normalizeGatewayCode(code)).get()).data();
   if (!gateway) throw new Error("No gateway has that code");
-  await privateAuthRef(gateway.communityId).update({
-    [`passcodes.${role}`]: await hashPasscode(passcode),
-    [`readablePasscodes.${role}`]: passcode,
-    [`portalPasses.${role}`]: FieldValue.delete()
-  });
+  await setRolePasscode(gateway.communityId, role as any, passcode);
   const community = (await communityRef(gateway.communityId).get()).data()!;
-  await communityRef(gateway.communityId).update({ sessionEpoch: community.sessionEpoch + 1 });
   console.log(`Reset the ${role} passcode for ${community.name}. Every device in that community must reconnect.`);
 } else {
   const [name] = positional;

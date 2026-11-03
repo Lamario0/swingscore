@@ -9,10 +9,11 @@ import { describeSheetsError, enqueueSheetJobs, integrationsRef } from "./result
 import { buildWorkbook } from "./results/workbook";
 import {
   assertNotRateLimited, clearFailedAttempts, communityRef, ensureGatewaySlug, formatGatewayCode, gatewayCodeRef, gatewaySlugRef,
-  generateGatewayCode, generateGatewaySlug, generatePortalPass, hashPasscode, isSamePass, issueSessionToken, newDeviceId, normalizeGatewayCode,
-  PORTAL_PASS_ROLES, privateAuthRef, recordFailedAttempt, STAFF_ROLES, verifyPasscode, type CommunityRecord, type Session
+  generatePortalPass, isSamePass, issueSessionToken, newDeviceId, normalizeGatewayCode, PORTAL_PASS_ROLES, privateAuthRef,
+  recordFailedAttempt, rotateGatewayCode, setRolePasscode, STAFF_ROLES, verifyPasscode, type CommunityRecord, type Session
 } from "./gateway";
-import { autoPopulateHeats, blankSettings, HttpError, readCommunityState, setHeatStatus, withCommunitySettings, withCommunityState } from "./state";
+import { registerOwnerRoutes } from "./owner";
+import { autoPopulateHeats, blankSettings, HttpError, readCommunityState, sendError, setHeatStatus, withCommunitySettings, withCommunityState } from "./state";
 
 // Copies only the contest-entry fields present on `source`, clearing an
 // entry's details whenever it's unchecked.
@@ -123,15 +124,6 @@ const secured = (allowedRoles: StaffRole[], handler: Handler) => async (req: Req
     sendError(res, error);
   }
 };
-
-function sendError(res: Response, error: unknown) {
-  if (error instanceof HttpError) {
-    res.status(error.status).json({ error: error.message, code: error.code });
-    return;
-  }
-  console.error("Unexpected API error", error);
-  res.status(500).json({ error: "Something went wrong. Please try again." });
-}
 
 function renameBibInState(state: AppState, oldBib: string, newBib: string) {
   state.heats.forEach((heat) => {
@@ -389,42 +381,44 @@ export function createApp() {
     if (!STAFF_ROLES.includes(role)) throw new HttpError(400, "Unknown portal");
     if (passcode.length < 6) throw new HttpError(400, "Use at least 6 characters");
 
-    const hash = await hashPasscode(passcode);
-    const epoch = await adminDb.runTransaction(async (tx) => {
-      const community = (await tx.get(communityRef(session.communityId))).data() as CommunityRecord;
-      const nextEpoch = community.sessionEpoch + 1;
-      tx.update(privateAuthRef(session.communityId), {
-        [`passcodes.${role}`]: hash,
-        [`readablePasscodes.${role}`]: passcode,
-        [`portalPasses.${role}`]: FieldValue.delete()
-      });
-      tx.update(communityRef(session.communityId), { sessionEpoch: nextEpoch });
-      return nextEpoch;
-    });
+    const epoch = await setRolePasscode(session.communityId, role, passcode);
     return { token: await issueSessionToken({ ...session, epoch }) };
   }));
 
   app.post("/api/gateway/rotate-code", secured(["admin"], async (_req, session) => {
-    const gatewayCode = generateGatewayCode();
-    const epoch = await adminDb.runTransaction(async (tx) => {
-      const community = (await tx.get(communityRef(session.communityId))).data() as CommunityRecord;
-      const auth = (await tx.get(privateAuthRef(session.communityId))).data();
-      const nextEpoch = community.sessionEpoch + 1;
-      // Portal links and QR codes go with the code, so a leaked one stops working too.
-      const slug = generateGatewaySlug(community.name);
-      if (auth?.gatewayCode) tx.delete(gatewayCodeRef(auth.gatewayCode));
-      if (auth?.slug) tx.delete(gatewaySlugRef(auth.slug));
-      tx.set(gatewayCodeRef(gatewayCode), { communityId: session.communityId });
-      tx.set(gatewaySlugRef(slug), { communityId: session.communityId });
-      tx.update(privateAuthRef(session.communityId), { gatewayCode, slug, portalPasses: FieldValue.delete() });
-      tx.update(communityRef(session.communityId), { sessionEpoch: nextEpoch });
-      return nextEpoch;
-    });
-    return {
-      gatewayCode: formatGatewayCode(gatewayCode),
-      token: await issueSessionToken({ ...session, epoch })
-    };
+    const { gatewayCode, epoch } = await rotateGatewayCode(session.communityId);
+    return { gatewayCode, token: await issueSessionToken({ ...session, epoch }) };
   }));
+
+  // The owner app's "Open Admin portal": a one-time pass that signs this browser
+  // in as Admin of the owner's own community.
+  app.post("/api/gateway/owner-admin-pass", async (req, res) => {
+    try {
+      const attemptKey = `connect:${getClientIp(req)}`;
+      await assertNotRateLimited(attemptKey);
+
+      const communityId = String(req.body.communityId || "");
+      const pass = String(req.body.pass || "");
+      const isValid = /^[\w-]+$/.test(communityId) && await adminDb.runTransaction(async (tx) => {
+        const ref = privateAuthRef(communityId);
+        const stored = (await tx.get(ref)).data()?.ownerAdminPass;
+        if (!stored || !isSamePass(pass, stored.pass) || stored.expiresAt <= Date.now()) return false;
+        tx.update(ref, { ownerAdminPass: FieldValue.delete() });
+        return true;
+      });
+      if (!isValid) {
+        await recordFailedAttempt(attemptKey);
+        throw new HttpError(403, "This sign-in link has expired. Open the Admin portal from the owner app again.");
+      }
+
+      const session = await getLinkSession(req, communityId);
+      res.json({ token: await issueSessionToken({ ...session, roles: addRole(session.roles, "admin") }) });
+    } catch (error) {
+      sendError(res, error);
+    }
+  });
+
+  registerOwnerRoutes(app);
 
   // Results spreadsheet
   app.get("/api/sheets", secured(["admin"], async (_req, session) => {

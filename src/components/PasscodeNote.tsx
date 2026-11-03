@@ -1,7 +1,7 @@
 import React, { useState } from "react";
 import { Check, ChevronDown, ChevronUp, Copy, KeyRound, X } from "lucide-react";
 import { StaffRole } from "../types";
-import { copyText } from "../utils/api";
+import { copyText } from "../utils/clipboard";
 import { ROLE_LABELS } from "./GatewaySettings";
 
 interface PasscodeNoteProps {
