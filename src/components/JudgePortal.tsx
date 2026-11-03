@@ -431,7 +431,7 @@ export default function JudgePortal({
             }}
             className="px-3 py-1.5 bg-slate-800 hover:bg-slate-700 text-white rounded-xl text-xs font-semibold transition-all"
           >
-            Log Out
+            Switch Judge
           </button>
         </div>
 
@@ -817,7 +817,7 @@ export default function JudgePortal({
             }}
             className="px-3 py-1.5 bg-slate-800 hover:bg-slate-700 text-white rounded-xl text-xs font-semibold transition-all"
           >
-            Log Out
+            Switch Judge
           </button>
         </div>
 
@@ -860,7 +860,7 @@ export default function JudgePortal({
             }}
             className="px-3 py-1.5 bg-slate-800 hover:bg-slate-700 text-white rounded-xl text-xs font-semibold transition-all"
           >
-            Log Out
+            Switch Judge
           </button>
         </div>
 
@@ -905,7 +905,7 @@ export default function JudgePortal({
             }}
             className="px-3 py-1.5 bg-slate-800 hover:bg-slate-700 text-white rounded-xl text-xs font-semibold transition-all"
           >
-            Log Out
+            Switch Judge
           </button>
         </div>
 
@@ -1436,7 +1436,7 @@ export default function JudgePortal({
           }}
           className="px-3 py-1.5 bg-slate-800 hover:bg-slate-700 text-white rounded-xl text-xs font-semibold transition-all"
         >
-          Log Out
+          Switch Judge
         </button>
       </div>
       {/* Active Heat Status Header */}

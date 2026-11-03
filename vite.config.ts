@@ -34,7 +34,8 @@ export default defineConfig(() => {
       // default watch scope covers. Vite doesn't hot-reload it (it isn't imported by any
       // module), so this exclusion is just hygiene: it keeps the dev watcher from doing
       // needless work reacting to a file that changes on almost every user action.
-      watch: process.env.DISABLE_HMR === 'true' ? null : { ignored: ['**/data.json'] },
+      // apps/ holds the owner apps' builds, whose files are locked while they package.
+      watch: process.env.DISABLE_HMR === 'true' ? null : { ignored: ['**/data.json', '**/apps/**', '**/emulator-data/**'] },
     },
   };
 });

@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef } from "react";
-import { Award, RefreshCw, Moon, Sun, AlertCircle, ArrowLeft, Globe, ShieldAlert, UserCheck, Users, Landmark } from "lucide-react";
+import { Award, RefreshCw, Moon, Sun, AlertCircle, Globe, ShieldAlert, UserCheck, Users, Landmark, LogOut } from "lucide-react";
 import Header from "./components/Header";
 import RegisterCompetitor from "./components/RegisterCompetitor";
 import CoordinatorCheckIn from "./components/CoordinatorCheckIn";
@@ -21,6 +21,15 @@ import { apiRequest } from "./utils/api";
 import { getScoreDocId, toDocId } from "./utils/ids";
 import { isCouplesHeat, projectCompetitorsForHeat } from "./utils/partners";
 import { parsePortalLink, readPortalPass } from "./utils/portalLinks";
+
+const PORTAL_NAMES: Record<StaffRole | "portal", string> = {
+  portal: "the Central Gateway",
+  admin: "Admin",
+  judge: "the Judge Station",
+  coordinator: "Floor Coordinator",
+  competitor: "Registration",
+  scoring: "Scoring & Results"
+};
 
 export default function App() {
   // Navigation & Preferences (Dynamically detected via URL slug, query string, or subdomains)
@@ -178,6 +187,26 @@ export default function App() {
   const requiredRole: StaffRole | null = currentRole === "results" ? null : currentRole === "portal" ? "admin" : currentRole;
   const isAuthenticated = !requiredRole || !!session?.roles.includes(requiredRole);
   const isAdmin = !!session?.roles.includes("admin");
+
+  // Logging out of a portal brings back its passcode screen. A judge's name is
+  // freed for someone else first.
+  const handleLogOut = async () => {
+    if (!requiredRole) return;
+    if (requiredRole === "judge") {
+      if (myClaimedJudge) await handleReleaseJudge(myClaimedJudge).catch(() => {});
+      setSelectedJudgeId("");
+    }
+    await logoutRole(requiredRole).catch((err) => setActionError(err.message));
+  };
+
+  // Only the Admin has a Central Gateway to return to. Other portals sign out
+  // on the way back to it.
+  const returnToGateway = async () => {
+    if (currentRole !== "admin" && session?.roles.includes(currentRole as StaffRole)) {
+      await logoutRole(currentRole as StaffRole).catch(() => {});
+    }
+    window.location.href = "/?role=portal";
+  };
   const myClaimedJudge = session?.judgeName || "";
   const isOnOpenRegistration = currentRole === "competitor" && !!session && isAuthenticated && !loading && settings.registrationEnabled !== false;
 
@@ -495,29 +524,6 @@ export default function App() {
 
         {/* Core Layout Stage */}
         <main className="flex-1 max-w-7xl w-full mx-auto px-4 py-8">
-          {/* Only the Admin has a Central Gateway to return to */}
-          {currentRole !== "portal" && isAdmin && (
-            <div className="mb-6 flex justify-start">
-              <button
-                onClick={async () => {
-                  // Other portals sign out on the way back to the directory
-                  if (currentRole !== "admin" && session?.roles.includes(currentRole as StaffRole)) {
-                    await logoutRole(currentRole as StaffRole).catch(() => {});
-                  }
-                  window.location.href = "/?role=portal";
-                }}
-                className={`group flex items-center gap-1.5 text-xs font-semibold px-3 py-1.5 rounded-xl border transition-all ${
-                  isDarkMode
-                    ? "bg-slate-900 border-slate-800 text-slate-400 hover:text-slate-200 hover:border-slate-700"
-                    : "bg-white border-slate-200 text-slate-500 hover:text-slate-800 hover:border-slate-300 shadow-sm"
-                }`}
-              >
-                <ArrowLeft className="w-3.5 h-3.5 transition-transform group-hover:-translate-x-0.5" />
-                Return to Portal Directory
-              </button>
-            </div>
-          )}
-
           {!isReady || isOpeningOwnerAdmin ? (
             <div className="flex flex-col items-center justify-center py-20 gap-4">
               <RefreshCw className="w-8 h-8 text-violet-500 animate-spin" />
@@ -561,6 +567,23 @@ export default function App() {
             />
           ) : (
             <div className="transition-all duration-300">
+              {requiredRole && (
+                <div id="portal-session-bar" className="mb-6 flex items-center justify-end gap-3 flex-wrap">
+                  <span className="text-xs text-slate-400">
+                    Signed in to <span className="font-semibold text-slate-300">{PORTAL_NAMES[currentRole as StaffRole | "portal"]}</span>
+                  </span>
+                  <button
+                    type="button"
+                    id="portal-logout-btn"
+                    onClick={handleLogOut}
+                    className="flex items-center gap-2 px-4 py-2 rounded-xl text-sm font-bold border border-rose-500/40 text-rose-500 bg-rose-500/5 hover:bg-rose-500/15 transition-all cursor-pointer"
+                  >
+                    <LogOut className="w-4 h-4" />
+                    Log Out
+                  </button>
+                </div>
+              )}
+
               {currentRole === "portal" && isAdmin && (
                 <PlatformPortal
                   isDarkMode={isDarkMode}
@@ -683,7 +706,16 @@ export default function App() {
           {isOnOpenRegistration && <SampleDancersButton division={registrationDivision} onAdd={handleAddSampleDancers} />}
           <div>WCS Real-Time Scoring Engine</div>
           <div className="mt-1 opacity-75">Designed with Desktop precision and Mobile optimized tactile controls</div>
-          {session && (
+          {session && isAdmin && currentRole !== "portal" ? (
+            <button
+              type="button"
+              id="return-to-gateway-btn"
+              onClick={returnToGateway}
+              className="mt-2 underline hover:text-slate-300 cursor-pointer"
+            >
+              Return To Gateway
+            </button>
+          ) : session && (
             <button
               type="button"
               id="leave-gateway-btn"

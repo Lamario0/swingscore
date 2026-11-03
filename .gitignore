@@ -19,5 +19,7 @@ emulator-data/
 
 # Owner apps: packaged builds and this machine's Firebase app file
 apps/desktop/dist/
+# ...but the desktop app's icon lives in its build resources
+!apps/desktop/build/
 apps/android/dist/
 apps/android/android/app/google-services.json
