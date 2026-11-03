@@ -9,6 +9,7 @@ interface HeaderProps {
   isDarkMode: boolean;
   setIsDarkMode: (val: boolean) => void;
   settings?: AppSettings;
+  communityName?: string;
 }
 
 export default function Header({
@@ -17,7 +18,8 @@ export default function Header({
   setSelectedJudgeId,
   isDarkMode,
   setIsDarkMode,
-  settings
+  settings,
+  communityName
 }: HeaderProps) {
   // Translate currentRole to human-friendly display badge
   const getRoleBadge = () => {
@@ -39,7 +41,7 @@ export default function Header({
         };
       case "competitor":
         return {
-          label: "Self-Service Registration",
+          label: "Registration",
           color: "bg-blue-500/10 text-blue-500 border-blue-500/20"
         };
       case "results":
@@ -54,7 +56,7 @@ export default function Header({
         };
       default:
         return {
-          label: "Central Gateway",
+          label: communityName || "Central Gateway",
           color: "bg-slate-500/10 text-slate-400 border-slate-500/20"
         };
     }

@@ -1,0 +1,91 @@
+rules_version = '2';
+
+// Devices sign in with a token from the API carrying their community, staff roles
+// and session epoch. Every other write goes through the API, so the only thing a
+// browser can write here is a judge's own score. Anything not matched below,
+// including gatewayCodes, rateLimits and communities/*/private, is unreachable.
+service cloud.firestore {
+  match /databases/{database}/documents {
+    match /communities/{communityId} {
+      function community() {
+        return get(/databases/$(database)/documents/communities/$(communityId)).data;
+      }
+
+      function settings() {
+        return get(/databases/$(database)/documents/communities/$(communityId)/settings/main).data;
+      }
+
+      // Raising sessionEpoch signs out every device that joined before the change.
+      function connected() {
+        return request.auth != null
+          && request.auth.token.communityId == communityId
+          && request.auth.token.epoch == community().sessionEpoch
+          && community().status != "locked";
+      }
+
+      function hasRole(role) {
+        return role in request.auth.token.roles;
+      }
+
+      // Registration staff handle dancers, not results, so they aren't included.
+      function canReadAllScores() {
+        return request.auth.token.roles.hasAny(["admin", "judge", "coordinator", "scoring"]);
+      }
+
+      allow read: if connected();
+
+      match /settings/{docId} {
+        allow read: if connected();
+      }
+
+      match /competitors/{bib} {
+        allow read: if connected();
+      }
+
+      match /results/{resultId} {
+        allow read: if connected();
+      }
+
+      match /competitorPrivate/{bib} {
+        allow read: if connected() && request.auth.token.roles.hasAny(["admin", "coordinator", "scoring", "competitor"]);
+      }
+
+      // Written only by the server, so the ledger can show each contest's save.
+      match /sheetJobs/{heatId} {
+        allow read: if connected() && request.auth.token.roles.hasAny(["admin", "scoring"]);
+      }
+
+      match /heats/{heatId} {
+        allow read: if connected();
+
+        match /scores/{scoreId} {
+          // Matches the Results Terminal: Published contests, and the live contest
+          // while its scores are shown.
+          function isPublicHeat() {
+            let current = settings();
+            return heatId in current.get("publishedHeatIds", [])
+              || (current.get("isPublished", false) == true && current.get("currentHeatId", null) == heatId);
+          }
+
+          function isValidScore() {
+            let score = request.resource.data;
+            return score.keys().hasOnly(["id", "judgeId", "heatId", "competitorBib", "score", "isCallback", "timestamp"])
+              && score.id == scoreId
+              && score.heatId == heatId
+              && score.score is number
+              // Placement sheets keep the judge's raw score here as text, blank until entered.
+              && (score.isCallback in ["Yes", "No", "Alt 1", "Alt 2", "Alt 3"] || score.isCallback.matches("^[0-9]*[.]?[0-9]*$"))
+              && score.timestamp is number;
+          }
+
+          function canScoreAs(judgeId) {
+            return hasRole("admin") || (hasRole("judge") && judgeId == request.auth.token.judgeName);
+          }
+
+          allow read: if connected() && (canReadAllScores() || isPublicHeat());
+          allow create, update: if connected() && isValidScore() && canScoreAs(request.resource.data.judgeId);
+        }
+      }
+    }
+  }
+}

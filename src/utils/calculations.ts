@@ -1,5 +1,5 @@
-import { Competitor, ScoreRecord, Heat, AppSettings } from "../types";
-import { isCouplesHeat } from "./partners";
+import { Competitor, ScoreRecord, Heat, AppSettings, ContestOptions, JudgingStyle } from "../types";
+import { isCouplesHeat, projectCompetitorsForHeat } from "./partners";
 
 export interface CompetitorResult {
   competitor: Competitor;
@@ -19,16 +19,20 @@ export interface CompetitorResult {
   alt3Count?: number;
   noCount: number;
   prelimPoints?: number; // point-based score for prelim ranking
+  countedPlacements: number[]; // placements that count toward this result
   rank: number;
   qualified: boolean;
   isAlternate?: boolean;
   alternateRank?: number;
+  tieGroup?: number; // set when scores can't separate dancers at a cut line
+  isChiefCounted: boolean; // the Chief Judge's scores are on this side, counted or settling ties
+  isTieSettledByChief?: boolean; // tied with another dancer until the Chief Judge decided
   majorityCalculatedRank?: number; // WSDC relative placement rank
 }
 
 export function calculateHeatResults(
   heat: Heat,
-  competitors: Competitor[],
+  allCompetitors: Competitor[],
   scores: ScoreRecord[],
   judgingStyle: "raw" | "placement" | "callback",
   callbackCount: number,
@@ -39,6 +43,9 @@ export function calculateHeatResults(
   alternateCountFollowers?: number,
   settings?: AppSettings
 ): CompetitorResult[] {
+  // Read each dancer's entry for this heat's contest+division (role/division),
+  // so a second-division entry is ranked on the side it was entered on.
+  const competitors = projectCompetitorsForHeat(allCompetitors, heat);
   // If Mixed heat and not judged as couples (Finals, or any partnered-contest
   // round), calculate results separately for Leaders and Followers
   if (heat.role === "Mixed" && !isCouplesHeat(heat)) {
@@ -140,6 +147,14 @@ export function calculateHeatResults(
   // Filter out any scratched competitors/units
   units = units.filter((u) => !u.scratched);
 
+  // Chief Judge options for this side, set per contest on the Scoring Ledger
+  const chiefJudgeName = settings?.chiefJudgeName || "Chief Judge";
+  const contestOptions = settings?.contestOptions?.[heat.id];
+  const chiefShownOption = heat.role === "Follow" ? contestOptions?.chiefShownFollowers : contestOptions?.chiefShownLeaders;
+  const isChiefWeighted = (heat.role === "Follow" ? contestOptions?.chiefWeightFollowers : contestOptions?.chiefWeightLeaders) !== false;
+  const isChiefIncluded = contestOptions?.includeChiefScores !== false;
+  const chiefTieOrder = contestOptions?.chiefTieOrder || [];
+
   // Get scores for this heat
   const heatScores = scores.filter((s) => s.heatId === heat.id);
 
@@ -150,7 +165,6 @@ export function calculateHeatResults(
     const defaultRoles = ["None", "None", "None", "None", "None"];
     const names = settings.judgeNames || defaultNames;
     const roles = settings.judgeRoles || defaultRoles;
-    const chiefName = settings.chiefJudgeName || "Chief Judge";
     const chiefRole = settings.chiefJudgeRole || "Both";
 
     const isRoleExpected = (role: string) => {
@@ -175,7 +189,7 @@ export function calculateHeatResults(
     });
 
     if (isRoleExpected(chiefRole)) {
-      expectedJudgeIds.push(chiefName);
+      expectedJudgeIds.push(chiefJudgeName);
     }
   }
 
@@ -184,176 +198,441 @@ export function calculateHeatResults(
   const judges = (expectedJudgeIds.length > 0) ? expectedJudgeIds : activeJudges;
 
   // 2. Pre-calculate individual judge placements for each judge
-  // For a given judge, rank all their scores descending (highest score = 1st, 2nd, etc.)
+  // For a given judge, rank their scores: highest raw score = 1st, or in
+  // placement judging the score already is the rank, so lowest = 1st.
   const judgePlacements: { [judgeId: string]: { [bib: string]: number } } = {};
 
   judges.forEach((judgeId) => {
     judgePlacements[judgeId] = {};
     const judgeRecords = heatScores.filter((s) => s.judgeId === judgeId);
     
-    // Sort descending by score
-    const sortedRecords = [...judgeRecords].sort((a, b) => b.score - a.score);
+    const sortedRecords = judgingStyle === "placement"
+      ? judgeRecords.filter((s) => s.score > 0).sort((a, b) => a.score - b.score)
+      : [...judgeRecords].sort((a, b) => b.score - a.score);
+    // Equal scores share a placement, so the order the records happen to be
+    // stored in can never separate two dancers.
     sortedRecords.forEach((record, index) => {
-      judgePlacements[judgeId][record.competitorBib] = index + 1;
+      const previous = sortedRecords[index - 1];
+      judgePlacements[judgeId][record.competitorBib] = previous?.score === record.score
+        ? judgePlacements[judgeId][previous.competitorBib]
+        : index + 1;
     });
   });
 
-  // 3. Map units to their results
-  let results: CompetitorResult[] = units.map((unit) => {
-    const compScores = heatScores.filter((s) => s.competitorBib === unit.bib);
-    
-    const scoresByJudge: { [judgeId: string]: { score: number; isCallback: string; placement: number } } = {};
-    let totalScore = 0;
-    let scoreCount = 0;
-    let totalPlacement = 0;
-    let placementCount = 0;
-    let yesCount = 0;
-    let alt1Count = 0;
-    let alt2Count = 0;
-    let alt3Count = 0;
-    let noCount = 0;
+  const compareBibs = (a: CompetitorResult, b: CompetitorResult): number =>
+    a.competitor.bib.localeCompare(b.competitor.bib, undefined, { numeric: true });
 
-    // Initialize with empty scores (in callback mode, default to 'No')
-    judges.forEach((judgeId) => {
-      scoresByJudge[judgeId] = { 
-        score: 0, 
-        isCallback: judgingStyle === "callback" ? "No" : "-", 
-        placement: 999 
+  // Every Finals is decided by relative placement. On a raw score sheet each
+  // judge's placements come from the order of their scores.
+  const ranksByPlacement = judgingStyle === "placement" || (judgingStyle === "raw" && heat.heatType === "Finals");
+
+  // Scores the sheet with the Chief Judge left out, settling only ties, or
+  // counted like any judge. Only scores rank dancers: those they can't separate
+  // share a rank, and bib order just lists them.
+  type ChiefUse = "none" | "tiebreak" | "counted";
+  const scoreUnits = (chiefUse: ChiefUse): CompetitorResult[] => {
+    const isChiefCounted = chiefUse !== "none";
+    const doesChiefBreakTies = isChiefCounted && isChiefWeighted;
+
+    // 3. Map units to their results
+    const results: CompetitorResult[] = units.map((unit) => {
+      const compScores = heatScores.filter((s) => s.competitorBib === unit.bib && (isChiefCounted || s.judgeId !== chiefJudgeName));
+
+      const scoresByJudge: { [judgeId: string]: { score: number; isCallback: string; placement: number } } = {};
+      let totalScore = 0;
+      let scoreCount = 0;
+      const countedPlacements: number[] = [];
+      let yesCount = 0;
+      let alt1Count = 0;
+      let alt2Count = 0;
+      let alt3Count = 0;
+      let noCount = 0;
+
+      // Initialize with empty scores (in callback mode, default to 'No')
+      judges.filter((judgeId) => isChiefCounted || judgeId !== chiefJudgeName).forEach((judgeId) => {
+        scoresByJudge[judgeId] = {
+          score: 0,
+          isCallback: judgingStyle === "callback" ? "No" : "-",
+          placement: 999
+        };
+      });
+
+      compScores.forEach((s) => {
+        const calcPlacement = judgePlacements[s.judgeId]?.[unit.bib] || 999;
+        scoresByJudge[s.judgeId] = {
+          score: s.score,
+          isCallback: s.isCallback,
+          placement: calcPlacement
+        };
+      });
+
+      // Aggregate totals and counts from resolved scoresByJudge. A tie-breaking
+      // Chief Judge is shown but left out of every total.
+      Object.keys(scoresByJudge).forEach((judgeId) => {
+        if (chiefUse === "tiebreak" && judgeId === chiefJudgeName) return;
+        const s = scoresByJudge[judgeId];
+        if (s.score > 0) {
+          totalScore += s.score;
+          scoreCount++;
+        }
+
+        if (s.placement < 999) countedPlacements.push(s.placement);
+
+        if (s.isCallback === "Yes") yesCount++;
+        else if (s.isCallback === "Alt 1" || s.isCallback === "Alternate" as any) alt1Count++;
+        else if (s.isCallback === "Alt 2") alt2Count++;
+        else if (s.isCallback === "Alt 3") alt3Count++;
+        else if (s.isCallback === "No") noCount++;
+      });
+
+      const averageScore = scoreCount > 0 ? Number((totalScore / scoreCount).toFixed(2)) : 0;
+      const averagePlacement = countedPlacements.length > 0
+        ? Number((countedPlacements.reduce((sum, p) => sum + p, 0) / countedPlacements.length).toFixed(2))
+        : 999;
+
+      const resObj: CompetitorResult = {
+        competitor: unit,
+        scoresByJudge,
+        averageScore,
+        averagePlacement,
+        yesCount,
+        altCount: alt1Count + alt2Count + alt3Count,
+        alt1Count,
+        alt2Count,
+        alt3Count,
+        noCount,
+        countedPlacements,
+        rank: 999, // to be calculated
+        qualified: false, // to be calculated
+        isChiefCounted
       };
+      // A tie-breaking Chief Judge stays out of the callback points too.
+      resObj.prelimPoints = getPrelimPoints(chiefUse === "tiebreak"
+        ? { scoresByJudge: Object.fromEntries(Object.entries(scoresByJudge).filter(([judgeId]) => judgeId !== chiefJudgeName)) }
+        : resObj);
+      return resObj;
     });
 
-    compScores.forEach((s) => {
-      const calcPlacement = judgePlacements[s.judgeId]?.[unit.bib] || 999;
-      scoresByJudge[s.judgeId] = { 
-        score: s.score, 
-        isCallback: s.isCallback,
-        placement: calcPlacement
-      };
-    });
-
-    // Aggregate totals and counts from resolved scoresByJudge
-    Object.keys(scoresByJudge).forEach((judgeId) => {
-      const s = scoresByJudge[judgeId];
-      if (s.score > 0) {
-        totalScore += s.score;
-        scoreCount++;
-      }
-
-      if (s.placement < 999) {
-        totalPlacement += s.placement;
-        placementCount++;
-      }
-
-      if (s.isCallback === "Yes") yesCount++;
-      else if (s.isCallback === "Alt 1" || s.isCallback === "Alternate" as any) alt1Count++;
-      else if (s.isCallback === "Alt 2") alt2Count++;
-      else if (s.isCallback === "Alt 3") alt3Count++;
-      else if (s.isCallback === "No") noCount++;
-    });
-
-    const averageScore = scoreCount > 0 ? Number((totalScore / scoreCount).toFixed(2)) : 0;
-    const averagePlacement = placementCount > 0 ? Number((totalPlacement / placementCount).toFixed(2)) : 999;
-
-    const resObj: CompetitorResult = {
-      competitor: unit,
-      scoresByJudge,
-      averageScore,
-      averagePlacement,
-      yesCount,
-      altCount: alt1Count + alt2Count + alt3Count,
-      alt1Count,
-      alt2Count,
-      alt3Count,
-      noCount,
-      rank: 999, // to be calculated
-      qualified: false // to be calculated
+    // The Chief Judge's order for dancers their scores couldn't separate.
+    const compareChiefDecision = (a: CompetitorResult, b: CompetitorResult): number => {
+      const orderA = chiefTieOrder.indexOf(a.competitor.bib);
+      const orderB = chiefTieOrder.indexOf(b.competitor.bib);
+      if (orderA === orderB) return 0;
+      if (orderA === -1) return 1;
+      if (orderB === -1) return -1;
+      return orderA - orderB;
     };
-    resObj.prelimPoints = getPrelimPoints(resObj);
-    return resObj;
-  });
 
-  // Section 5: the outcome for callbacks is the sum of point values across
-  // judges; only once that's tied does the Chief Judge's own (raw) score break
-  // the tie. Shared by both the "callback" style's own sort and the
-  // callback-cut ranking computed below regardless of style.
-  const chiefJudgeNameForTiebreak = settings?.chiefJudgeName || "Chief Judge";
-  const compareByCallbackPoints = (a: CompetitorResult, b: CompetitorResult): number => {
-    const ptsA = a.prelimPoints || 0;
-    const ptsB = b.prelimPoints || 0;
-    if (ptsB !== ptsA) {
-      return ptsB - ptsA;
-    }
-    const chiefScoreA = a.scoresByJudge[chiefJudgeNameForTiebreak]?.score || 0;
-    const chiefScoreB = b.scoresByJudge[chiefJudgeNameForTiebreak]?.score || 0;
-    if (chiefScoreB !== chiefScoreA) {
-      return chiefScoreB - chiefScoreA;
-    }
-    return a.competitor.bib.localeCompare(b.competitor.bib, undefined, { numeric: true });
+    // Section 5: the outcome for callbacks is the sum of point values across
+    // judges; once that's tied, the Chief Judge's score breaks the tie. Shared
+    // by the "callback" style's own sort and the callback cut computed below.
+    const compareByPoints = (a: CompetitorResult, b: CompetitorResult): number =>
+      (b.prelimPoints || 0) - (a.prelimPoints || 0);
+    const getChiefCallbackValue = (r: CompetitorResult): number => {
+      const chief = r.scoresByJudge[chiefJudgeName];
+      if (!chief) return 0;
+      return judgingStyle === "raw" ? chief.score : CALLBACK_POINTS[chief.isCallback] || 0;
+    };
+    const compareByCallbackPoints = (a: CompetitorResult, b: CompetitorResult): number =>
+      compareByPoints(a, b) ||
+      (doesChiefBreakTies ? getChiefCallbackValue(b) - getChiefCallbackValue(a) : 0) ||
+      compareChiefDecision(a, b);
+
+    // 4. Compare results based on the chosen judging style, before any tie-break
+    const compareJudgedScores = (a: CompetitorResult, b: CompetitorResult): number => {
+      if (judgingStyle === "callback") return compareByPoints(a, b);
+      if (ranksByPlacement) {
+        // Placements: WSDC Relative Placement (Majority) ranking system
+        if (a.countedPlacements.length > 0 && b.countedPlacements.length > 0) {
+          const cmp = compareWSDCPlacement(a.countedPlacements, b.countedPlacements);
+          if (cmp !== 0) return cmp;
+        }
+        return a.averagePlacement - b.averagePlacement;
+      }
+      // Raw scores: higher average is better (e.g. 95.5 is best), then average
+      // placement (lower is better)
+      return (b.averageScore - a.averageScore) || (a.averagePlacement - b.averagePlacement);
+    };
+    // A tie goes to the Chief Judge's score: their Yes beats their No, their
+    // higher raw score or better placement wins.
+    const compareChiefScores = (a: CompetitorResult, b: CompetitorResult): number => {
+      if (!doesChiefBreakTies) return 0;
+      if (judgingStyle === "callback") return getChiefCallbackValue(b) - getChiefCallbackValue(a);
+      if (judgingStyle === "placement") {
+        return (a.scoresByJudge[chiefJudgeName]?.placement ?? 999) - (b.scoresByJudge[chiefJudgeName]?.placement ?? 999);
+      }
+      return (b.scoresByJudge[chiefJudgeName]?.score || 0) - (a.scoresByJudge[chiefJudgeName]?.score || 0);
+    };
+    const compareResults = (a: CompetitorResult, b: CompetitorResult): number =>
+      compareJudgedScores(a, b) || compareChiefScores(a, b) || compareChiefDecision(a, b);
+
+    results.sort((a, b) => compareResults(a, b) || compareBibs(a, b));
+
+    // Assign ranks: dancers scores can't separate share one
+    results.forEach((res, index) => {
+      const previous = results[index - 1];
+      res.rank = previous && compareResults(previous, res) === 0 ? previous.rank : index + 1;
+    });
+
+    // 5. Calculate Callback Rankings (for prelim rounds) using point-based ranking
+    const callbackRankedResults = [...results].sort((a, b) => compareByCallbackPoints(a, b) || compareBibs(a, b));
+
+    // A tie across a cut line can't be decided here: scores don't separate those
+    // dancers, so none of them is placed either side of the line.
+    const tiedBibs = new Map<string, number>();
+    [callbackCount, callbackCount + alternateCount].forEach((line) => {
+      if (line <= 0 || line >= callbackRankedResults.length) return;
+      if (compareByCallbackPoints(callbackRankedResults[line - 1], callbackRankedResults[line]) !== 0) return;
+      let start = line - 1;
+      while (start > 0 && compareByCallbackPoints(callbackRankedResults[start - 1], callbackRankedResults[start]) === 0) start--;
+      for (let i = start; i < callbackRankedResults.length; i++) {
+        if (compareByCallbackPoints(callbackRankedResults[start], callbackRankedResults[i]) !== 0) break;
+        tiedBibs.set(callbackRankedResults[i].competitor.bib, start);
+      }
+    });
+
+    // Mark qualified competitors based on callback settings
+    callbackRankedResults.forEach((res, index) => {
+      const mainRes = results.find((r) => r.competitor.bib === res.competitor.bib);
+      if (mainRes) {
+        const tieGroup = tiedBibs.get(res.competitor.bib);
+        mainRes.tieGroup = tieGroup;
+        mainRes.qualified = tieGroup === undefined && index < callbackCount;
+        mainRes.isAlternate = tieGroup === undefined && index >= callbackCount && index < (callbackCount + alternateCount);
+        if (mainRes.isAlternate) {
+          mainRes.alternateRank = index - callbackCount + 1;
+        } else {
+          mainRes.alternateRank = undefined;
+        }
+      }
+    });
+
+    // Flag ties the Chief Judge settled: any shared Finals placement, and on
+    // other rounds only ties that decided who made a callback or alternate.
+    const getCutStatus = (r: CompetitorResult) => (r.qualified ? "callback" : r.isAlternate ? `alt${r.alternateRank}` : "cut");
+    const isFinalsRound = heat.heatType === "Finals";
+    const ordered = isFinalsRound ? results : callbackRankedResults;
+    const compareTied = isFinalsRound ? compareJudgedScores : compareByPoints;
+    ordered.forEach((res, index) => {
+      const previous = ordered[index - 1];
+      if (!previous || compareTied(previous, res) !== 0) return;
+      const wasSeparated = isFinalsRound ? previous.rank !== res.rank : getCutStatus(previous) !== getCutStatus(res);
+      if (wasSeparated && res.tieGroup === undefined && previous.tieGroup === undefined) {
+        previous.isTieSettledByChief = true;
+        res.isTieSettledByChief = true;
+      }
+    });
+
+    return results;
   };
 
-  // 4. Sort results based on the chosen judging style
-  if (judgingStyle === "placement") {
-    // Placements: WSDC Relative Placement (Majority) ranking system
-    results.sort((a, b) => {
-      const placementsA = Object.values(a.scoresByJudge).map(s => s.placement).filter(p => p < 999);
-      const placementsB = Object.values(b.scoresByJudge).map(s => s.placement).filter(p => p < 999);
-      
-      if (placementsA.length > 0 && placementsB.length > 0) {
-        const cmp = compareWSDCPlacement(placementsA, placementsB);
-        if (cmp !== 0) return cmp;
-      }
+  // In a Finals, or on a side of their own (Leaders or Followers), the Chief
+  // Judge is one of the panel: their scores count, and settle a tie. Judging
+  // Both sides of an earlier round, they back up the other judges instead, so
+  // their scores count only where nobody else scores that side, or to settle a
+  // tie. That tie is settled by the Chief Judge's score alone, so they never
+  // change the order of anyone the other judges separated. Show Scores puts
+  // their scores on the sheet the same way, without counting them.
+  const hasChiefScores = heatScores.some((s) => s.judgeId === chiefJudgeName && units.some((u) => u.bib === s.competitorBib));
+  if (!hasChiefScores || !isChiefIncluded || chiefShownOption === false) return scoreUnits("none");
+  const isFinalsRound = heat.heatType === "Finals";
+  const isChiefBackingUp = !isFinalsRound && (settings?.chiefJudgeRole || "Both") === "Both";
+  const otherJudgeCount = judges.filter((judgeId) => judgeId !== chiefJudgeName).length;
+  if (!isChiefBackingUp || otherJudgeCount === 0) return scoreUnits("counted");
 
-      if (a.averagePlacement !== b.averagePlacement) {
-        return a.averagePlacement - b.averagePlacement;
+  // Earlier rounds can also tie at a cut line.
+  const withoutChief = scoreUnits("none");
+  const hasTies = withoutChief.some((r) =>
+    (!isFinalsRound && r.tieGroup !== undefined) || withoutChief.some((other) => other !== r && other.rank === r.rank)
+  );
+  return chiefShownOption === true || (isChiefWeighted && hasTies) ? scoreUnits("tiebreak") : withoutChief;
+}
+
+export function getContestOptions(settings: AppSettings | undefined, heatId: string): ContestOptions {
+  return settings?.contestOptions?.[heatId] || {};
+}
+
+export interface ContestOutcome {
+  results: CompetitorResult[];
+  judgeIds: string[]; // judges shown on the sheet
+  judgingStyle: JudgingStyle;
+  chiefJudgeName: string;
+  callbackCount: number;
+  alternateCount: number;
+  callbackCountLeaders?: number;
+  callbackCountFollowers?: number;
+  alternateCountLeaders?: number;
+  alternateCountFollowers?: number;
+}
+
+// A contest's results as shown on the Scoring Ledger and Results Terminal. A
+// completed contest uses the judging style, quotas and roster frozen when it
+// was completed, not whatever the live settings have since moved on to.
+export function getContestOutcome(heat: Heat, competitors: Competitor[], scores: ScoreRecord[], settings: AppSettings): ContestOutcome {
+  const completed = (settings.completedResults || []).find((c) => c.heatId === heat.id);
+  const config = completed?.configSnapshot;
+  const contestSettings: AppSettings = config
+    ? {
+        ...settings,
+        judgeNames: config.judgeNames ?? settings.judgeNames,
+        judgeRoles: config.judgeRoles ?? settings.judgeRoles,
+        chiefJudgeName: config.chiefJudgeName ?? settings.chiefJudgeName,
+        chiefJudgeRole: config.chiefJudgeRole ?? settings.chiefJudgeRole
       }
-      // Tie breaker 1: average score (higher is better)
-      if (b.averageScore !== a.averageScore) {
-        return b.averageScore - a.averageScore;
-      }
-      // Fallback: bib sorting
-      return a.competitor.bib.localeCompare(b.competitor.bib, undefined, { numeric: true });
-    });
-  } else if (judgingStyle === "callback") {
-    // Callbacks: rank by point total, Chief Judge score breaks ties (Section 5)
-    results.sort(compareByCallbackPoints);
-  } else {
-    // Raw scores: higher average is better (e.g. 95.5 is best)
-    results.sort((a, b) => {
-      if (b.averageScore !== a.averageScore) {
-        return b.averageScore - a.averageScore;
-      }
-      // Tie breaker 1: average placement (lower is better)
-      if (a.averagePlacement !== b.averagePlacement) {
-        return a.averagePlacement - b.averagePlacement;
-      }
-      // Fallback: bib sorting
-      return a.competitor.bib.localeCompare(b.competitor.bib, undefined, { numeric: true });
-    });
+    : settings;
+  const judgingStyle = completed?.judgingStyle || settings.judgingStyle || "raw";
+  const callbackCountLeaders = config ? config.callbackCountLeaders : settings.callbackCountLeaders;
+  const callbackCountFollowers = config ? config.callbackCountFollowers : settings.callbackCountFollowers;
+  const alternateCountLeaders = config ? config.alternateCountLeaders : settings.alternateCountLeaders;
+  const alternateCountFollowers = config ? config.alternateCountFollowers : settings.alternateCountFollowers;
+  const baseCallbackCount = config ? config.callbackCount : (settings.callbackCount || 5);
+  const baseAlternateCount = config ? config.alternateCount : (settings.alternateCount ?? 2);
+  const callbackCount = heat.role === "Lead"
+    ? (callbackCountLeaders ?? baseCallbackCount)
+    : heat.role === "Follow"
+      ? (callbackCountFollowers ?? baseCallbackCount)
+      : baseCallbackCount;
+  const alternateCount = heat.role === "Lead"
+    ? (alternateCountLeaders ?? baseAlternateCount)
+    : heat.role === "Follow"
+      ? (alternateCountFollowers ?? baseAlternateCount)
+      : baseAlternateCount;
+
+  const results = calculateHeatResults(
+    heat,
+    competitors,
+    scores,
+    judgingStyle,
+    callbackCount,
+    alternateCount,
+    callbackCountLeaders,
+    callbackCountFollowers,
+    alternateCountLeaders,
+    alternateCountFollowers,
+    contestSettings
+  );
+
+  const chiefJudgeName = contestSettings.chiefJudgeName || "Chief Judge";
+  const judgeIds = Array.from(new Set(scores.filter((s) => s.heatId === heat.id).map((s) => s.judgeId)))
+    .filter((judgeId) => results.some((r) => r.scoresByJudge[judgeId]))
+    .sort();
+
+  return {
+    results,
+    judgeIds,
+    judgingStyle,
+    chiefJudgeName,
+    callbackCount,
+    alternateCount,
+    callbackCountLeaders,
+    callbackCountFollowers,
+    alternateCountLeaders,
+    alternateCountFollowers
+  };
+}
+
+// A dancer's placements from each judge, best first, e.g. "1-1-2".
+export function formatRelativePlacements(placements: number[]): string {
+  return placements.length > 0 ? [...placements].sort((a, b) => a - b).join("-") : "—";
+}
+
+export function formatPlacement(rank: number): string {
+  const lastTwo = rank % 100;
+  const suffix = lastTwo >= 11 && lastTwo <= 13 ? "th" : ["th", "st", "nd", "rd"][rank % 10] || "th";
+  return `${rank}${suffix}`;
+}
+
+// Non-Finals rounds are listed callbacks first, then anyone tied at a cut line,
+// then alternates, then cuts.
+export const CUT_GROUP_LABELS = ["Callbacks", "Tied", "Alternates", "Cut"];
+export function getCutGroup(res: { qualified?: boolean; isAlternate?: boolean; tieGroup?: number }): number {
+  return res.qualified ? 0 : res.tieGroup !== undefined ? 1 : res.isAlternate ? 2 : 3;
+}
+
+// The settings change that moves the queued Next Contest into the Live slot,
+// bringing its staged configuration with it.
+export function getQueuedPromotion(settings: AppSettings): Record<string, unknown> {
+  return {
+    currentHeatId: settings.queuedHeatId,
+    queuedHeatId: null,
+    // Floor Coordinators may already have finalized the queued contest's check-in.
+    checkInFinalized: !!settings.queuedCheckInFinalized,
+    queuedCheckInFinalized: false,
+    finalizedSheets: [],
+    // The Next slot is empty again: unlock it so another check-in sheet can be
+    // prepared once the new Live Contest's check-in is finalized.
+    nextContestConfigLocked: false,
+    ...(settings.nextContestType ? { contestType: settings.nextContestType, nextContestType: null } : {}),
+    ...(settings.nextDivision ? { division: settings.nextDivision, nextDivision: null } : {}),
+    ...(settings.nextHeatType ? { heatType: settings.nextHeatType, nextHeatType: null } : {}),
+    ...(settings.nextJudgingStyle ? { judgingStyle: settings.nextJudgingStyle, nextJudgingStyle: null } : {}),
+    ...(settings.nextCallbackCount ? { callbackCount: settings.nextCallbackCount, nextCallbackCount: null } : {}),
+    ...(settings.nextAlternateCount !== undefined ? { alternateCount: settings.nextAlternateCount, nextAlternateCount: null } : {}),
+    ...(settings.nextCallbackCountLeaders ? { callbackCountLeaders: settings.nextCallbackCountLeaders, nextCallbackCountLeaders: null } : {}),
+    ...(settings.nextCallbackCountFollowers ? { callbackCountFollowers: settings.nextCallbackCountFollowers, nextCallbackCountFollowers: null } : {}),
+    ...(settings.nextAlternateCountLeaders !== undefined ? { alternateCountLeaders: settings.nextAlternateCountLeaders, nextAlternateCountLeaders: null } : {}),
+    ...(settings.nextAlternateCountFollowers !== undefined ? { alternateCountFollowers: settings.nextAlternateCountFollowers, nextAlternateCountFollowers: null } : {}),
+    ...(settings.nextJudgeNames ? { judgeNames: settings.nextJudgeNames, nextJudgeNames: null } : {}),
+    ...(settings.nextJudgeRoles ? { judgeRoles: settings.nextJudgeRoles, nextJudgeRoles: null } : {}),
+    ...(settings.nextChiefJudgeName ? { chiefJudgeName: settings.nextChiefJudgeName, nextChiefJudgeName: null } : {}),
+    ...(settings.nextChiefJudgeRole ? { chiefJudgeRole: settings.nextChiefJudgeRole, nextChiefJudgeRole: null } : {})
+  };
+}
+
+// Each side's callback quota for a judge's sheet. The Chief Judge scores both
+// sides of a Leaders+Followers round on one sheet, and each side keeps its own.
+export interface SheetQuota<T> {
+  side: "Lead" | "Follow" | null;
+  competitors: T[];
+  callbackCount: number;
+  alternateCount: number;
+}
+
+export function getSheetQuotas<T extends { role: "Lead" | "Follow" }>(heat: Heat, sheet: T[], settings: AppSettings): SheetQuota<T>[] {
+  const callbackCountFor = (side: "Lead" | "Follow") =>
+    (side === "Lead" ? settings.callbackCountLeaders : settings.callbackCountFollowers) ?? settings.callbackCount;
+  const alternateCountFor = (side: "Lead" | "Follow") =>
+    (side === "Lead" ? settings.alternateCountLeaders : settings.alternateCountFollowers) ?? (settings.alternateCount || 0);
+
+  if (heat.role === "Mixed" && !isCouplesHeat(heat)) {
+    return (["Lead", "Follow"] as const)
+      .filter((side) => sheet.some((c) => c.role === side))
+      .map((side) => ({
+        side,
+        competitors: sheet.filter((c) => c.role === side),
+        callbackCount: callbackCountFor(side),
+        alternateCount: alternateCountFor(side)
+      }));
   }
+  return [{
+    side: null,
+    competitors: sheet,
+    callbackCount: heat.role === "Mixed" ? settings.callbackCount : callbackCountFor(heat.role),
+    alternateCount: heat.role === "Mixed" ? (settings.alternateCount || 0) : alternateCountFor(heat.role)
+  }];
+}
 
-  // Assign ranks
-  results.forEach((res, index) => {
-    res.rank = index + 1;
-  });
+// Whether a sheet side's marks meet its quota: exact callbacks, one of each alternate.
+export function checkSheetQuota<T extends { bib: string }>(quota: SheetQuota<T>, getCallback: (bib: string) => string | undefined) {
+  const marks = quota.competitors.map((c) => getCallback(c.bib));
+  const yesCount = marks.filter((m) => m === "Yes").length;
+  const altCount = marks.filter((m) => m && m !== "No" && m !== "Yes").length;
+  const areAltsSatisfied = [1, 2, 3].every((r) => marks.filter((m) => m === `Alt ${r}`).length === (r <= quota.alternateCount ? 1 : 0));
+  return { yesCount, altCount, areAltsSatisfied, isMet: yesCount === quota.callbackCount && areAltsSatisfied };
+}
 
-  // 5. Calculate Callback Rankings (for prelim rounds) using point-based ranking
-  const callbackRankedResults = [...results].sort(compareByCallbackPoints);
+// Whether a dancer's name is redacted by the contest's name options. Their bib
+// and scores stay visible either way.
+export function isResultNameHidden(res: CompetitorResult, options: ContestOptions, isFinals: boolean, judgingStyle: JudgingStyle): boolean {
+  const isCut = !isFinals && getCutGroup(res) === 3;
+  const isAllNo = judgingStyle === "callback" && res.yesCount === 0 && res.altCount === 0;
+  return (!!options.hideCutNames && isCut) || (!!options.hideAllNoNames && isAllNo);
+}
 
-  // Mark qualified competitors based on callback settings
-  callbackRankedResults.forEach((res, index) => {
-    const mainRes = results.find((r) => r.competitor.bib === res.competitor.bib);
-    if (mainRes) {
-      mainRes.qualified = index < callbackCount;
-      mainRes.isAlternate = index >= callbackCount && index < (callbackCount + alternateCount);
-      if (mainRes.isAlternate) {
-        mainRes.alternateRank = index - callbackCount + 1;
-      } else {
-        mainRes.alternateRank = undefined;
-      }
-    }
-  });
-
-  return results;
+export function getJudgeRole(settings: AppSettings, judgeId: string): "Leaders" | "Followers" | "Finals" | "Both" | "None" {
+  if (judgeId === (settings.chiefJudgeName || "Chief Judge")) return settings.chiefJudgeRole || "Both";
+  const idx = (settings.judgeNames || []).indexOf(judgeId);
+  return idx === -1 ? "None" : (settings.judgeRoles || [])[idx] || "None";
 }
 
 // Determine the exact set of competitors (or virtual couple units) a given judge
@@ -362,9 +641,10 @@ export function calculateHeatResults(
 // Judges tab (so the live "who has/hasn't submitted" view matches exactly).
 export function getJudgeHeatCompetitors(
   heat: Heat,
-  competitors: Competitor[],
+  allCompetitors: Competitor[],
   judgeRole: "Leaders" | "Followers" | "Finals" | "Both" | "None"
 ): Competitor[] {
+  const competitors = projectCompetitorsForHeat(allCompetitors, heat);
   const rawHeatCompetitors = heat.competitorBibs
     .map((bib) => {
       const comp = competitors.find((c) => c.bib === bib);
@@ -439,16 +719,13 @@ export function getJudgeHeatCompetitors(
 // Official WSCA Section 5 callback point values (Yes=10, Alt1=4.5, Alt2=4.3,
 // Alt3=4.2, No=0) -- see the "Callback System for Preliminary Competitions"
 // reference. The outcome for callbacks is the sum of these values across judges.
+const CALLBACK_POINTS: Record<string, number> = { Yes: 10, "Alt 1": 4.5, Alternate: 4.5, "Alt 2": 4.3, "Alt 3": 4.2, No: 0 };
+
 export function getPrelimPoints(res: Partial<CompetitorResult>): number {
   if (!res.scoresByJudge) return 0;
   let totalPoints = 0;
   Object.keys(res.scoresByJudge).forEach((judgeId) => {
-    const val = res.scoresByJudge[judgeId].isCallback;
-    if (val === "Yes") totalPoints += 10;
-    else if (val === "Alt 1" || val === "Alternate") totalPoints += 4.5;
-    else if (val === "Alt 2") totalPoints += 4.3;
-    else if (val === "Alt 3") totalPoints += 4.2;
-    else if (val === "No") totalPoints += 0;
+    totalPoints += CALLBACK_POINTS[res.scoresByJudge[judgeId].isCallback] || 0;
   });
   return totalPoints;
 }

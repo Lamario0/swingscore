@@ -1,9 +1,18 @@
-import React, { useState, useEffect, useRef } from "react";
+import React, { useState, useEffect, useRef, useMemo } from "react";
 import { Shield, Sparkles, RefreshCw, Trash2, PlusCircle, CheckSquare, Settings, AlertTriangle, Play, Eye, EyeOff, Lock, Unlock, Trophy, Calendar, ArrowUp, ArrowDown, Plus, ChevronDown, ChevronUp, SortAsc, Scissors, Edit, X, FileText, Award, ExternalLink } from "lucide-react";
-import { Competitor, Heat, JudgingStyle, AppSettings, ScoreRecord, CallbackValue, CompletedContestResult, PartnerRegistrationFields } from "../types";
-import { calculateHeatResults, getJudgeHeatCompetitors } from "../utils/calculations";
-import { buildRegisteredCouples, findRegisteredPartner, getDivisionLockKey, isCouplesHeat, isPartneredContest, isRegisteredFor, validatePartnerFields } from "../utils/partners";
-import PartnerContestFields, { emptyPartnerFields, partnerFieldsFrom } from "./PartnerContestFields";
+import { Competitor, Heat, JudgingStyle, AppSettings, ScoreRecord, CallbackValue, CompletedContestResult, ContestEntryFields } from "../types";
+import { calculateHeatResults, checkSheetQuota, formatRelativePlacements, getContestOptions, getJudgeHeatCompetitors, getQueuedPromotion, getSheetQuotas } from "../utils/calculations";
+import { buildRegisteredCouples, findRegisteredPartner, getDisplayBib, getDivisionLockKey, getEntrantSides, isActiveInHeat, isCouplesHeat, isPartneredContest, isRegisteredFor, projectCompetitorsForHeat, roleUpdateForEntry, showsBibs, validateContestEntries } from "../utils/partners";
+import ContestEntryInputs, { emptyContestEntries, contestEntriesFrom } from "./ContestEntryInputs";
+
+function shuffle<T>(array: T[]): T[] {
+  const copy = [...array];
+  for (let i = copy.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [copy[i], copy[j]] = [copy[j], copy[i]];
+  }
+  return copy;
+}
 
 // Which phase(s) a completed non-Finals round can advance to, per the
 // contest's own progression rules. Finals is terminal (no further round).
@@ -20,7 +29,7 @@ interface AdminPanelProps {
   scores: ScoreRecord[];
   settings: AppSettings;
   onUpdateSettings: (newSettings: Partial<AppSettings>) => Promise<void>;
-  onCreateHeat: (heat: { name: string; division: string; role: "Lead" | "Follow" | "Mixed"; competitorBibs: string[]; couples?: { id: string; leadBib: string; followBib: string }[]; heatType?: "Prelim" | "Semi-Final" | "Quarter Final" | "Finals"; contestType?: "Jack & Jill" | "Strictly Swing" | "Routine" }, target?: "live" | "next") => Promise<void>;
+  onCreateHeat: (heat: { name: string; division: string; role: "Lead" | "Follow" | "Mixed"; competitorBibs: string[]; couples?: { id: string; leadBib: string; followBib: string }[]; unpairedBibs?: string[]; finalistBibs?: string[]; heatType?: "Prelim" | "Semi-Final" | "Quarter Final" | "Finals"; contestType?: "Jack & Jill" | "Strictly Swing" | "Routine" }, target?: "live" | "next") => Promise<void>;
   onDeleteHeat: (heatId: string) => Promise<void>;
   onUpdateHeat: (heatId: string, updates: { name?: string; division?: string; role?: "Lead" | "Follow" | "Mixed"; competitorBibs?: string[]; couples?: any[]; isCustom?: boolean; splits?: number[]; heatType?: "Prelim" | "Semi-Final" | "Quarter Final" | "Finals"; contestType?: "Jack & Jill" | "Strictly Swing" | "Routine" }) => Promise<void>;
   onSimulateScores: (heatId: string) => Promise<void>;
@@ -34,8 +43,13 @@ interface AdminPanelProps {
     isCallback: CallbackValue;
   }) => Promise<void>;
   isDarkMode: boolean;
-  onUpdateCompetitor?: (oldBib: string, updates: { bib: string; name: string; email?: string; division: string; role: "Lead" | "Follow"; checkedIn?: boolean; scratched?: boolean } & PartnerRegistrationFields) => Promise<void>;
+  onUpdateCompetitor?: (oldBib: string, updates: { bib: string; name: string; email?: string; division: string; role: "Lead" | "Follow"; checkedIn?: boolean; scratched?: boolean; heatId?: string } & ContestEntryFields) => Promise<void>;
 }
+
+type GuideStatus = "todo" | "done" | "waiting" | null;
+
+const guideRing = (status: GuideStatus) =>
+  status === "todo" ? "ring-2 ring-amber-400" : status === "done" ? "ring-2 ring-green-500" : status === "waiting" ? "ring-2 ring-rose-500" : "";
 
 export default function AdminPanel({
   competitors,
@@ -71,7 +85,7 @@ export default function AdminPanel({
   const [editDivision, setEditDivision] = useState("");
   const [editCheckedIn, setEditCheckedIn] = useState(false);
   const [editScratched, setEditScratched] = useState(false);
-  const [editPartnerFields, setEditPartnerFields] = useState<PartnerRegistrationFields>(emptyPartnerFields());
+  const [editEntryFields, setEditEntryFields] = useState<ContestEntryFields>(emptyContestEntries());
   const [editError, setEditError] = useState("");
   const [isSavingEdit, setIsSavingEdit] = useState(false);
 
@@ -79,15 +93,17 @@ export default function AdminPanel({
     // Sheet rows can be copies stamped with the heat's division; always edit
     // the stored registration.
     const c = competitors.find((x) => x.bib === sheetEntry.bib) || sheetEntry;
+    // Check-in/scratch shown and saved here are the active contest's only.
+    const status = activeHeatView.find((x) => x.bib === c.bib) || sheetEntry;
     setEditingCompetitor(c);
-    setEditPartnerFields(partnerFieldsFrom(c));
+    setEditEntryFields(contestEntriesFrom(c));
     setEditBib(c.bib);
     setEditName(c.name);
     setEditEmail(c.email || "");
     setEditRole(c.role);
     setEditDivision(c.division);
-    setEditCheckedIn(c.checkedIn);
-    setEditScratched(!!c.scratched);
+    setEditCheckedIn(status.checkedIn);
+    setEditScratched(!!status.scratched);
     setEditError("");
   };
 
@@ -108,9 +124,9 @@ export default function AdminPanel({
       setEditError("Division is required.");
       return;
     }
-    const partnerError = validatePartnerFields(editPartnerFields);
-    if (partnerError) {
-      setEditError(partnerError);
+    const entryError = validateContestEntries({ ...editEntryFields, division: editDivision, role: editRole });
+    if (entryError) {
+      setEditError(entryError);
       return;
     }
     
@@ -126,7 +142,8 @@ export default function AdminPanel({
           role: editRole,
           checkedIn: editCheckedIn,
           scratched: editScratched,
-          ...editPartnerFields
+          heatId: activeHeat?.id,
+          ...editEntryFields
         });
         setEditingCompetitor(null);
       }
@@ -144,6 +161,8 @@ export default function AdminPanel({
   const [isDrawMode, setIsDrawMode] = useState(false);
   const [sortingMode, setSortingMode] = useState<"bib" | "manual">("bib");
   const [draggedOverRowIndex, setDraggedOverRowIndex] = useState<number | null>(null);
+  // Draw mode (Finals partnering): the leader row a follower is dragged over.
+  const [drawDropIndex, setDrawDropIndex] = useState<number | null>(null);
   const [expandedHeatId, setExpandedHeatId] = useState<string | null>(null);
   const [reviewJudgeForHeat, setReviewJudgeForHeat] = useState<Record<string, string | null>>({});
   const [createNextPhaseBusy, setCreateNextPhaseBusy] = useState<string | null>(null);
@@ -157,13 +176,14 @@ export default function AdminPanel({
     heatsCatalog: true,
     scoringSheetEditor: true,
     heatFlowControls: true,
+    advanceCompleted: true,
   });
 
   // Local states for Judging Configuration
   const [localJudgeNames, setLocalJudgeNames] = useState<string[]>([]);
   const [localJudgeRoles, setLocalJudgeRoles] = useState<("Leaders" | "Followers" | "Finals" | "None")[]>([]);
-  const [localChiefJudgeName, setLocalChiefJudgeName] = useState("");
   const [localChiefJudgeRole, setLocalChiefJudgeRole] = useState<"Leaders" | "Followers" | "Both" | "Finals" | "None">("Both");
+  const [localChiefJudgeName, setLocalChiefJudgeName] = useState("");
 
   const lastSyncedSettingsRef = useRef<string>("");
   const lastSyncedContestParamsRef = useRef<string>("");
@@ -207,6 +227,35 @@ export default function AdminPanel({
     ? heats.find((h) => h.id === settings.currentHeatId)
     : heats.find((h) => h.id === settings.queuedHeatId);
 
+  // The roster as the active heat sees it: each entrant carries the division
+  // and role of their entry for this contest+division (a dancer's second
+  // Jack & Jill division can be danced on the other side).
+  const activeHeatView = useMemo(
+    () => activeHeat ? projectCompetitorsForHeat(competitors, activeHeat) : competitors,
+    [competitors, activeHeat]
+  );
+
+  // Inline role changes on the scoring sheet edit the dancer's entry for the
+  // active heat, which isn't always their main Jack & Jill role.
+  const updateRoleForActiveHeat = async (bib: string, newRole: "Lead" | "Follow") => {
+    const comp = competitors.find((c) => c.bib === bib);
+    if (!comp || !activeHeat || !onUpdateCompetitor) return;
+    await onUpdateCompetitor(comp.bib, {
+      bib: comp.bib,
+      name: comp.name,
+      division: comp.division,
+      role: comp.role,
+      ...roleUpdateForEntry(comp, activeHeat.contestType, activeHeat.division, newRole)
+    });
+  };
+
+  // Entrants of the active heat's contest+division and the role each entered
+  // it in, for the scoring sheet's manual "add dancer" pickers.
+  const activeHeatSides = useMemo(
+    () => activeHeat ? getEntrantSides(competitors, activeHeat.contestType || "Jack & Jill", activeHeat.division) : new Map<string, "Lead" | "Follow">(),
+    [competitors, activeHeat?.contestType, activeHeat?.division]
+  );
+
   // ---- Judges tab: live per-judge quota/submission status for the active heat ----
   const defaultJudgeNamesForStatus = ["Judge A", "Judge B", "Judge C", "Judge D", "Judge E"];
   const defaultJudgeRolesForStatus = ["None", "None", "None", "None", "None"];
@@ -226,18 +275,6 @@ export default function AdminPanel({
     expectedJudgesForActiveHeat.push({ name: chiefNameForStatus, role: chiefRoleForStatus });
   }
 
-  const judgeTargetCallbackCount = activeHeat && activeHeat.role === "Lead"
-    ? (settings.callbackCountLeaders !== undefined ? settings.callbackCountLeaders : settings.callbackCount)
-    : activeHeat && activeHeat.role === "Follow"
-      ? (settings.callbackCountFollowers !== undefined ? settings.callbackCountFollowers : settings.callbackCount)
-      : settings.callbackCount;
-
-  const judgeTargetAlternateCount = activeHeat && activeHeat.role === "Lead"
-    ? (settings.alternateCountLeaders !== undefined ? settings.alternateCountLeaders : (settings.alternateCount || 0))
-    : activeHeat && activeHeat.role === "Follow"
-      ? (settings.alternateCountFollowers !== undefined ? settings.alternateCountFollowers : (settings.alternateCount || 0))
-      : (settings.alternateCount || 0);
-
   // Independent of whether a heat is currently live -- the admin needs to be able to
   // see and unlock any judge slot at any time, not just while a heat is active.
   // Heat-specific stats (submitted count, judging side, quota, finalized) simply read
@@ -251,41 +288,36 @@ export default function AdminPanel({
         .forEach((s) => { recordByBib[s.competitorBib] = s; });
     }
 
-    const scoredCount = heatCompetitorsForJudge.filter((c) => !!recordByBib[c.bib]).length;
+    // A finalized callback sheet counts dancers the judge left untouched as
+    // "No", as the judge's own sheet and the results do.
+    const isFinalizedCallbackSheet = !!activeHeat && settings.judgingStyle === "callback"
+      && !!settings.finalizedSheets?.includes(`${activeHeat.id}:${j.name}`);
+    const scoredCount = isFinalizedCallbackSheet
+      ? heatCompetitorsForJudge.length
+      : heatCompetitorsForJudge.filter((c) => !!recordByBib[c.bib]).length;
     const totalCount = heatCompetitorsForJudge.length;
 
-    const yesCount = heatCompetitorsForJudge.filter((c) => recordByBib[c.bib]?.isCallback === "Yes").length;
-    const altCount = heatCompetitorsForJudge.filter((c) => {
-      const val = recordByBib[c.bib]?.isCallback;
-      return val && val !== "No" && val !== "Yes";
-    }).length;
-
-    let areAltsSatisfied = true;
-    for (let r = 1; r <= judgeTargetAlternateCount; r++) {
-      const cnt = heatCompetitorsForJudge.filter((c) => recordByBib[c.bib]?.isCallback === `Alt ${r}`).length;
-      if (cnt !== 1) areAltsSatisfied = false;
-    }
-    for (let r = judgeTargetAlternateCount + 1; r <= 3; r++) {
-      const cnt = heatCompetitorsForJudge.filter((c) => recordByBib[c.bib]?.isCallback === `Alt ${r}`).length;
-      if (cnt > 0) areAltsSatisfied = false;
-    }
+    const quotaStatuses = (activeHeat ? getSheetQuotas(activeHeat, heatCompetitorsForJudge, settings) : [])
+      .map((quota) => ({ quota, ...checkSheetQuota(quota, (bib) => recordByBib[bib]?.isCallback) }));
 
     // What this judge is ACTUALLY judging for the current heat, distinct from
     // their persistent config role (which may just say "Both" or "Finals") --
     // derived from who they actually see, so "Both" resolves to a concrete
-    // Leaders/Followers/Both answer for this specific heat. Finals heats are
-    // always judged as couples, so the indicator is redundant there and is
-    // suppressed entirely ("N/A"), as is the case whenever there is no active heat.
+    // Leaders/Followers/Both answer for this specific heat. Couples heats read
+    // "Couples"; with no active heat (or nobody to judge yet) it falls back to
+    // the configured role, so every judge row always shows what they judge.
     const isHeatFinalsForBadge = activeHeat ? isCouplesHeat(activeHeat) : false;
     const rolesSeen = new Set(heatCompetitorsForJudge.map((c) => c.role));
-    const judgingSide: "Leaders" | "Followers" | "Both" | "N/A" =
-      !activeHeat || isHeatFinalsForBadge || heatCompetitorsForJudge.length === 0
-        ? "N/A"
-        : rolesSeen.size === 1 && rolesSeen.has("Lead")
-          ? "Leaders"
-          : rolesSeen.size === 1 && rolesSeen.has("Follow")
-            ? "Followers"
-            : "Both";
+    const judgingSide: "Leaders" | "Followers" | "Both" | "Finals" | "Couples" =
+      !activeHeat || heatCompetitorsForJudge.length === 0
+        ? (j.role === "None" ? "Both" : j.role)
+        : isHeatFinalsForBadge
+          ? "Couples"
+          : rolesSeen.size === 1 && rolesSeen.has("Lead")
+            ? "Leaders"
+            : rolesSeen.size === 1 && rolesSeen.has("Follow")
+              ? "Followers"
+              : "Both";
 
     return {
       name: j.name,
@@ -293,9 +325,8 @@ export default function AdminPanel({
       judgingSide,
       scoredCount,
       totalCount,
-      yesCount,
-      altCount,
-      isQuotaSatisfied: !!activeHeat && yesCount === judgeTargetCallbackCount && areAltsSatisfied,
+      quotaStatuses,
+      isQuotaSatisfied: quotaStatuses.length > 0 && quotaStatuses.every((status) => status.isMet),
       isFinalized: activeHeat ? (settings.finalizedSheets || []).includes(`${activeHeat.id}:${j.name}`) : false,
       isClaimed: (settings.claimedJudges || []).includes(j.name)
     };
@@ -339,7 +370,7 @@ export default function AdminPanel({
           ];
         } else {
           // Flat individual competitor (Modern, correct way)
-          const comp = competitors.find(c => c.bib === bibOrId);
+          const comp = activeHeatView.find(c => c.bib === bibOrId);
           const name = comp ? comp.name : `Dancer #${bibOrId}`;
           const bibLabel = bibOrId;
           const division = comp ? comp.division : activeHeat.division;
@@ -370,23 +401,126 @@ export default function AdminPanel({
       })
     : [];
 
+  // A Routine sheet has no bibs: couples are known by name and run in saved order.
+  const showSheetBibs = showsBibs(activeHeat?.contestType);
+  const isSortedByBib = sortingMode === "bib" && showSheetBibs;
+
+  // Bib order sorts a couple by its leader's bib, so both partners stay on
+  // the same row of the Leaders and Followers lists.
+  const getBibSortKey = (row: { index: number; bibLabel: string }) => {
+    const entry = activeHeat?.competitorBibs[row.index] || "";
+    if (!entry.includes("_")) return row.bibLabel;
+    const [leadBib, followBib] = entry.split("_");
+    return leadBib || followBib || "";
+  };
   const orderedHeatRows = activeHeat
-    ? (sortingMode === "bib"
-        ? [...activeHeatRows].sort((a, b) => a.bibLabel.localeCompare(b.bibLabel, undefined, { numeric: true }))
+    ? (isSortedByBib
+        ? [...activeHeatRows].sort((a, b) => getBibSortKey(a).localeCompare(getBibSortKey(b), undefined, { numeric: true }))
         : activeHeatRows)
     : [];
 
+  // `index` is the row's position as shown; `heatIndex` its place in the saved order.
   const leadRows = activeHeat
     ? orderedHeatRows
         .filter(row => row.role === "Lead")
-        .map((row, idx) => ({ ...row, index: idx }))
+        .map((row, idx) => ({ ...row, heatIndex: row.index, index: idx }))
     : [];
 
   const followRows = activeHeat
     ? orderedHeatRows
         .filter(row => row.role === "Follow")
-        .map((row, idx) => ({ ...row, index: idx }))
+        .map((row, idx) => ({ ...row, heatIndex: row.index, index: idx }))
     : [];
+
+  // Running-order controls (arrows, Randomize) work on the order shown. They
+  // save that order and switch the editor to Manual Order, since a sheet
+  // shown by bib number would hide the change.
+  const isCouplesSheet = !!activeHeat && activeHeat.competitorBibs.some((id) => id.includes("_"));
+  const saveSheetOrder = async (update: { competitorBibs: string[]; couples?: { id: string; leadBib: string; followBib: string }[] }) => {
+    if (!activeHeat) return;
+    setSortingMode("manual");
+    await onUpdateHeat(activeHeat.id, { ...update, isCustom: true });
+  };
+
+  // Moves the dancer shown at `from` to `to`. `side` is their list (Leaders or
+  // Followers), or null for the single-list sheet. On a couples sheet each row
+  // is one couple's leader or follower, so moving a dancer swaps them with the
+  // neighbouring couple's dancer on that side, re-partnering both couples.
+  // Routine partners are fixed, so there the whole couple moves.
+  const moveSheetDancer = async (side: "Lead" | "Follow" | null, from: number, to: number) => {
+    if (!activeHeat) return;
+    if (isCouplesSheet) {
+      if (!side) return;
+      const shownCouples = leadRows.map((row) => {
+        const [leadBib = "", followBib = ""] = activeHeat.competitorBibs[row.heatIndex].split("_");
+        return { leadBib, followBib };
+      });
+      if (to < 0 || to >= shownCouples.length) return;
+      if (showSheetBibs) {
+        const key = side === "Lead" ? "leadBib" : "followBib";
+        [shownCouples[from][key], shownCouples[to][key]] = [shownCouples[to][key], shownCouples[from][key]];
+      } else {
+        [shownCouples[from], shownCouples[to]] = [shownCouples[to], shownCouples[from]];
+      }
+      const couples = shownCouples.map((couple) => ({ id: `${couple.leadBib}_${couple.followBib}`, ...couple }));
+      await saveSheetOrder({ competitorBibs: couples.map((couple) => couple.id), couples });
+      return;
+    }
+    const swap = (ids: string[]) => {
+      if (to < 0 || to >= ids.length) return null;
+      [ids[from], ids[to]] = [ids[to], ids[from]];
+      return ids;
+    };
+    if (!side) {
+      const ids = swap(orderedHeatRows.map((row) => row.id));
+      if (ids) await saveSheetOrder({ competitorBibs: ids });
+      return;
+    }
+    const leadIds = leadRows.map((row) => row.id);
+    const followIds = followRows.map((row) => row.id);
+    if (!swap(side === "Lead" ? leadIds : followIds)) return;
+    await saveSheetOrder({ competitorBibs: [...leadIds, ...followIds] });
+  };
+
+  // Shuffles a Routine's running order, with partners staying together. The
+  // final check-in rebuilds the sheet, so this waits until it's finalized.
+  const isSheetCheckInFinalized = activeHeatControlTab === "next" ? !!settings.queuedCheckInFinalized : !!settings.checkInFinalized;
+  const handleRandomizeRoutineOrder = async () => {
+    if (!activeHeat) return;
+    if (!window.confirm("Randomize the running order? The current order will be replaced.")) return;
+    const couples = shuffle(activeHeat.competitorBibs).map((id) => {
+      const [leadBib = "", followBib = ""] = id.split("_");
+      return { id, leadBib, followBib };
+    });
+    await saveSheetOrder({ competitorBibs: couples.map((couple) => couple.id), couples });
+  };
+
+  // Draw mode partners a Jack & Jill Finals: followers, listed in bib order at
+  // the bottom of the card, are dragged onto leaders. A follower dropped on a
+  // leader who already has a partner swaps places with that partner.
+  const isDrawSheet = isDrawMode && !!activeHeat && activeHeat.heatType === "Finals" && !isPartneredContest(activeHeat.contestType);
+  const drawFollowers = (activeHeat?.couples || [])
+    .map((couple) => couple.followBib)
+    .filter((bib): bib is string => !!bib)
+    .sort((a, b) => a.localeCompare(b, undefined, { numeric: true }));
+  const DRAW_FOLLOWER_PREFIX = "draw-follower:";
+
+  const assignDrawFollower = async (followBib: string, targetIndex: number) => {
+    if (!activeHeat) return;
+    const couplesList = (activeHeat.couples || []).map((couple) => ({ ...couple }));
+    const target = couplesList[targetIndex];
+    const sourceIndex = couplesList.findIndex((couple) => couple.followBib === followBib);
+    if (!target || sourceIndex === targetIndex) return;
+    const displaced = target.followBib;
+    target.followBib = followBib;
+    if (sourceIndex !== -1) couplesList[sourceIndex].followBib = displaced || "";
+    couplesList.forEach((couple) => { couple.id = `${couple.leadBib}_${couple.followBib}`; });
+    await onUpdateHeat(activeHeat.id, {
+      couples: couplesList,
+      competitorBibs: couplesList.map((couple) => couple.id),
+      isCustom: true
+    });
+  };
 
   const handleMoveToHeat = async (idx: number, targetHeat: 1 | 2 | 3) => {
     if (!activeHeat) return;
@@ -467,6 +601,104 @@ export default function AdminPanel({
     await onUpdateHeat(activeHeat.id, { splits: finalSplits, isCustom: true });
   };
 
+  // Heat cut-offs sit in the gaps between rows. A gap's number is how many rows
+  // come before it, so gap 1 falls after the first row.
+  const lastSplitGap = Math.max(leadRows.length, followRows.length) - 1;
+  const saveSplits = async (splits: number[]) => {
+    if (!activeHeat) return;
+    await onUpdateHeat(activeHeat.id, { splits: [...splits].sort((a, b) => a - b), isCustom: true });
+  };
+
+  const moveSplit = async (from: number, to: number) => {
+    const others = currentSplits.filter((split) => split !== from);
+    if (to < 1 || to > lastSplitGap || others.includes(to)) return;
+    await saveSplits([...others, to]);
+  };
+
+  const HEAT_SPLIT_PREFIX = "heat-split:";
+  const handleSplitDrop = async (e: React.DragEvent, gap: number) => {
+    e.preventDefault();
+    setDraggedOverRowIndex(null);
+    const data = e.dataTransfer.getData("text/plain");
+    if (data.startsWith(HEAT_SPLIT_PREFIX)) {
+      await moveSplit(Number(data.slice(HEAT_SPLIT_PREFIX.length)), gap);
+      return;
+    }
+    if (currentSplits.length >= 2) {
+      alert("Maximum of 2 splits (creating up to 3 heats) is allowed.");
+      return;
+    }
+    if (!currentSplits.includes(gap)) await saveSplits([...currentSplits, gap]);
+  };
+
+  // The gap after a row: a drop target, or the cut-off placed there, which can
+  // be dragged to another gap or moved a row at a time with its arrows.
+  const renderSplitGap = (rowIndex: number) => {
+    const gap = rowIndex + 1;
+    const isOver = draggedOverRowIndex === rowIndex;
+    const arrowClass = (isDisabled: boolean) => `p-1.5 rounded-lg border border-violet-500/30 text-violet-500 transition-all ${
+      isDisabled ? "opacity-30 cursor-not-allowed" : "hover:bg-violet-500/10 cursor-pointer"
+    }`;
+    return (
+      <tr
+        onDragOver={(e) => {
+          e.preventDefault();
+          setDraggedOverRowIndex(rowIndex);
+        }}
+        onDragLeave={() => setDraggedOverRowIndex(null)}
+        onDrop={(e) => handleSplitDrop(e, gap)}
+        className={`transition-all duration-300 ${isOver ? "bg-violet-500/10" : "hover:bg-violet-500/[0.01]"}`}
+      >
+        <td colSpan={5} className="p-1 text-center font-mono text-xs">
+          {currentSplits.includes(gap) ? (
+            <div
+              id={`heat-split-${gap}`}
+              draggable
+              onDragStart={(e) => e.dataTransfer.setData("text/plain", `${HEAT_SPLIT_PREFIX}${gap}`)}
+              className="px-2 py-1.5 flex flex-wrap items-center justify-center gap-2 bg-violet-600/5 dark:bg-violet-600/[0.03] border-t border-b border-violet-500/20 rounded-lg cursor-grab active:cursor-grabbing"
+            >
+              <span className="px-2 py-0.5 bg-violet-600 text-white font-mono font-bold text-[9px] uppercase tracking-wider rounded-md shadow-sm">
+                Heat {currentSplits.filter((split) => split <= gap).length + 1} starting here
+              </span>
+              <div className="flex items-center gap-1">
+                <button type="button" disabled={gap <= 1 || currentSplits.includes(gap - 1)} onClick={() => moveSplit(gap, gap - 1)} className={arrowClass(gap <= 1 || currentSplits.includes(gap - 1))} title="Move this cut-off up a row">
+                  <ArrowUp className="w-3.5 h-3.5" />
+                </button>
+                <button type="button" disabled={gap >= lastSplitGap || currentSplits.includes(gap + 1)} onClick={() => moveSplit(gap, gap + 1)} className={arrowClass(gap >= lastSplitGap || currentSplits.includes(gap + 1))} title="Move this cut-off down a row">
+                  <ArrowDown className="w-3.5 h-3.5" />
+                </button>
+                <button
+                  type="button"
+                  onClick={() => saveSplits(currentSplits.filter((split) => split !== gap))}
+                  className="px-2 py-1.5 bg-rose-600 hover:bg-rose-700 text-white text-[10px] font-bold rounded-lg cursor-pointer transition-all shadow-sm flex items-center gap-1"
+                  title="Remove this cut-off"
+                >
+                  <Trash2 className="w-3 h-3" />
+                  Remove
+                </button>
+              </div>
+            </div>
+          ) : (
+            <div className={`w-full py-1 flex items-center justify-center gap-2 border-t border-dashed border-slate-200 dark:border-slate-800/60 opacity-30 group-hover:opacity-100 transition-all ${
+              isOver ? "opacity-100 border-violet-500 text-violet-500 font-bold bg-violet-500/[0.04] py-2 rounded-lg" : ""
+            }`}>
+              {isOver ? (
+                <span className="text-[9px] uppercase font-bold tracking-widest text-violet-500 animate-pulse flex items-center gap-1">
+                  <Scissors className="w-3 h-3 animate-bounce" />
+                  Drop to split
+                </span>
+              ) : (
+                <span className="text-[8px] uppercase font-bold tracking-widest text-slate-400 dark:text-slate-500 select-none opacity-0 hover:opacity-100 transition-opacity">
+                  [ Drop Cut-off Line Here ]
+                </span>
+              )}
+            </div>
+          )}
+        </td>
+      </tr>
+    );
+  };
+
   useEffect(() => {
     if (activeHeat) {
       setSliderIndex(1);
@@ -475,10 +707,10 @@ export default function AdminPanel({
   const activeHeatScores = activeHeat ? scores.filter((s) => s.heatId === activeHeat.id) : [];
   const activeJudges = Array.from(new Set(activeHeatScores.map((s) => s.judgeId)));
   const rawActiveHeatCompetitors = activeHeat 
-    ? activeHeat.competitorBibs.map((bib) => competitors.find((c) => c.bib === bib)).filter((c): c is Competitor => !!c)
+    ? activeHeat.competitorBibs.map((bib) => activeHeatView.find((c) => c.bib === bib)).filter((c): c is Competitor => !!c)
     : [];
   const activeHeatCompetitors = activeHeat
-    ? (sortingMode === "bib"
+    ? (isSortedByBib
         ? [...rawActiveHeatCompetitors].sort((a, b) => a.bib.localeCompare(b.bib, undefined, { numeric: true }))
         : rawActiveHeatCompetitors)
     : [];
@@ -521,7 +753,16 @@ export default function AdminPanel({
     return expected;
   };
 
+  // settings.judgingStyle belongs to the Live Contest. Any other contest keeps
+  // the style it was scored with, or queued with.
+  const getHeatJudgingStyle = (heat: Heat): JudgingStyle =>
+    settings.completedResults?.find((r) => r.heatId === heat.id)?.judgingStyle
+    || (heat.id === settings.queuedHeatId ? settings.nextJudgingStyle : undefined)
+    || settings.judgingStyle
+    || "raw";
+
   const getExpectedCompetitorsForJudge = (heat: Heat, judgeId: string) => {
+    const heatCompetitors = projectCompetitorsForHeat(competitors, heat);
     const defaultNames = ["Judge A", "Judge B", "Judge C", "Judge D", "Judge E"];
     const defaultRoles = ["None", "None", "None", "None", "None"];
     const names = settings.judgeNames || defaultNames;
@@ -542,7 +783,7 @@ export default function AdminPanel({
     const isHeatFinals = isCouplesHeat(heat);
     const rawHeatCompetitors = heat.competitorBibs
       .map((bib) => {
-        const comp = competitors.find((c) => c.bib === bib);
+        const comp = heatCompetitors.find((c) => c.bib === bib);
         if (comp) {
           if (comp.checkedIn && !comp.scratched) {
             return comp;
@@ -552,8 +793,8 @@ export default function AdminPanel({
 
         if (bib.includes("_")) {
           const [leadBib, followBib] = bib.split("_");
-          const lead = competitors.find((c) => c.bib === leadBib);
-          const follow = competitors.find((c) => c.bib === followBib);
+          const lead = heatCompetitors.find((c) => c.bib === leadBib);
+          const follow = heatCompetitors.find((c) => c.bib === followBib);
 
           const isLeadOk = lead ? (lead.checkedIn && !lead.scratched) : false;
           const isFollowOk = follow ? (follow.checkedIn && !follow.scratched) : false;
@@ -617,6 +858,16 @@ export default function AdminPanel({
   const isLiveConfigLocked = !!settings.contestConfigLocked;
   const isNextContestQueued = !!settings.queuedHeatId || !!settings.nextContestConfigLocked;
   const isContestConfigLocked = isNextTab ? !!settings.nextContestConfigLocked : (isLiveConfigLocked && isNextContestQueued);
+  // The Next Contest tab only opens once a contest has been queued ("Prepare
+  // Next"), and locks again when that contest is promoted to Live. Its check-in
+  // sheet can be created once the Floor Coordinators finalize the Live check-in.
+  const isNextTabAvailable = isNextContestQueued;
+  const nextTabUnavailableTitle = "Queue a contest with Prepare Next to open the Next Contest tab";
+  const nextCheckInBlocker = !settings.checkInFinalized
+    ? "The Live Contest's check-in sheet must be finalized by the Floor Coordinator before the Next Contest's check-in sheet can be created."
+    : settings.queuedHeatId
+      ? "A check-in sheet already exists for the queued contest."
+      : null;
 
   const isAllJudgesComplete = !!(
     activeHeat && 
@@ -634,6 +885,31 @@ export default function AdminPanel({
       return isFinalized && scoresComplete;
     })
   );
+
+  useEffect(() => {
+    if (activeHeatControlTab === "next" && !isNextTabAvailable) setActiveHeatControlTab("live");
+  }, [activeHeatControlTab, isNextTabAvailable]);
+
+  // Where the selected contest is in its setup. Each setup panel is outlined
+  // yellow when it's the next step, green once done, and red while the Floor
+  // Coordinator still has to finalize check-in. The yellow panel opens and the
+  // rest close whenever a step is reached; between steps the Admin can open
+  // and close them freely.
+  const isContestCreated = !!activeHeat || (isNextTab ? !!settings.nextContestConfigLocked : !!settings.contestConfigLocked);
+  const isScoringConfigured = !!activeHeat || (isNextTab ? !!settings.nextScoringConfirmed : !!settings.scoringConfirmed);
+  const guide: Record<"contestConfig" | "scoringConfig" | "createHeat" | "scoringSheetEditor", GuideStatus> = {
+    contestConfig: isContestCreated ? "done" : "todo",
+    scoringConfig: !isContestCreated ? null : isScoringConfigured ? "done" : "todo",
+    createHeat: !isScoringConfigured || !isContestCreated ? null : !activeHeat ? "todo" : isSheetCheckInFinalized ? "done" : "waiting",
+    scoringSheetEditor: isNextTab || !activeHeat ? null : isAllJudgesComplete ? "done" : "todo"
+  };
+  const guideStep = `${activeHeatControlTab}|${Object.values(guide).join("|")}`;
+  useEffect(() => {
+    setCollapsedCards((prev) => ({
+      ...prev,
+      ...Object.fromEntries(Object.entries(guide).map(([card, status]) => [card, status !== "todo"]))
+    }));
+  }, [guideStep]);
 
   const liveHeat = heats.find((h) => h.id === settings.currentHeatId);
   const isLiveHeatComplete = !!(
@@ -695,6 +971,7 @@ export default function AdminPanel({
   // Mixed, non-Finals heats are computed as separate Leader/Follower fields
   // (see calculateHeatResults), so group the ranked list the same way.
   const liveHeatHasDistinctRoles = !!liveHeat && liveHeat.role === "Mixed" && !isCouplesHeat(liveHeat);
+  const liveHeatHasChiefScores = !!liveHeat && scores.some((s) => s.heatId === liveHeat.id && s.judgeId === (settings.chiefJudgeName || "Chief Judge"));
   const liveHeatRankedLeads = liveHeatHasDistinctRoles
     ? [...liveHeatResults].filter(r => r.competitor.role === "Lead").sort((a, b) => a.rank - b.rank)
     : [];
@@ -778,7 +1055,7 @@ export default function AdminPanel({
   // for cut. `judgingStyleOverride` lets the completed-contest card show its
   // own frozen judging style even if the live settings have since moved on to
   // a different contest.
-  const renderLiveRankRow = (r: (typeof liveHeatResults)[number], judgingStyleOverride?: JudgingStyle) => (
+  const renderLiveRankRow = (r: (typeof liveHeatResults)[number], contestType?: string | null, judgingStyleOverride?: JudgingStyle) => (
     <tr
       key={r.competitor.bib}
       className={`border-b last:border-0 ${isDarkMode ? "border-slate-800/50" : "border-slate-100"} ${
@@ -792,10 +1069,13 @@ export default function AdminPanel({
       <td className={`p-2 text-center font-mono font-bold ${r.qualified ? "text-green-500" : r.isAlternate ? "text-amber-500" : "text-slate-400"}`}>
         {r.rank}
       </td>
-      <td className="p-2 text-center font-mono font-bold text-violet-500">#{r.competitor.bib}</td>
+      <td className="p-2 text-center font-mono font-bold text-violet-500">#{getDisplayBib(r.competitor.bib, contestType)}</td>
       <td className={`p-2 font-medium ${r.qualified ? "" : "opacity-70"}`}>{r.competitor.name}</td>
       <td className="p-2 text-right font-mono font-semibold">
         {(judgingStyleOverride || settings.judgingStyle || "raw") === "raw" ? r.averageScore.toFixed(2) : `${(r.prelimPoints || 0).toFixed(1)} pts`}
+        {r.isTieSettledByChief && (
+          <span title="Tie settled by the Chief Judge" className="ml-1.5 px-1 py-0.5 rounded bg-amber-500/10 text-amber-500 text-[9px] font-bold border border-amber-500/20">CJ</span>
+        )}
       </td>
       <td className="p-2 text-right">
         <span className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-bold ${
@@ -805,7 +1085,7 @@ export default function AdminPanel({
               ? "bg-amber-500/15 text-amber-500"
               : "bg-slate-500/15 text-slate-400"
         }`}>
-          {r.qualified ? "Callback" : r.isAlternate ? `Alt ${r.alternateRank}` : "Cut"}
+          {r.qualified ? "Callback" : r.tieGroup !== undefined ? "Tied" : r.isAlternate ? `Alt ${r.alternateRank}` : "Cut"}
         </span>
       </td>
     </tr>
@@ -859,25 +1139,36 @@ export default function AdminPanel({
     }
   }, [settings, activeHeatControlTab]);
 
+  // The role each dancer entered the configured contest in (Strictly Swing has
+  // its own role; Routine couples take their side of the pairing), which can
+  // differ from their Jack & Jill role.
+  const formEntrantSides = useMemo(() => getEntrantSides(competitors, contestType, division), [competitors, contestType, division]);
+  // A contest created from a previous round's finalists only offers those
+  // finalists; dancers who were cut stay off its check-in sheet.
+  const builderFinalistBibs = activeHeat?.finalistBibs;
+  const isInBuilderPool = (c: Competitor) => !builderFinalistBibs || builderFinalistBibs.includes(c.bib);
+  const getFormSide = (c: Competitor) => formEntrantSides.get(c.bib) || c.role;
+
   // Auto-sync the Create Heat Sheet division and pre-populate selected dancers matching the division from registration
+  const builderPoolKey = `${contestType}:${division}:${builderFinalistBibs ? builderFinalistBibs.join(",") : "all"}`;
   useEffect(() => {
-    const isNewDivOrRole = `${contestType}:${division}` !== lastPopulatedDivRef.current || newHeatRole !== lastPopulatedRoleRef.current;
+    const isNewDivOrRole = builderPoolKey !== lastPopulatedDivRef.current || newHeatRole !== lastPopulatedRoleRef.current;
     const initialLoadOccurred = competitors.length > 0 && !hasPopulatedRef.current;
 
     if (isNewDivOrRole || initialLoadOccurred) {
       const matching = competitors.filter((c) => {
         const matchesDiv = isRegisteredFor(c, contestType, division);
-        const matchesRole = newHeatRole === "Mixed" || c.role === newHeatRole;
-        return matchesDiv && matchesRole;
+        const matchesRole = newHeatRole === "Mixed" || contestType === "Routine" || getFormSide(c) === newHeatRole;
+        return matchesDiv && matchesRole && isInBuilderPool(c);
       });
       setSelectedBibs(matching.map((c) => c.bib));
-      lastPopulatedDivRef.current = `${contestType}:${division}`;
+      lastPopulatedDivRef.current = builderPoolKey;
       lastPopulatedRoleRef.current = newHeatRole;
       if (competitors.length > 0) {
         hasPopulatedRef.current = true;
       }
     }
-  }, [division, contestType, competitors, newHeatRole]);
+  }, [builderPoolKey, division, contestType, competitors, newHeatRole, formEntrantSides]);
 
   const getDivisionsForContest = (contest: string) => {
     if (contest === "Routine") {
@@ -892,9 +1183,12 @@ export default function AdminPanel({
     if (!validDivs.includes(division)) {
       setDivision(validDivs[0]);
     }
-    // Routines are always judged as a Finals-phase couples round.
+    // Routines are always judged as a Finals-phase couples round, with no roles.
     if (newContest === "Routine" && heatType !== "Finals") {
       setHeatType("Finals");
+    }
+    if (newContest === "Routine") {
+      setNewHeatRole("Mixed");
     }
   };
 
@@ -918,7 +1212,7 @@ export default function AdminPanel({
           const matchingBibs = competitors
             .filter((c) => {
               const matchesDiv = isRegisteredFor(c, contestType, division);
-              return matchesDiv && c.checkedIn && !c.scratched;
+              return matchesDiv && isActiveInHeat(c, settings.currentHeatId!);
             })
             .map((c) => c.bib);
 
@@ -926,10 +1220,11 @@ export default function AdminPanel({
           // the registered pairings; Jack & Jill Finals keeps its draw order.
           let matchingCouples: any[] = [];
           if (isPartneredContest(contestType)) {
-            matchingCouples = buildRegisteredCouples(competitors, contestType, division, (c) => c.checkedIn && !c.scratched).couples;
+            matchingCouples = buildRegisteredCouples(competitors, contestType, division, (c) => isActiveInHeat(c, settings.currentHeatId!)).couples;
           } else if (isCouplesContest) {
-            const leads = competitors.filter(c => c.division === division && c.role === "Lead" && c.checkedIn && !c.scratched).map(c => c.bib);
-            const follows = competitors.filter(c => c.division === division && c.role === "Follow" && c.checkedIn && !c.scratched).map(c => c.bib);
+            const activeSides = getEntrantSides(competitors.filter(c => isActiveInHeat(c, settings.currentHeatId!)), contestType, division);
+            const leads = [...activeSides].filter(([, side]) => side === "Lead").map(([bib]) => bib);
+            const follows = [...activeSides].filter(([, side]) => side === "Follow").map(([bib]) => bib);
             const couplesCount = Math.max(leads.length, follows.length);
             for (let i = 0; i < couplesCount; i++) {
               const lead = leads[i] || "";
@@ -954,15 +1249,10 @@ export default function AdminPanel({
           contestType,
           division,
           heatType,
-          contestConfigLocked: true
+          contestConfigLocked: true,
+          scoringConfirmed: false
         });
       }
-      // Collapse Contest Config & Expand Create Heat Sheet
-      setCollapsedCards((prev) => ({
-        ...prev,
-        contestConfig: true,
-        createHeat: false,
-      }));
     } catch (err) {
       alert("Failed to update contest parameters.");
     } finally {
@@ -970,64 +1260,29 @@ export default function AdminPanel({
     }
   };
 
+  // "Prepare Next": queues the configured contest as the Next Contest. Its
+  // check-in sheet is then created from the Next Contest tab once the Floor
+  // Coordinators have finalized the Live Contest's check-in.
   const handleAutoFillHeatForm = async () => {
-    const formattedName = `${division} ${contestType} - ${heatType}`;
-    setNewHeatName(formattedName);
-    const computedRole = "Mixed";
-    setNewHeatRole(computedRole);
-
-    const isCouplesContest = isCouplesHeat({ contestType, heatType });
-
+    setLoading(true);
     try {
-      let finalBibs: string[] = [];
-      let finalCouples: { id: string; leadBib: string; followBib: string }[] = [];
-      if (isPartneredContest(contestType)) {
-        finalCouples = buildRegisteredCouples(competitors, contestType, division, (c) => c.checkedIn && !c.scratched).couples;
-        finalBibs = finalCouples.map((c) => c.id);
-      } else if (isCouplesContest) {
-        const leads = competitors.filter(c => c.division === division && c.role === "Lead" && c.checkedIn && !c.scratched).map(c => c.bib);
-        const follows = competitors.filter(c => c.division === division && c.role === "Follow" && c.checkedIn && !c.scratched).map(c => c.bib);
-        const couplesCount = Math.max(leads.length, follows.length);
-        for (let i = 0; i < couplesCount; i++) {
-          const lead = leads[i] || "";
-          const follow = follows[i] || "";
-          finalBibs.push(`${lead}_${follow}`);
-          finalCouples.push({ id: `${lead}_${follow}`, leadBib: lead, followBib: follow });
-        }
-      } else {
-        finalBibs = competitors
-          .filter((c) => c.division === division && c.checkedIn && !c.scratched)
-          .map((c) => c.bib);
-      }
-
-      await onCreateHeat({
-        name: formattedName,
-        division: division,
-        role: computedRole,
-        competitorBibs: finalBibs,
-        couples: finalCouples.length > 0 ? finalCouples : undefined,
-        heatType: heatType,
-        contestType: contestType
-      }, "next");
-
       await onUpdateSettings({
         nextContestType: contestType,
         nextDivision: division,
         nextHeatType: heatType,
         nextJudgingStyle: heatType === "Finals" ? "placement" : "raw",
-        nextContestConfigLocked: true
+        nextContestConfigLocked: true,
+        nextScoringConfirmed: false
       } as any);
-
+      setNewHeatName(`${division} ${contestType} - ${heatType}`);
+      setNewHeatRole("Mixed");
       setActiveHeatControlTab("next");
     } catch (err) {
-      console.error("Failed to automatically pre-create next heat:", err);
+      console.error("Failed to queue the next contest:", err);
+      alert("Failed to queue the next contest.");
+    } finally {
+      setLoading(false);
     }
-
-    // Collapse Contest Config
-    setCollapsedCards((prev) => ({
-      ...prev,
-      contestConfig: true,
-    }));
   };
 
   // Shared by both advancement paths below (still-live heat, and the last
@@ -1041,28 +1296,7 @@ export default function AdminPanel({
   // when there's no Live Contest to protect (guarded by the caller), so this
   // never displaces an in-progress round.
   const promoteQueuedToLive = async () => {
-    const promotePayload: any = {
-      currentHeatId: settings.queuedHeatId,
-      queuedHeatId: null,
-      checkInFinalized: false,
-      finalizedSheets: [],
-      nextContestConfigLocked: false,
-      ...(settings.nextContestType ? { contestType: settings.nextContestType, nextContestType: null } : {}),
-      ...(settings.nextDivision ? { division: settings.nextDivision, nextDivision: null } : {}),
-      ...(settings.nextHeatType ? { heatType: settings.nextHeatType, nextHeatType: null } : {}),
-      ...(settings.nextJudgingStyle ? { judgingStyle: settings.nextJudgingStyle, nextJudgingStyle: null } : {}),
-      ...(settings.nextCallbackCount ? { callbackCount: settings.nextCallbackCount, nextCallbackCount: null } : {}),
-      ...(settings.nextAlternateCount !== undefined ? { alternateCount: settings.nextAlternateCount, nextAlternateCount: null } : {}),
-      ...(settings.nextCallbackCountLeaders ? { callbackCountLeaders: settings.nextCallbackCountLeaders, nextCallbackCountLeaders: null } : {}),
-      ...(settings.nextCallbackCountFollowers ? { callbackCountFollowers: settings.nextCallbackCountFollowers, nextCallbackCountFollowers: null } : {}),
-      ...(settings.nextAlternateCountLeaders !== undefined ? { alternateCountLeaders: settings.nextAlternateCountLeaders, nextAlternateCountLeaders: null } : {}),
-      ...(settings.nextAlternateCountFollowers !== undefined ? { alternateCountFollowers: settings.nextAlternateCountFollowers, nextAlternateCountFollowers: null } : {}),
-      ...(settings.nextJudgeNames ? { judgeNames: settings.nextJudgeNames, nextJudgeNames: null } : {}),
-      ...(settings.nextJudgeRoles ? { judgeRoles: settings.nextJudgeRoles, nextJudgeRoles: null } : {}),
-      ...(settings.nextChiefJudgeName ? { chiefJudgeName: settings.nextChiefJudgeName, nextChiefJudgeName: null } : {}),
-      ...(settings.nextChiefJudgeRole ? { chiefJudgeRole: settings.nextChiefJudgeRole, nextChiefJudgeRole: null } : {}),
-    };
-    await onUpdateSettings(promotePayload);
+    await onUpdateSettings(getQueuedPromotion(settings) as any);
   };
 
   const createAdvancementHeat = async (
@@ -1074,6 +1308,9 @@ export default function AdminPanel({
       qualifiedFlatBibs: string[];
       contestTypeForNext: "Jack & Jill" | "Strictly Swing" | "Routine";
       divisionForNext: string;
+      // Set when the caller has just completed the Live Contest, since
+      // `settings` here still describes the slots from before that.
+      slotsAfterCompletion?: { hasLive: boolean; hasQueued: boolean; completedNote: string };
     }
   ): Promise<boolean> => {
     const isPartneredNext = isPartneredContest(opts.contestTypeForNext);
@@ -1128,8 +1365,8 @@ export default function AdminPanel({
     //    round while judges finish the current one" case.
     //  - Both slots are already full -> refuse rather than silently bumping
     //    whichever one would otherwise get clobbered.
-    const hasLive = !!settings.currentHeatId;
-    const hasQueued = !!settings.queuedHeatId;
+    const hasLive = opts.slotsAfterCompletion ? opts.slotsAfterCompletion.hasLive : !!settings.currentHeatId;
+    const hasQueued = opts.slotsAfterCompletion ? opts.slotsAfterCompletion.hasQueued : !!settings.queuedHeatId;
 
     if (hasLive && hasQueued) {
       alert("Both a Live Contest and a Next Contest are already set up. Complete the Live Contest (or promote/clear the Next Contest) before creating another round.");
@@ -1149,6 +1386,7 @@ export default function AdminPanel({
       role: "Mixed",
       competitorBibs: finalBibs,
       couples: finalCouples.length > 0 ? finalCouples : undefined,
+      finalistBibs: [...new Set(finalBibs.flatMap((id) => id.split("_")).filter(Boolean))],
       heatType: targetHeatType,
       contestType: opts.contestTypeForNext
     }, createAsLive ? "live" : "next");
@@ -1179,25 +1417,150 @@ export default function AdminPanel({
     const entryNoun = isCouplesTarget ? `${finalBibs.length} couple${finalBibs.length === 1 ? "" : "s"}` : `${finalBibs.length} competitor${finalBibs.length === 1 ? "" : "s"}`;
     const destinationNoun = createAsLive ? "made the Live Contest" : "queued as the Next Contest";
     const promotionNote = (!hasLive && hasQueued) ? " The previously queued contest is now Live." : "";
-    alert(`${targetHeatType} heat created from ${totalFinalists} finalist${totalFinalists === 1 ? "" : "s"} (${entryNoun}) and ${destinationNoun}.${promotionNote}`);
+    alert(`${opts.slotsAfterCompletion?.completedNote || ""}${targetHeatType} heat created from ${totalFinalists} finalist${totalFinalists === 1 ? "" : "s"} (${entryNoun}) and ${destinationNoun}.${promotionNote}`);
     return true;
   };
 
-  // Auto-creates the next round's heat pre-populated with ONLY the just-completed
-  // live heat's qualified (callback-cut) competitors, and queues it as the Next
-  // Contest -- the quick alternative to manually rebuilding the roster in the
-  // Next tab. Only usable while the round is still live (before "Complete Heat").
+  // "Complete Contest": records the Live Contest's results, then promotes the
+  // queued Next Contest to Live, or resets the Live slot when nothing is
+  // queued. Returns the promoted contest's name (null when none was queued).
+  const completeLiveContest = async (): Promise<{ promotedName: string | null }> => {
+    let updatedCompletedResults = settings.completedResults || [];
+
+    // 1. End/score/record contest: calculate results for the live heat
+    const liveHeatToComplete = heats.find(h => h.id === settings.currentHeatId);
+    if (liveHeatToComplete) {
+      const hCallbackCount = liveHeatToComplete.role === "Lead"
+        ? (settings.callbackCountLeaders !== undefined ? settings.callbackCountLeaders : settings.callbackCount)
+        : liveHeatToComplete.role === "Follow"
+          ? (settings.callbackCountFollowers !== undefined ? settings.callbackCountFollowers : settings.callbackCount)
+          : (settings.callbackCount || 5);
+
+      const hAlternateCount = liveHeatToComplete.role === "Lead"
+        ? (settings.alternateCountLeaders !== undefined ? settings.alternateCountLeaders : (settings.alternateCount !== undefined ? settings.alternateCount : 2))
+        : liveHeatToComplete.role === "Follow"
+          ? (settings.alternateCountFollowers !== undefined ? settings.alternateCountFollowers : (settings.alternateCount !== undefined ? settings.alternateCount : 2))
+          : (settings.alternateCount !== undefined ? settings.alternateCount : 2);
+
+      const results = calculateHeatResults(
+        liveHeatToComplete,
+        competitors,
+        scores,
+        settings.judgingStyle || "raw",
+        hCallbackCount,
+        hAlternateCount,
+        settings.callbackCountLeaders,
+        settings.callbackCountFollowers,
+        settings.alternateCountLeaders,
+        settings.alternateCountFollowers,
+        settings
+      );
+
+      const completedItem: CompletedContestResult = {
+        id: `${liveHeatToComplete.id}_${Date.now()}`,
+        heatId: liveHeatToComplete.id,
+        name: liveHeatToComplete.name,
+        division: liveHeatToComplete.division,
+        heatType: liveHeatToComplete.heatType || "Prelim",
+        timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+        completedAt: new Date().toLocaleString([], { dateStyle: "medium", timeStyle: "short" }),
+        eventName: settings.eventName || "",
+        judgingStyle: settings.judgingStyle || "raw",
+        rankings: results.map((r, index) => ({
+          rank: r.rank || (index + 1),
+          bib: r.competitor.bib,
+          name: r.competitor.name,
+          averageScore: r.averageScore,
+          averagePlacement: r.averagePlacement,
+          prelimPoints: r.prelimPoints,
+          qualified: r.qualified,
+          isAlternate: r.isAlternate,
+          alternateRank: r.alternateRank,
+          tieGroup: r.tieGroup
+        })),
+        configSnapshot: {
+          callbackCount: hCallbackCount,
+          alternateCount: hAlternateCount,
+          callbackCountLeaders: settings.callbackCountLeaders,
+          callbackCountFollowers: settings.callbackCountFollowers,
+          alternateCountLeaders: settings.alternateCountLeaders,
+          alternateCountFollowers: settings.alternateCountFollowers,
+          judgeNames: settings.judgeNames,
+          judgeRoles: settings.judgeRoles,
+          chiefJudgeName: settings.chiefJudgeName,
+          chiefJudgeRole: settings.chiefJudgeRole
+        }
+      };
+
+      updatedCompletedResults = [
+        ...updatedCompletedResults.filter(r => r.heatId !== liveHeatToComplete.id), // replace if already exists
+        completedItem
+      ];
+    }
+
+    // 2. Advance / Reset logic
+    if (settings.queuedHeatId) {
+      const nextHeat = heats.find(h => h.id === settings.queuedHeatId);
+      await onUpdateSettings({ completedResults: updatedCompletedResults, ...getQueuedPromotion(settings) } as any);
+      setActiveHeatControlTab("live");
+      return { promotedName: nextHeat ? nextHeat.name : "Queued heat" };
+    } else {
+      // No Next Heat exists, reset admin panel!
+      await onUpdateSettings({
+        completedResults: updatedCompletedResults,
+        currentHeatId: null,
+        checkInFinalized: false,
+        finalizedSheets: [],
+        contestType: "Jack & Jill",
+        division: "Novice",
+        heatType: "Prelim",
+        queuedHeatId: null,
+        contestConfigLocked: false,
+        nextContestConfigLocked: false
+      });
+      setContestType("Jack & Jill");
+      setDivision("Novice");
+      setHeatType("Prelim");
+      setActiveHeatControlTab("live");
+      return { promotedName: null };
+    }
+  };
+
+  // Advances the Live Contest's finalists in one step: completes the Live
+  // Contest (recording its results, as "Complete Contest" does), promotes the
+  // queued Next Contest to Live, and queues a new round of the chosen phase
+  // pre-populated with ONLY the qualified (callback-cut) competitors. With
+  // nothing queued, the new round becomes the Live Contest instead.
   const handleCreateNextContestFromFinalists = async (targetHeatType: "Prelim" | "Semi-Final" | "Quarter Final" | "Finals") => {
     if (!liveHeat) return;
+    if (!canCompleteHeat) {
+      alert("Every judge must submit and finalize their sheet before the Live Contest can be completed.");
+      return;
+    }
+    if (liveHeatResults.some((r) => r.tieGroup !== undefined)) {
+      alert("Scores don't separate some dancers at the cut. Run Complete Contest, settle the tie in the Scoring & Results Ledger, then create the next round from Advance Last Completed Contest.");
+      return;
+    }
     setCreateNextPhaseBusy(targetHeatType);
     try {
-      await createAdvancementHeat(targetHeatType, {
+      // Read the finalists before completing: afterwards this round is no longer Live.
+      const advancement = {
         isMixed: liveHeatHasDistinctRoles,
         qualifiedLeadBibs: liveHeatRankedLeads.filter(r => r.qualified).map(r => r.competitor.bib),
         qualifiedFollowBibs: liveHeatRankedFollows.filter(r => r.qualified).map(r => r.competitor.bib),
         qualifiedFlatBibs: liveHeatRankedFlat.filter(r => r.qualified).map(r => r.competitor.bib),
         contestTypeForNext: liveHeat.contestType || settings.contestType || "Jack & Jill",
         divisionForNext: liveHeat.division
+      };
+      const completedName = liveHeat.name;
+      const { promotedName } = await completeLiveContest();
+      await createAdvancementHeat(targetHeatType, {
+        ...advancement,
+        slotsAfterCompletion: {
+          hasLive: !!promotedName,
+          hasQueued: false,
+          completedNote: `${completedName} completed and recorded.${promotedName ? ` ${promotedName} is now Live.` : ""} `
+        }
       });
     } catch (err) {
       console.error("Failed to create next contest from finalists:", err);
@@ -1212,6 +1575,10 @@ export default function AdminPanel({
   // entry in completedResults instead of live scores.
   const handleCreateNextContestFromCompleted = async (targetHeatType: "Prelim" | "Semi-Final" | "Quarter Final" | "Finals") => {
     if (!lastCompletedResult) return;
+    if (lastCompletedResults.some((r) => r.tieGroup !== undefined)) {
+      alert("Scores don't separate some dancers at the cut. Settle the tie in the Scoring & Results Ledger first.");
+      return;
+    }
     setCreateNextPhaseBusy(targetHeatType);
     try {
       await createAdvancementHeat(targetHeatType, {
@@ -1230,79 +1597,83 @@ export default function AdminPanel({
     }
   };
 
-  // Wipes the Live Contest's slot back to a blank state: deletes its current
-  // heat (cascading its scores), clears check-in/finalization flags, resets
-  // the Contest Configuration fields to their defaults, and unlocks them so
-  // the card can be reconfigured from scratch.
+  // Deletes the Live Contest and its scores, then frees the slot: the server
+  // promotes the Next Contest into it, or clears it back to a blank
+  // configuration when nothing is queued.
   const handleResetLiveContest = async () => {
-    if (!window.confirm("Reset the Live Contest? This deletes its current heat and any scores recorded against it, clears its type/division/phase configuration, and unlocks the Contest Configuration card.")) {
+    const queuedHeat = heats.find((h) => h.id === settings.queuedHeatId);
+    const whatHappensNext = queuedHeat ? ` ${queuedHeat.name} will become the Live Contest.` : "";
+    if (!window.confirm(`Delete ${liveHeat?.name || "the Live Contest"}? This permanently deletes it and every score on it, and clears its configuration.${whatHappensNext}`)) {
       return;
     }
     setLoading(true);
     try {
-      const heatIdToClear = settings.currentHeatId;
-      if (heatIdToClear) {
-        await onDeleteHeat(heatIdToClear);
+      if (settings.currentHeatId) {
+        await onDeleteHeat(settings.currentHeatId);
+      } else {
+        await onUpdateSettings({
+          checkInFinalized: false,
+          contestType: "Jack & Jill",
+          division: "Novice",
+          heatType: "Prelim",
+          judgingStyle: "raw",
+          contestConfigLocked: false
+        });
       }
-      const payload: any = {
-        currentHeatId: null,
-        checkInFinalized: false,
-        contestType: "Jack & Jill",
-        division: "Novice",
-        heatType: "Prelim",
-        judgingStyle: "raw",
-        contestConfigLocked: false
-      };
-      if (heatIdToClear) {
-        payload.finalizedSheets = (settings.finalizedSheets || []).filter((entry) => !entry.startsWith(`${heatIdToClear}:`));
-      }
-      await onUpdateSettings(payload);
-      if (!isNextTab) {
+      setActiveHeatControlTab("live");
+      if (!queuedHeat) {
         setContestType("Jack & Jill");
         setDivision("Novice");
         setHeatType("Prelim");
       }
     } catch (err) {
-      alert("Failed to reset the Live Contest.");
+      alert("Failed to delete the Live Contest.");
     } finally {
       setLoading(false);
     }
   };
 
-  // Wipes the Queued (Next) Contest's slot back to a blank state, mirroring
-  // handleResetLiveContest for the staged "next" fields.
+  // Deletes the Queued (Next) Contest, mirroring handleResetLiveContest for
+  // the staged "next" fields.
   const handleResetNextContest = async () => {
-    if (!window.confirm("Reset the Queued Contest? This deletes its queued heat and any scores recorded against it, clears its staged type/division/phase configuration, and unlocks it for reconfiguration.")) {
+    const queuedHeat = heats.find((h) => h.id === settings.queuedHeatId);
+    if (!window.confirm(`Delete ${queuedHeat?.name || "the Next Contest"}? This permanently deletes it and any scores on it, and clears its staged configuration.`)) {
       return;
     }
     setLoading(true);
     try {
-      const heatIdToClear = settings.queuedHeatId;
-      if (heatIdToClear) {
-        await onDeleteHeat(heatIdToClear);
+      if (settings.queuedHeatId) {
+        await onDeleteHeat(settings.queuedHeatId);
+      } else {
+        await onUpdateSettings({
+          queuedCheckInFinalized: false,
+          nextContestType: null,
+          nextDivision: null,
+          nextHeatType: null,
+          nextJudgingStyle: null,
+          nextContestConfigLocked: false
+        } as any);
       }
-      const payload: any = {
-        queuedHeatId: null,
-        queuedCheckInFinalized: false,
-        nextContestType: null,
-        nextDivision: null,
-        nextHeatType: null,
-        nextJudgingStyle: null,
-        nextContestConfigLocked: false
-      };
-      if (heatIdToClear) {
-        payload.finalizedSheets = (settings.finalizedSheets || []).filter((entry) => !entry.startsWith(`${heatIdToClear}:`));
-      }
-      await onUpdateSettings(payload);
       if (isNextTab) {
         setContestType("Jack & Jill");
         setDivision("Novice");
         setHeatType("Prelim");
       }
     } catch (err) {
-      alert("Failed to reset the Queued Contest.");
+      alert("Failed to delete the Next Contest.");
     } finally {
       setLoading(false);
+    }
+  };
+
+  const handleDeleteCompletedContest = async (heat: Heat) => {
+    if (!window.confirm(`Delete ${heat.name}? This permanently deletes it, its scores and its recorded results.`)) {
+      return;
+    }
+    try {
+      await onDeleteHeat(heat.id);
+    } catch (err) {
+      alert(`Failed to delete ${heat.name}.`);
     }
   };
 
@@ -1343,27 +1714,26 @@ export default function AdminPanel({
       return;
     }
 
-    if (activeHeatControlTab === "next" && !settings.checkInFinalized) {
-      setFormError("The Live Contest's check-in sheet must be finalized before the Next Contest's check-in sheet can be created.");
+    if (activeHeatControlTab === "next" && nextCheckInBlocker) {
+      setFormError(nextCheckInBlocker);
       return;
     }
 
-    // Partnered contests are entered as couples: every selected dancer must be
-    // selected together with their registered partner.
+    // Partnered contests are danced as couples formed from registered
+    // pairings. Selected dancers whose partner can't be matched still go on the
+    // sheet, as unpaired, for the Floor Coordinator to assign a partner.
     let sheetBibs = selectedBibs;
     let sheetCouples: { id: string; leadBib: string; followBib: string }[] | undefined;
+    let sheetUnpaired: string[] = [];
     if (isPartneredContest(contestType)) {
       const { couples, unpaired } = buildRegisteredCouples(
         competitors.filter((c) => selectedBibs.includes(c.bib)),
         contestType,
         division
       );
-      if (unpaired.length > 0) {
-        setFormError(`Each ${contestType} dancer must be selected with their registered partner. Unpaired: ${unpaired.map((c) => `#${c.bib} ${c.name}`).join(", ")}.`);
-        return;
-      }
       sheetCouples = couples;
       sheetBibs = couples.map((c) => c.id);
+      sheetUnpaired = unpaired.map((c) => c.bib);
     }
 
     setLoading(true);
@@ -1374,6 +1744,7 @@ export default function AdminPanel({
         role: sheetCouples ? "Mixed" : newHeatRole,
         competitorBibs: sheetBibs,
         couples: sheetCouples,
+        unpairedBibs: sheetUnpaired,
         heatType: heatType,
         contestType: contestType
       }, activeHeatControlTab);
@@ -1389,11 +1760,6 @@ export default function AdminPanel({
       setFormSuccess(`Heat "${newHeatName}" created successfully with ${selectedBibs.length} dancers! Registration for ${division} ${contestType} is now closed.`);
       setNewHeatName("");
       setSelectedBibs([]);
-      setCollapsedCards((prev) => ({
-        ...prev,
-        createHeat: true,
-        scoringSheetEditor: false
-      }));
     } catch (err: any) {
       setFormError(err.message || "Failed to create heat.");
     } finally {
@@ -1413,8 +1779,8 @@ export default function AdminPanel({
     // Select all competitors that match the chosen division & role
     const matching = competitors.filter((c) => {
       const matchesDiv = isRegisteredFor(c, contestType, division);
-      const matchesRole = newHeatRole === "Mixed" || c.role === newHeatRole;
-      return matchesDiv && matchesRole;
+      const matchesRole = newHeatRole === "Mixed" || contestType === "Routine" || getFormSide(c) === newHeatRole;
+      return matchesDiv && matchesRole && isInBuilderPool(c);
     });
 
     setSelectedBibs(matching.map((c) => c.bib));
@@ -1441,7 +1807,7 @@ export default function AdminPanel({
     setResetStatus("Resetting...");
     try {
       await onResetDatabase();
-      setResetStatus("Database reset to original seed state successfully.");
+      setResetStatus("Contests and results cleared. Your dancers were kept.");
       setShowResetConfirm(false);
       setTimeout(() => setResetStatus(null), 5000);
     } catch (err) {
@@ -1454,6 +1820,7 @@ export default function AdminPanel({
 
   const handleClearAll = async () => {
     if (!onClearAllDatabase) return;
+    if (!window.confirm("Permanently delete every dancer, contest, score and result in this gateway? This can't be undone.")) return;
     setLoading(true);
     try {
       await onClearAllDatabase();
@@ -1469,8 +1836,8 @@ export default function AdminPanel({
   // Competitors matching chosen form division & role
   const formMatchingCompetitors = competitors.filter((c) => {
     const matchesDiv = isRegisteredFor(c, contestType, division);
-    const matchesRole = newHeatRole === "Mixed" || c.role === newHeatRole;
-    return matchesDiv && matchesRole;
+    const matchesRole = newHeatRole === "Mixed" || contestType === "Routine" || getFormSide(c) === newHeatRole;
+    return matchesDiv && matchesRole && isInBuilderPool(c);
   });
 
   return (
@@ -1505,19 +1872,19 @@ export default function AdminPanel({
           </button>
           <button
             type="button"
-            disabled={!settings.queuedHeatId}
+            disabled={!isNextTabAvailable}
             onClick={() => setActiveHeatControlTab("next")}
             className={`px-3 py-1 text-xs font-bold rounded-full transition-all flex items-center gap-1.5 ${
-              !settings.queuedHeatId
+              !isNextTabAvailable
                 ? "bg-slate-800 text-slate-500 dark:bg-slate-900 text-slate-600 cursor-not-allowed opacity-30"
                 : activeHeatControlTab === "next"
                   ? "bg-emerald-600 text-white shadow-md shadow-emerald-600/25"
                   : "text-slate-400 hover:text-slate-200 cursor-pointer"
             }`}
-            title="Queued Next Contest"
+            title={isNextTabAvailable ? "Queued Next Contest" : nextTabUnavailableTitle}
           >
             Next Contest
-            {settings.queuedHeatId && (
+            {isNextTabAvailable && (
               <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
             )}
           </button>
@@ -1575,10 +1942,11 @@ export default function AdminPanel({
               <button
                 id="heat-tab-next-btn"
                 type="button"
-                disabled={!settings.queuedHeatId}
+                disabled={!isNextTabAvailable}
+                title={isNextTabAvailable ? undefined : nextTabUnavailableTitle}
                 onClick={() => setActiveHeatControlTab("next")}
                 className={`flex-1 py-1.5 text-xs font-bold rounded-lg transition-all flex items-center justify-center gap-1.5 ${
-                  !settings.queuedHeatId
+                  !isNextTabAvailable
                     ? "bg-slate-200 dark:bg-slate-900 text-slate-400 dark:text-slate-600 cursor-not-allowed opacity-50"
                     : activeHeatControlTab === "next"
                       ? "bg-emerald-600 text-white shadow-sm"
@@ -1586,7 +1954,7 @@ export default function AdminPanel({
                 }`}
               >
                 Next Contest
-                {settings.queuedHeatId && (
+                {isNextTabAvailable && (
                   <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
                 )}
               </button>
@@ -1626,8 +1994,122 @@ export default function AdminPanel({
           </div>
         )}
 
-        {/* Contest Parameters Setup */}
+        {/* Orchestration & Permissions Control */}
         <div className={`p-6 rounded-2xl border transition-all ${isDarkMode ? "bg-slate-900 border-slate-800 text-slate-100" : "bg-white border-slate-200 shadow-sm text-slate-800"}`}>
+          <div 
+            className="flex items-center justify-between mb-3 cursor-pointer select-none"
+            onClick={() => toggleCard("portalAccess")}
+          >
+            <div className="flex items-center gap-2">
+              <Lock className="w-5 h-5 text-violet-500" />
+              <h2 className="text-base font-bold tracking-tight">Active Portal Access</h2>
+            </div>
+            {collapsedCards.portalAccess ? (
+              <ChevronDown className="w-4 h-4 text-slate-400" />
+            ) : (
+              <ChevronUp className="w-4 h-4 text-slate-400" />
+            )}
+          </div>
+
+          {!collapsedCards.portalAccess && (
+            <>
+              <p className="text-[11px] text-slate-400 mb-4 leading-relaxed">
+                Lock down or open up modules in real-time. Changes apply instantly to active dancer, staff, or public sessions.
+              </p>
+
+              <div className="space-y-2.5">
+                {/* Registration Permission */}
+                <div className="flex items-center justify-between p-2 rounded-xl border border-slate-200 dark:border-slate-800 bg-slate-50/50 dark:bg-slate-950/40">
+                  <div>
+                    <span className="text-xs font-bold block">Competitor Registration</span>
+                    <span className="text-[9px] text-slate-400">Registration system</span>
+                  </div>
+                  <button
+                    id="toggle-reg-permission-btn"
+                    onClick={() => onUpdateSettings({ registrationEnabled: settings.registrationEnabled === false ? true : false })}
+                    className={`px-2.5 py-1 text-[9px] font-bold rounded-lg uppercase tracking-wider border cursor-pointer ${
+                      settings.registrationEnabled !== false
+                        ? "bg-green-600/10 border-green-500/20 text-green-500"
+                        : "bg-rose-600/10 border-rose-500/20 text-rose-500"
+                    }`}
+                  >
+                    {settings.registrationEnabled !== false ? "Open" : "Locked"}
+                  </button>
+                </div>
+
+                {/* Check-In Permission */}
+                <div className="flex items-center justify-between p-2 rounded-xl border border-slate-200 dark:border-slate-800 bg-slate-50/50 dark:bg-slate-950/40">
+                  <div>
+                    <span className="text-xs font-bold block">Staff Check-In Portal</span>
+                    <span className="text-[9px] text-slate-400">Coordinator check-ins</span>
+                  </div>
+                  <button
+                    id="toggle-checkin-permission-btn"
+                    onClick={() => onUpdateSettings({ checkInEnabled: settings.checkInEnabled === false ? true : false })}
+                    className={`px-2.5 py-1 text-[9px] font-bold rounded-lg uppercase tracking-wider border cursor-pointer ${
+                      settings.checkInEnabled !== false
+                        ? "bg-green-600/10 border-green-500/20 text-green-500"
+                        : "bg-rose-600/10 border-rose-500/20 text-rose-500"
+                    }`}
+                  >
+                    {settings.checkInEnabled !== false ? "Open" : "Locked"}
+                  </button>
+                </div>
+
+                {/* Judging Permission */}
+                <div className="flex items-center justify-between p-2 rounded-xl border border-slate-200 dark:border-slate-800 bg-slate-50/50 dark:bg-slate-950/40">
+                  <div>
+                    <span className="text-xs font-bold block">Judges Live Scoring</span>
+                    <span className="text-[9px] text-slate-400">Allow sheet submissions</span>
+                  </div>
+                  <button
+                    id="toggle-judging-permission-btn"
+                    onClick={() => onUpdateSettings({ judgingEnabled: settings.judgingEnabled === false ? true : false })}
+                    className={`px-2.5 py-1 text-[9px] font-bold rounded-lg uppercase tracking-wider border cursor-pointer ${
+                      settings.judgingEnabled !== false
+                        ? "bg-green-600/10 border-green-500/20 text-green-500"
+                        : "bg-rose-600/10 border-rose-500/20 text-rose-500"
+                    }`}
+                  >
+                    {settings.judgingEnabled !== false ? "Open" : "Locked"}
+                  </button>
+                </div>
+
+                {/* Scoresheet Publication */}
+                <div className="flex items-center justify-between p-2 rounded-xl border border-violet-500/25 bg-violet-600/5 mt-1">
+                  <div>
+                    <span className="text-xs font-bold text-violet-500 block">Scoresheet Publication</span>
+                    <span className="text-[9px] text-slate-400 font-mono">Results Dashboard status</span>
+                  </div>
+                  <button
+                    id="toggle-publish-scoreboard-btn"
+                    onClick={() => onUpdateSettings({ isPublished: settings.isPublished === false ? true : false })}
+                    className={`px-2.5 py-1 text-[9px] font-bold rounded-lg uppercase tracking-wider border flex items-center gap-1.5 cursor-pointer ${
+                      settings.isPublished !== false
+                        ? "bg-violet-600 border-violet-600 text-white"
+                        : "bg-slate-800 border-slate-700 text-slate-300 hover:bg-slate-750"
+                    }`}
+                  >
+                    {settings.isPublished !== false ? (
+                      <>
+                        <Eye className="w-3.5 h-3.5" />
+                        Published
+                      </>
+                    ) : (
+                      <>
+                        <EyeOff className="w-3.5 h-3.5" />
+                        Draft
+                      </>
+                    )}
+                  </button>
+                </div>
+              </div>
+            </>
+          )}
+        </div>
+
+        {/* Contest Parameters Setup */}
+        <div className={`p-6 rounded-2xl border transition-all ${guideRing(guide.contestConfig)} ${isDarkMode ? "bg-slate-900 border-slate-800 text-slate-100" : "bg-white border-slate-200 shadow-sm text-slate-800"}`}>
           <div 
             className="flex items-center justify-between mb-3 cursor-pointer select-none"
             onClick={() => toggleCard("contestConfig")}
@@ -1771,7 +2253,7 @@ export default function AdminPanel({
                       id="reset-contest-config-btn"
                       onClick={() => (isNextTab ? handleResetNextContest() : handleResetLiveContest())}
                       disabled={loading}
-                      title={isNextTab ? "Reset the Queued Contest" : "Reset the Live Contest"}
+                      title={isNextTab ? "Delete the Next Contest" : "Delete the Live Contest"}
                       className={`flex-shrink-0 p-2.5 rounded-xl border transition-all ${
                         loading ? "opacity-50 cursor-not-allowed" : "cursor-pointer"
                       } ${
@@ -1804,7 +2286,7 @@ export default function AdminPanel({
                         id="reset-next-contest-config-btn"
                         onClick={handleResetNextContest}
                         disabled={loading}
-                        title="Reset the Queued Contest"
+                        title="Delete the Next Contest"
                         className={`flex-shrink-0 p-2.5 rounded-xl border transition-all ${
                           loading ? "opacity-50 cursor-not-allowed" : "cursor-pointer"
                         } ${
@@ -1823,123 +2305,8 @@ export default function AdminPanel({
           )}
         </div>
 
-        {/* Orchestration & Permissions Control */}
-        <div className={`p-6 rounded-2xl border transition-all ${isDarkMode ? "bg-slate-900 border-slate-800 text-slate-100" : "bg-white border-slate-200 shadow-sm text-slate-800"}`}>
-          <div 
-            className="flex items-center justify-between mb-3 cursor-pointer select-none"
-            onClick={() => toggleCard("portalAccess")}
-          >
-            <div className="flex items-center gap-2">
-              <Lock className="w-5 h-5 text-violet-500" />
-              <h2 className="text-base font-bold tracking-tight">Active Portal Access</h2>
-            </div>
-            {collapsedCards.portalAccess ? (
-              <ChevronDown className="w-4 h-4 text-slate-400" />
-            ) : (
-              <ChevronUp className="w-4 h-4 text-slate-400" />
-            )}
-          </div>
-
-          {!collapsedCards.portalAccess && (
-            <>
-              <p className="text-[11px] text-slate-400 mb-4 leading-relaxed">
-                Lock down or open up modules in real-time. Changes apply instantly to active dancer, staff, or public sessions.
-              </p>
-
-              <div className="space-y-2.5">
-                {/* Registration Permission */}
-                <div className="flex items-center justify-between p-2 rounded-xl border border-slate-200 dark:border-slate-800 bg-slate-50/50 dark:bg-slate-950/40">
-                  <div>
-                    <span className="text-xs font-bold block">Competitor Registration</span>
-                    <span className="text-[9px] text-slate-400">Self-registration system</span>
-                  </div>
-                  <button
-                    id="toggle-reg-permission-btn"
-                    onClick={() => onUpdateSettings({ registrationEnabled: settings.registrationEnabled === false ? true : false })}
-                    className={`px-2.5 py-1 text-[9px] font-bold rounded-lg uppercase tracking-wider border cursor-pointer ${
-                      settings.registrationEnabled !== false
-                        ? "bg-green-600/10 border-green-500/20 text-green-500"
-                        : "bg-rose-600/10 border-rose-500/20 text-rose-500"
-                    }`}
-                  >
-                    {settings.registrationEnabled !== false ? "Open" : "Locked"}
-                  </button>
-                </div>
-
-                {/* Check-In Permission */}
-                <div className="flex items-center justify-between p-2 rounded-xl border border-slate-200 dark:border-slate-800 bg-slate-50/50 dark:bg-slate-950/40">
-                  <div>
-                    <span className="text-xs font-bold block">Staff Check-In Portal</span>
-                    <span className="text-[9px] text-slate-400">Coordinator check-ins</span>
-                  </div>
-                  <button
-                    id="toggle-checkin-permission-btn"
-                    onClick={() => onUpdateSettings({ checkInEnabled: settings.checkInEnabled === false ? true : false })}
-                    className={`px-2.5 py-1 text-[9px] font-bold rounded-lg uppercase tracking-wider border cursor-pointer ${
-                      settings.checkInEnabled !== false
-                        ? "bg-green-600/10 border-green-500/20 text-green-500"
-                        : "bg-rose-600/10 border-rose-500/20 text-rose-500"
-                    }`}
-                  >
-                    {settings.checkInEnabled !== false ? "Open" : "Locked"}
-                  </button>
-                </div>
-
-                {/* Judging Permission */}
-                <div className="flex items-center justify-between p-2 rounded-xl border border-slate-200 dark:border-slate-800 bg-slate-50/50 dark:bg-slate-950/40">
-                  <div>
-                    <span className="text-xs font-bold block">Judges Live Scoring</span>
-                    <span className="text-[9px] text-slate-400">Allow sheet submissions</span>
-                  </div>
-                  <button
-                    id="toggle-judging-permission-btn"
-                    onClick={() => onUpdateSettings({ judgingEnabled: settings.judgingEnabled === false ? true : false })}
-                    className={`px-2.5 py-1 text-[9px] font-bold rounded-lg uppercase tracking-wider border cursor-pointer ${
-                      settings.judgingEnabled !== false
-                        ? "bg-green-600/10 border-green-500/20 text-green-500"
-                        : "bg-rose-600/10 border-rose-500/20 text-rose-500"
-                    }`}
-                  >
-                    {settings.judgingEnabled !== false ? "Open" : "Locked"}
-                  </button>
-                </div>
-
-                {/* Scoresheet Publication */}
-                <div className="flex items-center justify-between p-2 rounded-xl border border-violet-500/25 bg-violet-600/5 mt-1">
-                  <div>
-                    <span className="text-xs font-bold text-violet-500 block">Scoresheet Publication</span>
-                    <span className="text-[9px] text-slate-400 font-mono">Results Dashboard status</span>
-                  </div>
-                  <button
-                    id="toggle-publish-scoreboard-btn"
-                    onClick={() => onUpdateSettings({ isPublished: settings.isPublished === false ? true : false })}
-                    className={`px-2.5 py-1 text-[9px] font-bold rounded-lg uppercase tracking-wider border flex items-center gap-1.5 cursor-pointer ${
-                      settings.isPublished !== false
-                        ? "bg-violet-600 border-violet-600 text-white"
-                        : "bg-slate-800 border-slate-700 text-slate-300 hover:bg-slate-750"
-                    }`}
-                  >
-                    {settings.isPublished !== false ? (
-                      <>
-                        <Eye className="w-3.5 h-3.5" />
-                        Published
-                      </>
-                    ) : (
-                      <>
-                        <EyeOff className="w-3.5 h-3.5" />
-                        Draft
-                      </>
-                    )}
-                  </button>
-                </div>
-              </div>
-            </>
-          )}
-        </div>
-
-
         {/* Scoring Style */}
-        <div className={`p-6 rounded-2xl border transition-all ${isDarkMode ? "bg-slate-900 border-slate-800 text-slate-100" : "bg-white border-slate-200 shadow-sm text-slate-800"}`}>
+        <div className={`p-6 rounded-2xl border transition-all ${guideRing(guide.scoringConfig)} ${isDarkMode ? "bg-slate-900 border-slate-800 text-slate-100" : "bg-white border-slate-200 shadow-sm text-slate-800"}`}>
           <div 
             className="flex items-center justify-between mb-4 cursor-pointer select-none"
             onClick={() => toggleCard("scoringConfig")}
@@ -2230,8 +2597,8 @@ export default function AdminPanel({
                         value={localChiefJudgeRole}
                         onChange={(e) => setLocalChiefJudgeRole(e.target.value as any)}
                         className={`w-36 px-2.5 py-1.5 text-xs font-semibold rounded-xl border focus:outline-none focus:ring-1 focus:ring-violet-500 transition-all cursor-pointer ${
-                          isDarkMode 
-                            ? "bg-slate-950 border-slate-800 text-slate-100" 
+                          isDarkMode
+                            ? "bg-slate-950 border-slate-800 text-slate-100"
                             : "bg-slate-50 border-slate-200 text-slate-800"
                         }`}
                       >
@@ -2249,23 +2616,31 @@ export default function AdminPanel({
                     id="save-scoring-config-btn"
                     type="button"
                     onClick={async () => {
+                      // A Finals needs a panel of at least two, and the Chief Judge can be the second.
+                      const slotHeatType = isNextTab ? settings.nextHeatType : settings.heatType;
+                      const judgesFinals = (role: string) => role === "Finals" || role === "Both";
+                      const finalsPanelSize = localJudgeRoles.filter(judgesFinals).length + (judgesFinals(localChiefJudgeRole) ? 1 : 0);
+                      if (slotHeatType === "Finals" && finalsPanelSize < 2) {
+                        alert("A Finals needs at least 2 judges. Give another judge the Finals role, or set the Chief Judge to Finals or Both.");
+                        return;
+                      }
                       setLoading(true);
                       try {
                         const updatePayload = isNextTab ? {
                           nextJudgeNames: localJudgeNames,
                           nextJudgeRoles: localJudgeRoles,
                           nextChiefJudgeName: localChiefJudgeName,
-                          nextChiefJudgeRole: localChiefJudgeRole
+                          nextChiefJudgeRole: localChiefJudgeRole,
+                          nextScoringConfirmed: true
                         } : {
                           judgeNames: localJudgeNames,
                           judgeRoles: localJudgeRoles,
                           chiefJudgeName: localChiefJudgeName,
-                          chiefJudgeRole: localChiefJudgeRole
+                          chiefJudgeRole: localChiefJudgeRole,
+                          scoringConfirmed: true
                         };
                         await onUpdateSettings(updatePayload);
                         alert("Scoring & Judging configurations saved successfully.");
-                        // Collapse Scoring Config
-                        setCollapsedCards((prev) => ({ ...prev, scoringConfig: true }));
                       } catch (err) {
                         alert("Failed to save scoring configurations.");
                       } finally {
@@ -2283,7 +2658,7 @@ export default function AdminPanel({
           )}
         </div>
 
-        <div className={`p-6 rounded-2xl border transition-all ${isDarkMode ? "bg-slate-900 border-slate-800 text-slate-100" : "bg-white border-slate-200 shadow-sm text-slate-800"}`}>
+        <div className={`p-6 rounded-2xl border transition-all ${guideRing(guide.createHeat)} ${isDarkMode ? "bg-slate-900 border-slate-800 text-slate-100" : "bg-white border-slate-200 shadow-sm text-slate-800"}`}>
           <div 
             className="flex items-center justify-between mb-4 cursor-pointer select-none"
             onClick={() => toggleCard("createHeat")}
@@ -2342,7 +2717,8 @@ export default function AdminPanel({
                   </div>
                 </div>
 
-                {/* Role Select */}
+                {/* Role Select (Routines have no roles) */}
+                {contestType !== "Routine" && (
                 <div className="md:col-span-2">
                   <label className="block text-xs font-medium text-slate-400 mb-1.5">Roles</label>
                   <div className="grid grid-cols-3 gap-2">
@@ -2367,6 +2743,7 @@ export default function AdminPanel({
                     ))}
                   </div>
                 </div>
+                )}
               </div>
 
 
@@ -2376,7 +2753,11 @@ export default function AdminPanel({
                 <div className="flex items-center justify-between gap-4 mb-3">
                   <div>
                     <h3 className="text-xs font-bold font-mono text-slate-400 uppercase tracking-wider">Select Dancers</h3>
-                    <p className="text-[10px] text-slate-400">Pulling names registered for {division} {contestType} ({newHeatRole})</p>
+                    <p className="text-[10px] text-slate-400">
+                      {builderFinalistBibs
+                        ? `Finalists from the previous round only (${builderFinalistBibs.length}); dancers who were cut aren't listed.`
+                        : `Pulling names registered for ${division} ${contestType}${contestType === "Routine" ? "" : ` (${newHeatRole})`}`}
+                    </p>
                   </div>
                   <button
                     type="button"
@@ -2388,99 +2769,71 @@ export default function AdminPanel({
                   </button>
                 </div>
 
-                <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-                  {/* Leaders Column */}
-                  <div>
-                    <h4 className="text-[10px] font-bold font-mono text-violet-500 uppercase tracking-wider mb-2 pb-1 border-b border-violet-500/10">Leaders</h4>
-                    <div className="space-y-2 max-h-48 overflow-y-auto pr-1">
-                      {formMatchingCompetitors.filter(c => c.role === "Lead").map((c) => {
-                        const isSelected = selectedBibs.includes(c.bib);
-                        return (
-                          <button
-                            key={c.bib}
-                            type="button"
-                            onClick={() => toggleSelectCompetitor(c.bib)}
-                            className={`w-full p-2.5 rounded-xl border text-left text-xs flex items-center justify-between transition-all ${
-                              isSelected
-                                ? "bg-violet-600/15 border-violet-500 text-violet-500 font-bold"
-                                : "bg-yellow-400/15 border-yellow-500/40 text-yellow-700 dark:text-yellow-400 hover:bg-yellow-400/25"
-                            }`}
-                          >
-                            <div className="flex items-center gap-2">
-                              <span className="font-mono bg-violet-600/10 text-violet-500 px-1.5 py-0.5 rounded text-[10px] font-bold">#{c.bib}</span>
-                              <span className="truncate">{c.name}</span>
-                              {isPartneredContest(contestType) && (() => {
-                                const partner = findRegisteredPartner(c, competitors, contestType, division);
-                                return partner
-                                  ? <span className="text-[9px] text-slate-400 truncate">w/ #{partner.bib} {partner.name}</span>
-                                  : <span className="text-[9px] text-amber-500 font-semibold truncate">No registered partner</span>;
-                              })()}
-                            </div>
-                            <span className="text-[9px] px-1.5 py-0.5 rounded font-mono font-semibold bg-sky-500/10 text-sky-500 border-sky-500/10">
-                              {isSelected ? "Leader" : "Not Selected"}
-                            </span>
-                          </button>
-                        );
-                      })}
-                      {formMatchingCompetitors.filter(c => c.role === "Lead").length === 0 && (
-                        <p className="text-slate-500 text-[10px] py-3 text-center">No matching Leaders.</p>
-                      )}
-                    </div>
-                  </div>
-
-                  {/* Followers Column */}
-                  <div>
-                    <h4 className="text-[10px] font-bold font-mono text-pink-500 uppercase tracking-wider mb-2 pb-1 border-b border-pink-500/10">Followers</h4>
-                    <div className="space-y-2 max-h-48 overflow-y-auto pr-1">
-                      {formMatchingCompetitors.filter(c => c.role === "Follow").map((c) => {
-                        const isSelected = selectedBibs.includes(c.bib);
-                        return (
-                          <button
-                            key={c.bib}
-                            type="button"
-                            onClick={() => toggleSelectCompetitor(c.bib)}
-                            className={`w-full p-2.5 rounded-xl border text-left text-xs flex items-center justify-between transition-all ${
-                              isSelected
-                                ? "bg-violet-600/15 border-violet-500 text-violet-500 font-bold"
-                                : "bg-yellow-400/15 border-yellow-500/40 text-yellow-700 dark:text-yellow-400 hover:bg-yellow-400/25"
-                            }`}
-                          >
-                            <div className="flex items-center gap-2">
-                              <span className="font-mono bg-violet-600/10 text-violet-500 px-1.5 py-0.5 rounded text-[10px] font-bold">#{c.bib}</span>
-                              <span className="truncate">{c.name}</span>
-                              {isPartneredContest(contestType) && (() => {
-                                const partner = findRegisteredPartner(c, competitors, contestType, division);
-                                return partner
-                                  ? <span className="text-[9px] text-slate-400 truncate">w/ #{partner.bib} {partner.name}</span>
-                                  : <span className="text-[9px] text-amber-500 font-semibold truncate">No registered partner</span>;
-                              })()}
-                            </div>
-                            <span className="text-[9px] px-1.5 py-0.5 rounded font-mono font-semibold bg-pink-500/10 text-pink-500 border-pink-500/10">
-                              {isSelected ? "Follower" : "Not Selected"}
-                            </span>
-                          </button>
-                        );
-                      })}
-                      {formMatchingCompetitors.filter(c => c.role === "Follow").length === 0 && (
-                        <p className="text-slate-500 text-[10px] py-3 text-center">No matching Followers.</p>
-                      )}
-                    </div>
-                  </div>
+                {/* Routine couples have no roles, so their dancers are one list. */}
+                <div className={`grid grid-cols-1 ${contestType === "Routine" ? "" : "md:grid-cols-2"} gap-6`}>
+                  {(contestType === "Routine"
+                    ? [{ side: null, title: "Dancers", titleClass: "text-violet-500 border-violet-500/10", badgeClass: "bg-violet-500/10 text-violet-500 border-violet-500/10", selectedLabel: "Selected", empty: "No matching dancers." }]
+                    : [
+                        { side: "Lead", title: "Leaders", titleClass: "text-violet-500 border-violet-500/10", badgeClass: "bg-sky-500/10 text-sky-500 border-sky-500/10", selectedLabel: "Leader", empty: "No matching Leaders." },
+                        { side: "Follow", title: "Followers", titleClass: "text-pink-500 border-pink-500/10", badgeClass: "bg-pink-500/10 text-pink-500 border-pink-500/10", selectedLabel: "Follower", empty: "No matching Followers." }
+                      ]
+                  ).map((column) => {
+                    const columnDancers = formMatchingCompetitors.filter((c) => !column.side || getFormSide(c) === column.side);
+                    return (
+                      <div key={column.title}>
+                        <h4 className={`text-[10px] font-bold font-mono uppercase tracking-wider mb-2 pb-1 border-b ${column.titleClass}`}>{column.title}</h4>
+                        <div className="space-y-2 max-h-48 overflow-y-auto pr-1">
+                          {columnDancers.map((c) => {
+                            const isSelected = selectedBibs.includes(c.bib);
+                            return (
+                              <button
+                                key={c.bib}
+                                type="button"
+                                onClick={() => toggleSelectCompetitor(c.bib)}
+                                className={`w-full p-2.5 rounded-xl border text-left text-xs flex items-center justify-between transition-all ${
+                                  isSelected
+                                    ? "bg-violet-600/15 border-violet-500 text-violet-500 font-bold"
+                                    : "bg-yellow-400/15 border-yellow-500/40 text-yellow-700 dark:text-yellow-400 hover:bg-yellow-400/25"
+                                }`}
+                              >
+                                <div className="flex items-center gap-2">
+                                  {showsBibs(contestType) && <span className="font-mono bg-violet-600/10 text-violet-500 px-1.5 py-0.5 rounded text-[10px] font-bold">#{c.bib}</span>}
+                                  <span className="truncate">{c.name}</span>
+                                  {isPartneredContest(contestType) && (() => {
+                                    const partner = findRegisteredPartner(c, competitors, contestType, division);
+                                    return partner
+                                      ? <span className="text-[9px] text-slate-400 truncate">w/ {showsBibs(contestType) ? `#${partner.bib} ` : ""}{partner.name}</span>
+                                      : <span className="text-[9px] text-amber-500 font-semibold truncate">No registered partner</span>;
+                                  })()}
+                                </div>
+                                <span className={`text-[9px] px-1.5 py-0.5 rounded font-mono font-semibold ${column.badgeClass}`}>
+                                  {isSelected ? column.selectedLabel : "Not Selected"}
+                                </span>
+                              </button>
+                            );
+                          })}
+                          {columnDancers.length === 0 && (
+                            <p className="text-slate-500 text-[10px] py-3 text-center">{column.empty}</p>
+                          )}
+                        </div>
+                      </div>
+                    );
+                  })}
                 </div>
               </div>
 
-              {activeHeatControlTab === "next" && !settings.checkInFinalized && (
+              {activeHeatControlTab === "next" && nextCheckInBlocker && (
                 <p className="text-[11px] text-amber-500 bg-amber-500/10 border border-amber-500/20 rounded-xl px-3 py-2">
-                  The Live Contest's check-in sheet must be finalized by the Floor Coordinator before the Next Contest's check-in sheet can be created.
+                  {nextCheckInBlocker}
                 </p>
               )}
               <button
                 id="submit-new-heat-btn"
                 type="submit"
-                disabled={loading || (activeHeatControlTab === "next" && !settings.checkInFinalized)}
-                title={activeHeatControlTab === "next" && !settings.checkInFinalized ? "Finalize the Live Contest's check-in first" : undefined}
+                disabled={loading || (activeHeatControlTab === "next" && !!nextCheckInBlocker)}
+                title={activeHeatControlTab === "next" && nextCheckInBlocker ? nextCheckInBlocker : undefined}
                 className={`w-full py-2.5 rounded-xl text-white text-xs font-bold shadow-md shadow-violet-600/15 flex items-center justify-center gap-2 transition-all ${
-                  loading || (activeHeatControlTab === "next" && !settings.checkInFinalized)
+                  loading || (activeHeatControlTab === "next" && !!nextCheckInBlocker)
                     ? "bg-slate-400 dark:bg-slate-700 cursor-not-allowed opacity-60"
                     : "bg-violet-600 hover:bg-violet-750"
                 }`}
@@ -2597,9 +2950,9 @@ export default function AdminPanel({
                             <button
                               type="button"
                               id={`delete-heat-${h.id}`}
-                              onClick={() => onDeleteHeat(h.id)}
+                              onClick={() => handleDeleteCompletedContest(h)}
                               className="p-1.5 text-rose-500 hover:bg-rose-500/10 rounded-lg transition-colors border border-transparent hover:border-rose-500/25 cursor-pointer"
-                              title="Delete Heat"
+                              title="Delete Contest"
                             >
                               <Trash2 className="w-3.5 h-3.5" />
                             </button>
@@ -2691,7 +3044,7 @@ export default function AdminPanel({
                                         <table className="w-full text-left border-collapse text-xs">
                                           <thead>
                                             <tr className="bg-slate-50 dark:bg-slate-850 font-mono text-[10px] font-semibold border-b border-slate-200 dark:border-slate-800">
-                                              <th className="p-2 w-16 text-center">Bib</th>
+                                              {showsBibs(h.contestType) && <th className="p-2 w-16 text-center">Bib</th>}
                                               <th className="p-2">Competitor</th>
                                               <th className="p-2 text-center w-24">Mark Type</th>
                                               <th className="p-2 text-center w-28">Score / Value</th>
@@ -2717,27 +3070,27 @@ export default function AdminPanel({
 
                                                 return (
                                                   <tr key={record.id} className="hover:bg-slate-50/20">
-                                                    <td className="p-2 text-center font-bold text-slate-400">#{record.competitorBib}</td>
+                                                    {showsBibs(h.contestType) && <td className="p-2 text-center font-bold text-slate-400">#{getDisplayBib(record.competitorBib, h.contestType)}</td>}
                                                     <td className="p-2 font-sans font-medium text-slate-700 dark:text-slate-200">{competitorName}</td>
                                                     <td className="p-2 text-center">
                                                       <span className="text-[10px] uppercase font-bold text-slate-400">
-                                                        {h.heatType === "Finals" ? "Placement" : "Qualifying"}
+                                                        {h.heatType !== "Finals" ? "Qualifying" : getHeatJudgingStyle(h) === "raw" ? "Raw Score" : "Placement"}
                                                       </span>
                                                     </td>
                                                     <td className="p-2 text-center font-bold text-violet-500">
-                                                      {h.heatType === "Finals" || settings.judgingStyle === "placement"
+                                                      {getHeatJudgingStyle(h) === "placement"
                                                         ? record.score !== undefined ? `Placement: #${record.score}` : "—"
-                                                        : settings.judgingStyle === "callback"
+                                                        : getHeatJudgingStyle(h) === "callback"
                                                           ? `Marked: ${record.isCallback}`
                                                           : record.score !== undefined ? `Score: ${record.score} pts` : "—"
                                                       }
                                                     </td>
                                                     <td className="p-2 text-center">
-                                                      {record.isCallback === "Yes" ? (
+                                                      {h.heatType !== "Finals" && record.isCallback === "Yes" ? (
                                                         <span className="px-2 py-0.5 rounded text-[10px] font-bold bg-green-500/10 border border-green-500/25 text-green-500">
                                                           Callback
                                                         </span>
-                                                      ) : record.isCallback && record.isCallback.startsWith("Alt") ? (
+                                                      ) : h.heatType !== "Finals" && record.isCallback && record.isCallback.startsWith("Alt") ? (
                                                         <span className="px-2 py-0.5 rounded text-[10px] font-bold bg-amber-500/10 border border-amber-500/25 text-amber-500 font-mono">
                                                           {record.isCallback}
                                                         </span>
@@ -2775,7 +3128,7 @@ export default function AdminPanel({
                                       h,
                                       competitors,
                                       scores,
-                                      settings.judgingStyle || "raw",
+                                      getHeatJudgingStyle(h),
                                       hCallbackCount,
                                       hAlternateCount,
                                       settings.callbackCountLeaders,
@@ -2788,6 +3141,13 @@ export default function AdminPanel({
                                       return <p className="text-xs text-slate-500 font-mono italic">No competitor scores have been recorded for this heat yet.</p>;
                                     }
                                     const heatExpectedJudges = getExpectedJudgesForHeat(h);
+
+                                    // Finals have no callbacks: show the raw score with the judge's
+                                    // placement, or just the placement on a placement sheet.
+                                    const getJudgeMark = (scoreObj: { score: number; isCallback: string }) => {
+                                      if (h.heatType !== "Finals") return scoreObj.isCallback || scoreObj.score;
+                                      return getHeatJudgingStyle(h) === "raw" && scoreObj.score > 0 ? scoreObj.score : "";
+                                    };
 
                                     const renderResultsTable = (resList: typeof results) => {
                                       if (resList.length === 0) {
@@ -2817,19 +3177,20 @@ export default function AdminPanel({
                                             <thead>
                                               <tr className="bg-slate-50 dark:bg-slate-850 font-mono text-[10px] font-semibold border-b border-slate-200 dark:border-slate-800 text-slate-500 dark:text-slate-400">
                                                 <th className="p-2 w-12 text-center">Rank</th>
-                                                <th className="p-2 w-20 text-center">Bib Number</th>
+                                                {showsBibs(h.contestType) && <th className="p-2 w-20 text-center">Bib Number</th>}
                                                 <th className="p-2">Name</th>
                                                 {heatExpectedJudges.map((j) => (
                                                   <th key={j} className="p-2 text-center font-mono">{j}</th>
                                                 ))}
                                                 <th className="p-2 text-center">Results/Placements</th>
+                                                {h.heatType === "Finals" && <th className="p-2 text-center">Relative Placement</th>}
                                               </tr>
                                             </thead>
                                             <tbody className="divide-y divide-slate-100 dark:divide-slate-800 font-mono">
                                               {resList.map((res) => (
                                                 <tr key={res.competitor.bib} className="hover:bg-slate-50/20">
                                                   <td className="p-2 font-bold text-center text-violet-500">#{res.rank}</td>
-                                                  <td className="p-2 text-center text-slate-700 dark:text-slate-300">#{res.competitor.bib}</td>
+                                                  {showsBibs(h.contestType) && <td className="p-2 text-center text-slate-700 dark:text-slate-300">#{getDisplayBib(res.competitor.bib, h.contestType)}</td>}
                                                   <td className="p-2 font-sans font-bold text-slate-800 dark:text-slate-100">{res.competitor.name}</td>
                                                   {heatExpectedJudges.map((j) => {
                                                     const scoreObj = res.scoresByJudge[j];
@@ -2837,8 +3198,8 @@ export default function AdminPanel({
                                                       <td key={j} className="p-2 text-center">
                                                         {scoreObj ? (
                                                           <span className="text-slate-800 dark:text-slate-200">
-                                                            {scoreObj.isCallback || scoreObj.score}
-                                                            {scoreObj.placement ? ` (${scoreObj.placement})` : ""}
+                                                            {getJudgeMark(scoreObj)}
+                                                            {scoreObj.placement < 999 ? ` (${scoreObj.placement})` : ""}
                                                           </span>
                                                         ) : (
                                                           <span className="text-slate-400">—</span>
@@ -2859,6 +3220,9 @@ export default function AdminPanel({
                                                       <span className="text-slate-400 font-normal">Cut</span>
                                                     )}
                                                   </td>
+                                                  {h.heatType === "Finals" && (
+                                                    <td className="p-2 text-center font-bold">{formatRelativePlacements(res.countedPlacements)}</td>
+                                                  )}
                                                 </tr>
                                               ))}
                                             </tbody>
@@ -2920,25 +3284,48 @@ export default function AdminPanel({
       {/* Active Heat Editor (Full Width at Bottom) */}
       {activeHeatControlTab === "live" && (
         <>
-        <div className={`p-6 rounded-2xl border transition-all ${isDarkMode ? "bg-slate-900 border-slate-800 text-slate-100" : "bg-white border-slate-200 shadow-sm text-slate-800"}`}>
+        <div className={`p-6 rounded-2xl border transition-all ${guideRing(guide.scoringSheetEditor)} ${isDarkMode ? "bg-slate-900 border-slate-800 text-slate-100" : "bg-white border-slate-200 shadow-sm text-slate-800"}`}>
           <div className="flex items-center justify-between mb-4 flex-wrap gap-2">
-            <div className="flex items-center gap-2">
-              <Trophy className="w-5 h-5 text-amber-500" />
-              <h2 className="text-lg font-bold tracking-tight">Active Contest Editor</h2>
-            {activeHeat && (
-              <span className={`inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full text-[10px] font-bold ${
-                activeHeat.isCustom
-                  ? "bg-amber-500/10 text-amber-500"
-                  : "bg-emerald-500/10 text-emerald-500"
-              }`}>
-                <span className={`w-1.5 h-1.5 rounded-full ${activeHeat.isCustom ? "bg-amber-500 animate-pulse" : "bg-emerald-500"}`} />
-                {activeHeat.isCustom ? "Customized Running Order" : "Synced with Registration"}
-              </span>
-            )}
-          </div>
+            <div>
+              <div className="flex items-center gap-2">
+                <Trophy className="w-5 h-5 text-amber-500" />
+                <h2 className="text-lg font-bold tracking-tight">Active Contest Editor</h2>
+              {activeHeat && (
+                <span className={`inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full text-[10px] font-bold ${
+                  activeHeat.isCustom
+                    ? "bg-amber-500/10 text-amber-500"
+                    : "bg-emerald-500/10 text-emerald-500"
+                }`}>
+                  <span className={`w-1.5 h-1.5 rounded-full ${activeHeat.isCustom ? "bg-amber-500 animate-pulse" : "bg-emerald-500"}`} />
+                  {activeHeat.isCustom ? "Customized Running Order" : "Synced with Registration"}
+                </span>
+              )}
+              </div>
+              <p id="active-contest-editor-name" className="text-xs font-semibold text-violet-500 mt-1 ml-7">
+                {activeHeat ? activeHeat.name : "No Live Contest"}
+              </p>
+            </div>
 
           <div className="flex items-center gap-3">
-            {activeHeat && (
+            {activeHeat && !showSheetBibs && (
+              <button
+                type="button"
+                id="randomize-order-btn"
+                disabled={!isSheetCheckInFinalized}
+                onClick={handleRandomizeRoutineOrder}
+                title={isSheetCheckInFinalized ? "Shuffle the running order" : "Available once the Floor Coordinator finalizes check-in"}
+                className={`inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-bold rounded-xl border transition-all ${
+                  isSheetCheckInFinalized
+                    ? "bg-violet-600/15 border-violet-500 text-violet-500 hover:bg-violet-600/25 cursor-pointer"
+                    : "bg-slate-100 dark:bg-slate-800 border-slate-200 dark:border-slate-700 text-slate-400 cursor-not-allowed opacity-60"
+                }`}
+              >
+                <Sparkles className="w-3.5 h-3.5" />
+                Randomize Order
+              </button>
+            )}
+
+            {activeHeat && showSheetBibs && (
               <button
                 type="button"
                 onClick={() => setSortingMode(prev => prev === "bib" ? "manual" : "bib")}
@@ -3057,17 +3444,17 @@ export default function AdminPanel({
               </div>
             )}
 
-                {!isDrawMode ? (
+                {!isDrawMode || !showSheetBibs ? (
                   <div className="space-y-6">
                     {activeHeat ? (
                       <div className="space-y-4">
-                        <div className="grid grid-cols-2 gap-6 animate-fade-in">
+                        <div className="grid grid-cols-1 md:grid-cols-2 gap-6 animate-fade-in">
                         {/* Left Side: Leaders */}
                         <div className="space-y-3">
                           <div className="flex items-center justify-between">
                             <h3 className="text-sm font-bold font-mono text-emerald-500 uppercase tracking-wider flex items-center gap-1.5">
                               <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse" />
-                              Leaders (Leads)
+                              {activeHeat.contestType === "Routine" ? "Partners" : "Leaders (Leads)"}
                             </h3>
                             {activeHeat.heatType === "Finals" && !isPartneredContest(activeHeat.contestType) && (
                               <button
@@ -3076,15 +3463,6 @@ export default function AdminPanel({
                                 onClick={async () => {
                                   const leads = activeHeatRows.filter(r => r.role === "Lead" && r.bibLabel && r.bibLabel !== "—" && r.bibLabel !== "").map(r => r.bibLabel);
                                   const follows = activeHeatRows.filter(r => r.role === "Follow" && r.bibLabel && r.bibLabel !== "—" && r.bibLabel !== "").map(r => r.bibLabel);
-                                  
-                                  const shuffle = <T,>(array: T[]): T[] => {
-                                    const copy = [...array];
-                                    for (let i = copy.length - 1; i > 0; i--) {
-                                      const j = Math.floor(Math.random() * (i + 1));
-                                      [copy[i], copy[j]] = [copy[j], copy[i]];
-                                    }
-                                    return copy;
-                                  };
                                   
                                   const shuffledLeads = shuffle(leads);
                                   const newCouples = follows.map((follow, idx) => {
@@ -3103,8 +3481,7 @@ export default function AdminPanel({
                                     }
                                   }
                                   
-                                  const bibsList = newCouples.map(cp => cp.id);
-                                  await onUpdateHeat(activeHeat.id, { competitorBibs: bibsList, couples: newCouples, isCustom: true });
+                                  await saveSheetOrder({ competitorBibs: newCouples.map(cp => cp.id), couples: newCouples });
                                 }}
                                 className="px-2 py-1 bg-emerald-500 hover:bg-emerald-600 text-slate-950 text-[10px] font-bold rounded-lg transition-all flex items-center gap-1 cursor-pointer"
                               >
@@ -3118,36 +3495,29 @@ export default function AdminPanel({
                               <thead>
                                 <tr className={`${isDarkMode ? "bg-slate-800/50 text-slate-300" : "bg-slate-50 text-slate-500"} text-[10px] font-semibold font-mono border-b border-slate-200 dark:border-slate-800`}>
                                   <th className="p-2.5 w-10 text-center">No.</th>
-                                  <th className="p-2.5 w-32">Role</th>
-                                  <th className="p-2.5 w-16 text-center">Bib #</th>
+                                  <th className="p-2.5 w-32">{activeHeat.contestType === "Routine" ? "Contest" : "Role"}</th>
+                                  {showSheetBibs && <th className="p-2.5 w-16 text-center">Bib #</th>}
                                   <th className="p-2.5">Competitor Name</th>
                                   <th className="p-2.5 text-right w-36">Actions</th>
                                 </tr>
                               </thead>
                               <tbody className="divide-y divide-slate-100 dark:divide-slate-800">
                                 {leadRows.map((row, idx) => {
-                                  const leadComp = competitors.find(c => c.bib === row.bibLabel);
-                                  const nextSplitCandidate = idx + 1;
-                                  const isSplitActive = currentSplits.includes(nextSplitCandidate);
-
+                                  const leadComp = activeHeatView.find(c => c.bib === row.bibLabel);
                                   return (
                                     <React.Fragment key={`lead-${row.id}`}>
                                       <tr className="hover:bg-slate-50/20">
                                         <td className="p-2.5 text-center font-mono font-bold text-slate-400">{row.index + 1}</td>
                                         <td className="p-2.5">
+                                          {activeHeat.contestType === "Routine" ? (
+                                            <span className="text-[10px] font-semibold text-slate-400">Routine</span>
+                                          ) : (
                                           <select
                                             value="Lead"
                                             onChange={async (e) => {
                                               const newRole = e.target.value as "Lead" | "Follow";
-                                              if (newRole !== "Lead" && leadComp && onUpdateCompetitor) {
-                                                await onUpdateCompetitor(leadComp.bib, {
-                                                  bib: leadComp.bib,
-                                                  name: leadComp.name,
-                                                  division: leadComp.division,
-                                                  role: newRole,
-                                                  checkedIn: leadComp.checkedIn,
-                                                  scratched: leadComp.scratched
-                                                });
+                                              if (newRole !== "Lead" && leadComp) {
+                                                await updateRoleForActiveHeat(leadComp.bib, newRole);
                                               }
                                             }}
                                             className={`text-[10px] px-1.5 py-0.5 rounded border focus:outline-none focus:ring-1 focus:ring-violet-500 font-medium ${
@@ -3159,12 +3529,15 @@ export default function AdminPanel({
                                             <option value="Lead">Leader</option>
                                             <option value="Follow">Follower</option>
                                           </select>
+                                          )}
                                         </td>
-                                        <td className="p-2.5 text-center">
-                                          <span className="font-mono bg-emerald-500/10 text-emerald-500 px-1.5 py-0.5 rounded text-[10px] font-bold">
-                                            #{row.bibLabel}
-                                          </span>
-                                        </td>
+                                        {showSheetBibs && (
+                                          <td className="p-2.5 text-center">
+                                            <span className="font-mono bg-emerald-500/10 text-emerald-500 px-1.5 py-0.5 rounded text-[10px] font-bold">
+                                              #{row.bibLabel}
+                                            </span>
+                                          </td>
+                                        )}
                                         <td className="p-2.5 font-semibold text-slate-700 dark:text-slate-200 truncate max-w-[140px]" title={row.name}>
                                           {row.name}
                                         </td>
@@ -3173,18 +3546,7 @@ export default function AdminPanel({
                                             <button
                                               type="button"
                                               disabled={row.index === 0}
-                                              onClick={async () => {
-                                                const leadBibs = activeHeatRows.filter(r => r.role === "Lead").map(r => r.id);
-                                                const followBibs = activeHeatRows.filter(r => r.role === "Follow").map(r => r.id);
-                                                const temp = leadBibs[row.index];
-                                                leadBibs[row.index] = leadBibs[row.index - 1];
-                                                leadBibs[row.index - 1] = temp;
-
-                                                await onUpdateHeat(activeHeat.id, {
-                                                  competitorBibs: [...leadBibs, ...followBibs],
-                                                  isCustom: true
-                                                });
-                                              }}
+                                              onClick={() => moveSheetDancer("Lead", row.index, row.index - 1)}
                                               className={`p-1 rounded border border-slate-200 dark:border-slate-800 hover:bg-slate-100 dark:hover:bg-slate-800 transition-all ${
                                                 row.index === 0 ? "opacity-30 cursor-not-allowed" : "cursor-pointer"
                                               }`}
@@ -3195,18 +3557,7 @@ export default function AdminPanel({
                                             <button
                                               type="button"
                                               disabled={row.index === leadRows.length - 1}
-                                              onClick={async () => {
-                                                const leadBibs = activeHeatRows.filter(r => r.role === "Lead").map(r => r.id);
-                                                const followBibs = activeHeatRows.filter(r => r.role === "Follow").map(r => r.id);
-                                                const temp = leadBibs[row.index];
-                                                leadBibs[row.index] = leadBibs[row.index + 1];
-                                                leadBibs[row.index + 1] = temp;
-
-                                                await onUpdateHeat(activeHeat.id, {
-                                                  competitorBibs: [...leadBibs, ...followBibs],
-                                                  isCustom: true
-                                                });
-                                              }}
+                                              onClick={() => moveSheetDancer("Lead", row.index, row.index + 1)}
                                               className={`p-1 rounded border border-slate-200 dark:border-slate-800 hover:bg-slate-100 dark:hover:bg-slate-800 transition-all ${
                                                 row.index === leadRows.length - 1 ? "opacity-30 cursor-not-allowed" : "cursor-pointer"
                                               }`}
@@ -3231,82 +3582,13 @@ export default function AdminPanel({
                                           </div>
                                         </td>
                                       </tr>
-                                      {idx < leadRows.length - 1 && (
-                                        <tr
-                                          onDragOver={(e) => {
-                                            e.preventDefault();
-                                            setDraggedOverRowIndex(row.index);
-                                          }}
-                                          onDragLeave={() => {
-                                            setDraggedOverRowIndex(null);
-                                          }}
-                                          onDrop={async (e) => {
-                                            e.preventDefault();
-                                            setDraggedOverRowIndex(null);
-                                            const existingSplits = activeHeat.splits || [];
-                                            if (existingSplits.length >= 2) {
-                                              alert("Maximum of 2 splits (creating up to 3 heats) is allowed.");
-                                              return;
-                                            }
-                                            if (!existingSplits.includes(nextSplitCandidate)) {
-                                              const updatedSplits = [...existingSplits, nextSplitCandidate].sort((a,b) => a - b);
-                                              await onUpdateHeat(activeHeat.id, { splits: updatedSplits, isCustom: true });
-                                            }
-                                          }}
-                                          className={`transition-all duration-300 ${
-                                            draggedOverRowIndex === row.index
-                                              ? "bg-violet-500/10"
-                                              : "hover:bg-violet-500/[0.01]"
-                                          }`}
-                                        >
-                                          <td colSpan={5} className="p-1 text-center relative font-mono text-xs">
-                                            {isSplitActive ? (() => {
-                                              const nextHeatNum = currentSplits.filter(s => s <= nextSplitCandidate).length + 1;
-                                              return (
-                                                <div className="py-2 flex flex-col items-center justify-center gap-0.5 bg-violet-600/5 dark:bg-violet-600/[0.03] border-t border-b border-violet-500/20 relative rounded-lg">
-                                                  <span className="px-2 py-0.5 bg-violet-600 text-white font-mono font-bold text-[9px] uppercase tracking-wider rounded-md shadow-sm">
-                                                    HEAT {nextHeatNum} STARTING HERE
-                                                  </span>
-                                                  <button
-                                                    type="button"
-                                                    onClick={async () => {
-                                                      const updatedSplits = (activeHeat.splits || []).filter(s => s !== nextSplitCandidate);
-                                                      await onUpdateHeat(activeHeat.id, { splits: updatedSplits, isCustom: true });
-                                                    }}
-                                                    className="absolute right-3 top-1/2 -translate-y-1/2 p-1 bg-rose-600 hover:bg-rose-700 text-white rounded-lg cursor-pointer transition-all shadow-sm"
-                                                    title="Remove Cut-off"
-                                                  >
-                                                    <Trash2 className="w-3 h-3" />
-                                                  </button>
-                                                </div>
-                                              );
-                                            })() : (
-                                              <div 
-                                                className={`w-full py-1 flex items-center justify-center gap-2 border-t border-dashed border-slate-200 dark:border-slate-800/60 opacity-30 group-hover:opacity-100 transition-all ${
-                                                  draggedOverRowIndex === row.index ? "opacity-100 border-violet-500 text-violet-500 font-bold bg-violet-500/[0.04] py-2 rounded-lg" : ""
-                                                }`}
-                                              >
-                                                {draggedOverRowIndex === row.index ? (
-                                                  <span className="text-[9px] uppercase font-bold tracking-widest text-violet-500 animate-pulse flex items-center gap-1">
-                                                    <Scissors className="w-3 h-3 animate-bounce" />
-                                                    DROP TO SPLIT
-                                                  </span>
-                                                ) : (
-                                                  <span className="text-[8px] uppercase font-bold tracking-widest text-slate-400 dark:text-slate-500 select-none opacity-0 hover:opacity-100 transition-opacity">
-                                                    [ Drop Cut-off Line Here ]
-                                                  </span>
-                                                )}
-                                              </div>
-                                            )}
-                                          </td>
-                                        </tr>
-                                      )}
+                                      {idx < leadRows.length - 1 && renderSplitGap(row.index)}
                                     </React.Fragment>
                                   );
                                 })}
                                 {leadRows.length === 0 && (
                                   <tr>
-                                    <td colSpan={5} className="p-4 text-center text-slate-500 italic">No Leaders on Roster</td>
+                                    <td colSpan={5} className="p-4 text-center text-slate-500 italic">{activeHeat.contestType === "Routine" ? "No couples on roster" : "No Leaders on Roster"}</td>
                                   </tr>
                                 )}
                               </tbody>
@@ -3319,7 +3601,7 @@ export default function AdminPanel({
                           <div className="flex items-center justify-between">
                             <h3 className="text-sm font-bold font-mono text-rose-500 uppercase tracking-wider flex items-center gap-1.5">
                               <span className="w-2 h-2 rounded-full bg-rose-500 animate-pulse" />
-                              Followers (Follows)
+                              {activeHeat.contestType === "Routine" ? "Their Partners" : "Followers (Follows)"}
                             </h3>
                             {activeHeat.heatType === "Finals" && !isPartneredContest(activeHeat.contestType) && (
                               <button
@@ -3328,15 +3610,6 @@ export default function AdminPanel({
                                 onClick={async () => {
                                   const leads = activeHeatRows.filter(r => r.role === "Lead" && r.bibLabel && r.bibLabel !== "—" && r.bibLabel !== "").map(r => r.bibLabel);
                                   const follows = activeHeatRows.filter(r => r.role === "Follow" && r.bibLabel && r.bibLabel !== "—" && r.bibLabel !== "").map(r => r.bibLabel);
-                                  
-                                  const shuffle = <T,>(array: T[]): T[] => {
-                                    const copy = [...array];
-                                    for (let i = copy.length - 1; i > 0; i--) {
-                                      const j = Math.floor(Math.random() * (i + 1));
-                                      [copy[i], copy[j]] = [copy[j], copy[i]];
-                                    }
-                                    return copy;
-                                  };
                                   
                                   const shuffledFollows = shuffle(follows);
                                   const newCouples = leads.map((lead, idx) => {
@@ -3355,8 +3628,7 @@ export default function AdminPanel({
                                     }
                                   }
                                   
-                                  const bibsList = newCouples.map(cp => cp.id);
-                                  await onUpdateHeat(activeHeat.id, { competitorBibs: bibsList, couples: newCouples, isCustom: true });
+                                  await saveSheetOrder({ competitorBibs: newCouples.map(cp => cp.id), couples: newCouples });
                                 }}
                                 className="px-2 py-1 bg-rose-500 hover:bg-rose-600 text-slate-950 text-[10px] font-bold rounded-lg transition-all flex items-center gap-1 cursor-pointer"
                               >
@@ -3370,36 +3642,29 @@ export default function AdminPanel({
                               <thead>
                                 <tr className={`${isDarkMode ? "bg-slate-800/50 text-slate-300" : "bg-slate-50 text-slate-500"} text-[10px] font-semibold font-mono border-b border-slate-200 dark:border-slate-800`}>
                                   <th className="p-2.5 w-10 text-center">No.</th>
-                                  <th className="p-2.5 w-32">Role</th>
-                                  <th className="p-2.5 w-16 text-center">Bib #</th>
+                                  <th className="p-2.5 w-32">{activeHeat.contestType === "Routine" ? "Contest" : "Role"}</th>
+                                  {showSheetBibs && <th className="p-2.5 w-16 text-center">Bib #</th>}
                                   <th className="p-2.5">Competitor Name</th>
                                   <th className="p-2.5 text-right w-36">Actions</th>
                                 </tr>
                               </thead>
                               <tbody className="divide-y divide-slate-100 dark:divide-slate-800">
                                 {followRows.map((row, idx) => {
-                                  const followComp = competitors.find(c => c.bib === row.bibLabel);
-                                  const nextSplitCandidate = idx + 1;
-                                  const isSplitActive = currentSplits.includes(nextSplitCandidate);
-
+                                  const followComp = activeHeatView.find(c => c.bib === row.bibLabel);
                                   return (
                                     <React.Fragment key={`follow-${row.id}`}>
                                       <tr className="hover:bg-slate-50/20">
                                         <td className="p-2.5 text-center font-mono font-bold text-slate-400">{row.index + 1}</td>
                                         <td className="p-2.5">
+                                          {activeHeat.contestType === "Routine" ? (
+                                            <span className="text-[10px] font-semibold text-slate-400">Routine</span>
+                                          ) : (
                                           <select
                                             value="Follow"
                                             onChange={async (e) => {
                                               const newRole = e.target.value as "Lead" | "Follow";
-                                              if (newRole !== "Follow" && followComp && onUpdateCompetitor) {
-                                                await onUpdateCompetitor(followComp.bib, {
-                                                  bib: followComp.bib,
-                                                  name: followComp.name,
-                                                  division: followComp.division,
-                                                  role: newRole,
-                                                  checkedIn: followComp.checkedIn,
-                                                  scratched: followComp.scratched
-                                                });
+                                              if (newRole !== "Follow" && followComp) {
+                                                await updateRoleForActiveHeat(followComp.bib, newRole);
                                               }
                                             }}
                                             className={`text-[10px] px-1.5 py-0.5 rounded border focus:outline-none focus:ring-1 focus:ring-violet-500 font-medium ${
@@ -3411,12 +3676,15 @@ export default function AdminPanel({
                                             <option value="Lead">Leader</option>
                                             <option value="Follow">Follower</option>
                                           </select>
+                                          )}
                                         </td>
-                                        <td className="p-2.5 text-center">
-                                          <span className="font-mono bg-rose-500/10 text-rose-500 px-1.5 py-0.5 rounded text-[10px] font-bold">
-                                            #{row.bibLabel}
-                                          </span>
-                                        </td>
+                                        {showSheetBibs && (
+                                          <td className="p-2.5 text-center">
+                                            <span className="font-mono bg-rose-500/10 text-rose-500 px-1.5 py-0.5 rounded text-[10px] font-bold">
+                                              {activeHeat.contestType === "Strictly Swing" ? "—" : `#${row.bibLabel}`}
+                                            </span>
+                                          </td>
+                                        )}
                                         <td className="p-2.5 font-semibold text-slate-700 dark:text-slate-200 truncate max-w-[140px]" title={row.name}>
                                           {row.name}
                                         </td>
@@ -3425,18 +3693,7 @@ export default function AdminPanel({
                                             <button
                                               type="button"
                                               disabled={row.index === 0}
-                                              onClick={async () => {
-                                                const leadBibs = activeHeatRows.filter(r => r.role === "Lead").map(r => r.id);
-                                                const followBibs = activeHeatRows.filter(r => r.role === "Follow").map(r => r.id);
-                                                const temp = followBibs[row.index];
-                                                followBibs[row.index] = followBibs[row.index - 1];
-                                                followBibs[row.index - 1] = temp;
-
-                                                await onUpdateHeat(activeHeat.id, {
-                                                  competitorBibs: [...leadBibs, ...followBibs],
-                                                  isCustom: true
-                                                });
-                                              }}
+                                              onClick={() => moveSheetDancer("Follow", row.index, row.index - 1)}
                                               className={`p-1 rounded border border-slate-200 dark:border-slate-800 hover:bg-slate-100 dark:hover:bg-slate-800 transition-all ${
                                                 row.index === 0 ? "opacity-30 cursor-not-allowed" : "cursor-pointer"
                                               }`}
@@ -3447,18 +3704,7 @@ export default function AdminPanel({
                                             <button
                                               type="button"
                                               disabled={row.index === followRows.length - 1}
-                                              onClick={async () => {
-                                                const leadBibs = activeHeatRows.filter(r => r.role === "Lead").map(r => r.id);
-                                                const followBibs = activeHeatRows.filter(r => r.role === "Follow").map(r => r.id);
-                                                const temp = followBibs[row.index];
-                                                followBibs[row.index] = followBibs[row.index + 1];
-                                                followBibs[row.index + 1] = temp;
-
-                                                await onUpdateHeat(activeHeat.id, {
-                                                  competitorBibs: [...leadBibs, ...followBibs],
-                                                  isCustom: true
-                                                });
-                                              }}
+                                              onClick={() => moveSheetDancer("Follow", row.index, row.index + 1)}
                                               className={`p-1 rounded border border-slate-200 dark:border-slate-800 hover:bg-slate-100 dark:hover:bg-slate-800 transition-all ${
                                                 row.index === followRows.length - 1 ? "opacity-30 cursor-not-allowed" : "cursor-pointer"
                                               }`}
@@ -3483,82 +3729,13 @@ export default function AdminPanel({
                                           </div>
                                         </td>
                                       </tr>
-                                      {idx < followRows.length - 1 && (
-                                        <tr
-                                          onDragOver={(e) => {
-                                            e.preventDefault();
-                                            setDraggedOverRowIndex(row.index);
-                                          }}
-                                          onDragLeave={() => {
-                                            setDraggedOverRowIndex(null);
-                                          }}
-                                          onDrop={async (e) => {
-                                            e.preventDefault();
-                                            setDraggedOverRowIndex(null);
-                                            const existingSplits = activeHeat.splits || [];
-                                            if (existingSplits.length >= 2) {
-                                              alert("Maximum of 2 splits (creating up to 3 heats) is allowed.");
-                                              return;
-                                            }
-                                            if (!existingSplits.includes(nextSplitCandidate)) {
-                                              const updatedSplits = [...existingSplits, nextSplitCandidate].sort((a,b) => a - b);
-                                              await onUpdateHeat(activeHeat.id, { splits: updatedSplits, isCustom: true });
-                                            }
-                                          }}
-                                          className={`transition-all duration-300 ${
-                                            draggedOverRowIndex === row.index
-                                              ? "bg-violet-500/10"
-                                              : "hover:bg-violet-500/[0.01]"
-                                          }`}
-                                        >
-                                          <td colSpan={5} className="p-1 text-center relative font-mono text-xs">
-                                            {isSplitActive ? (() => {
-                                              const nextHeatNum = currentSplits.filter(s => s <= nextSplitCandidate).length + 1;
-                                              return (
-                                                <div className="py-2 flex flex-col items-center justify-center gap-0.5 bg-violet-600/5 dark:bg-violet-600/[0.03] border-t border-b border-violet-500/20 relative rounded-lg">
-                                                  <span className="px-2 py-0.5 bg-violet-600 text-white font-mono font-bold text-[9px] uppercase tracking-wider rounded-md shadow-sm">
-                                                    HEAT {nextHeatNum} STARTING HERE
-                                                  </span>
-                                                  <button
-                                                    type="button"
-                                                    onClick={async () => {
-                                                      const updatedSplits = (activeHeat.splits || []).filter(s => s !== nextSplitCandidate);
-                                                      await onUpdateHeat(activeHeat.id, { splits: updatedSplits, isCustom: true });
-                                                    }}
-                                                    className="absolute right-3 top-1/2 -translate-y-1/2 p-1 bg-rose-600 hover:bg-rose-700 text-white rounded-lg cursor-pointer transition-all shadow-sm"
-                                                    title="Remove Cut-off"
-                                                  >
-                                                    <Trash2 className="w-3 h-3" />
-                                                  </button>
-                                                </div>
-                                              );
-                                            })() : (
-                                              <div 
-                                                className={`w-full py-1 flex items-center justify-center gap-2 border-t border-dashed border-slate-200 dark:border-slate-800/60 opacity-30 group-hover:opacity-100 transition-all ${
-                                                  draggedOverRowIndex === row.index ? "opacity-100 border-violet-500 text-violet-500 font-bold bg-violet-500/[0.04] py-2 rounded-lg" : ""
-                                                }`}
-                                              >
-                                                {draggedOverRowIndex === row.index ? (
-                                                  <span className="text-[9px] uppercase font-bold tracking-widest text-violet-500 animate-pulse flex items-center gap-1">
-                                                    <Scissors className="w-3 h-3 animate-bounce" />
-                                                    DROP TO SPLIT
-                                                  </span>
-                                                ) : (
-                                                  <span className="text-[8px] uppercase font-bold tracking-widest text-slate-400 dark:text-slate-500 select-none opacity-0 hover:opacity-100 transition-opacity">
-                                                    [ Drop Cut-off Line Here ]
-                                                  </span>
-                                                )}
-                                              </div>
-                                            )}
-                                          </td>
-                                        </tr>
-                                      )}
+                                      {idx < followRows.length - 1 && renderSplitGap(row.index)}
                                     </React.Fragment>
                                   );
                                 })}
                                 {followRows.length === 0 && (
                                   <tr>
-                                    <td colSpan={5} className="p-4 text-center text-slate-500 italic">No Followers on Roster</td>
+                                    <td colSpan={5} className="p-4 text-center text-slate-500 italic">{activeHeat.contestType === "Routine" ? "No couples on roster" : "No Followers on Roster"}</td>
                                   </tr>
                                 )}
                               </tbody>
@@ -3587,7 +3764,7 @@ export default function AdminPanel({
                           const nextGlobalIndex = orderedHeatRows[idx + 1] ? orderedHeatRows[idx + 1].index : -1;
                           const isSplitActive = nextGlobalIndex !== -1 && currentSplits.includes(nextGlobalIndex);
                           const individualComp = activeHeat.role !== "Mixed"
-                            ? competitors.find(c => c.bib === row.id)
+                            ? activeHeatView.find(c => c.bib === row.id)
                             : null;
 
                           return (
@@ -3630,16 +3807,10 @@ export default function AdminPanel({
                                   <div className="flex items-center justify-end gap-1.5">
                                     <button
                                       type="button"
-                                      disabled={row.index === 0}
-                                      onClick={async () => {
-                                        const list = [...activeHeat.competitorBibs];
-                                        const temp = list[row.index];
-                                        list[row.index] = list[row.index - 1];
-                                        list[row.index - 1] = temp;
-                                        await onUpdateHeat(activeHeat.id, { competitorBibs: list, isCustom: true });
-                                      }}
+                                      disabled={idx === 0}
+                                      onClick={() => moveSheetDancer(null, idx, idx - 1)}
                                       className={`p-1.5 rounded border border-slate-200 dark:border-slate-800 hover:bg-slate-100 dark:hover:bg-slate-800 transition-all ${
-                                        row.index === 0 ? "opacity-30 cursor-not-allowed" : "cursor-pointer"
+                                        idx === 0 ? "opacity-30 cursor-not-allowed" : "cursor-pointer"
                                       }`}
                                       title="Move Up"
                                     >
@@ -3647,16 +3818,10 @@ export default function AdminPanel({
                                     </button>
                                     <button
                                       type="button"
-                                      disabled={row.index === activeHeat.competitorBibs.length - 1}
-                                      onClick={async () => {
-                                        const list = [...activeHeat.competitorBibs];
-                                        const temp = list[row.index];
-                                        list[row.index] = list[row.index + 1];
-                                        list[row.index + 1] = temp;
-                                        await onUpdateHeat(activeHeat.id, { competitorBibs: list, isCustom: true });
-                                      }}
+                                      disabled={idx === orderedHeatRows.length - 1}
+                                      onClick={() => moveSheetDancer(null, idx, idx + 1)}
                                       className={`p-1.5 rounded border border-slate-200 dark:border-slate-800 hover:bg-slate-100 dark:hover:bg-slate-800 transition-all ${
-                                        row.index === activeHeat.competitorBibs.length - 1 ? "opacity-30 cursor-not-allowed" : "cursor-pointer"
+                                        idx === orderedHeatRows.length - 1 ? "opacity-30 cursor-not-allowed" : "cursor-pointer"
                                       }`}
                                       title="Move Down"
                                     >
@@ -3777,293 +3942,131 @@ export default function AdminPanel({
               )}
             </div>
           ) : (
-            activeHeat && activeHeat.role === "Mixed" && !isCouplesHeat(activeHeat) ? (
-                <div className="grid grid-cols-2 gap-4 sm:gap-6">
-                  {/* Leaders List (Leads) */}
-                  <div className="space-y-3">
-                    <h3 className="text-xs font-bold font-mono text-slate-400 uppercase tracking-wider flex items-center gap-1.5">
-                      <span className="w-2 h-2 rounded-full bg-blue-500" />
-                      Leaders (Leads) List
-                    </h3>
-                    <div className="overflow-x-auto rounded-xl border border-slate-200 dark:border-slate-800">
-                      <table className="w-full text-left border-collapse">
-                        <thead>
-                          <tr className={`${isDarkMode ? "bg-slate-800/50 text-slate-300" : "bg-slate-50 text-slate-500"} text-xs font-semibold font-mono border-b border-slate-200 dark:border-slate-800`}>
-                            <th className="p-3 w-12">No.</th>
-                            <th className="p-3">Leader Dancer</th>
-                            {isDrawMode && <th className="p-3 w-40">Partner (Follow)</th>}
-                            <th className="p-3 text-right w-24">Actions</th>
-                          </tr>
-                        </thead>
-                        <tbody className="divide-y divide-slate-200 dark:divide-slate-800 text-xs">
-                          {((activeHeat.couples || []).map(c => c.leadBib)).map((leadBib, index) => {
-                            if (!leadBib) return null;
-                            const lead = competitors.find(c => c.bib === leadBib);
-                            const currentCouple = (activeHeat.couples || [])[index];
-                            const followBib = currentCouple?.followBib || "";
-                            
-                            return (
-                              <tr key={`lead-${leadBib}-${index}`} className="hover:bg-slate-50/50 dark:hover:bg-slate-800/20 transition-all">
-                                <td className="p-3 font-mono font-bold text-slate-400">{index + 1}</td>
-                                <td className="p-3">
+            isDrawSheet ? (
+                <div className="space-y-3">
+                  <h3 className="text-xs font-bold font-mono text-slate-400 uppercase tracking-wider flex items-center gap-1.5">
+                    <span className="w-2 h-2 rounded-full bg-blue-500" />
+                    Leaders
+                  </h3>
+                  <p className="text-[11px] text-slate-400">Drag a follower from the Followers box at the bottom onto a leader to partner them.</p>
+                  <div className="overflow-x-auto rounded-xl border border-slate-200 dark:border-slate-800">
+                    <table className="w-full text-left border-collapse">
+                      <thead>
+                        <tr className={`${isDarkMode ? "bg-slate-800/50 text-slate-300" : "bg-slate-50 text-slate-500"} text-xs font-semibold font-mono border-b border-slate-200 dark:border-slate-800`}>
+                          <th className="p-3 w-12">No.</th>
+                          <th className="p-3">Leader</th>
+                          <th className="p-3">Partner (Follower)</th>
+                          <th className="p-3 text-right w-28">Actions</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-slate-200 dark:divide-slate-800 text-xs">
+                        {(activeHeat.couples || []).map((couple, index) => {
+                          const lead = couple.leadBib ? competitors.find(c => c.bib === couple.leadBib) : undefined;
+                          const follow = couple.followBib ? competitors.find(c => c.bib === couple.followBib) : undefined;
+                          const isDropTarget = drawDropIndex === index;
+                          return (
+                            <tr key={`draw-${couple.leadBib}-${index}`} id={`draw-leader-row-${index}`} className="hover:bg-slate-50/50 dark:hover:bg-slate-800/20 transition-all">
+                              <td className="p-3 font-mono font-bold text-slate-400">{index + 1}</td>
+                              <td className="p-3">
+                                {couple.leadBib ? (
                                   <div className="flex items-center gap-2">
-                                    <span className="font-mono bg-blue-500/10 text-blue-500 px-1.5 py-0.5 rounded text-[10px] font-bold">#{leadBib}</span>
+                                    <span className="font-mono bg-blue-500/10 text-blue-500 px-1.5 py-0.5 rounded text-[10px] font-bold">#{couple.leadBib}</span>
                                     <span className="font-semibold">{lead ? lead.name : "Unknown"}</span>
                                   </div>
-                                </td>
-                                {isDrawMode && (
-                                  <td className="p-3" onClick={(e) => e.stopPropagation()}>
-                                    <select
-                                      id={`draw-select-lead-${leadBib}`}
-                                      value={followBib}
-                                      onChange={async (e) => {
-                                        const newFollowBib = e.target.value;
-                                        const updatedCouples = (activeHeat.couples || []).map((couple, i) => {
-                                          if (i === index) {
-                                            return {
-                                              id: `${leadBib}_${newFollowBib}`,
-                                              leadBib,
-                                              followBib: newFollowBib
-                                            };
-                                          }
-                                          return couple;
-                                        });
-                                        await onUpdateHeat(activeHeat.id, {
-                                          couples: updatedCouples,
-                                          competitorBibs: updatedCouples.map(c => c.id),
-                                          isCustom: true
-                                        });
-                                      }}
-                                      className={`text-xs px-2 py-1 rounded border focus:outline-none focus:ring-1 focus:ring-violet-500 font-mono w-full ${
-                                        isDarkMode
-                                          ? "bg-slate-800 border-slate-700 text-slate-100"
-                                          : "bg-white border-slate-200 text-slate-800"
-                                      }`}
-                                    >
-                                      <option value="">— Choose Partner —</option>
-                                      {/* All checked-in followers of this division */}
-                                      {competitors
-                                        .filter(c => c.role === "Follow" && c.division === activeHeat.division && c.checkedIn)
-                                        .map(f => (
-                                          <option key={f.bib} value={f.bib}>
-                                            #{f.bib} {f.name}
-                                          </option>
-                                        ))
-                                      }
-                                    </select>
-                                  </td>
+                                ) : (
+                                  <span className="text-slate-400 italic">No leader</span>
                                 )}
-                                <td className="p-3 text-right">
-                                  <div className="flex items-center justify-end gap-1">
+                              </td>
+                              <td className="p-3">
+                                <div
+                                  id={`draw-partner-slot-${index}`}
+                                  onDragOver={(e) => {
+                                    e.preventDefault();
+                                    setDrawDropIndex(index);
+                                  }}
+                                  onDragLeave={() => setDrawDropIndex((prev) => (prev === index ? null : prev))}
+                                  onDrop={async (e) => {
+                                    e.preventDefault();
+                                    setDrawDropIndex(null);
+                                    const data = e.dataTransfer.getData("text/plain");
+                                    if (data.startsWith(DRAW_FOLLOWER_PREFIX)) {
+                                      await assignDrawFollower(data.slice(DRAW_FOLLOWER_PREFIX.length), index);
+                                    }
+                                  }}
+                                  className={`min-h-[34px] px-2 py-1.5 rounded-lg border-2 border-dashed flex items-center gap-2 transition-all ${
+                                    isDropTarget
+                                      ? "border-violet-500 bg-violet-500/10"
+                                      : couple.followBib
+                                        ? "border-transparent bg-rose-500/5"
+                                        : "border-slate-300 dark:border-slate-700"
+                                  }`}
+                                >
+                                  {couple.followBib ? (
+                                    <>
+                                      <span className="font-mono bg-rose-500/10 text-rose-500 px-1.5 py-0.5 rounded text-[10px] font-bold">#{couple.followBib}</span>
+                                      <span className="font-semibold">{follow ? follow.name : "Unknown"}</span>
+                                    </>
+                                  ) : (
+                                    <span className="text-[10px] text-slate-400 uppercase tracking-wider font-semibold">Drop a follower here</span>
+                                  )}
+                                </div>
+                              </td>
+                              <td className="p-3 text-right">
+                                <div className="flex items-center justify-end gap-1">
+                                  <button
+                                    type="button"
+                                    disabled={index === 0}
+                                    onClick={async () => {
+                                      const couplesList = (activeHeat.couples || []).map(c => ({ ...c }));
+                                      [couplesList[index - 1], couplesList[index]] = [couplesList[index], couplesList[index - 1]];
+                                      await onUpdateHeat(activeHeat.id, { couples: couplesList, competitorBibs: couplesList.map(c => c.id), isCustom: true });
+                                    }}
+                                    className={`p-1 rounded border border-slate-250 dark:border-slate-850 hover:bg-slate-100 dark:hover:bg-slate-800 ${
+                                      index === 0 ? "opacity-30 cursor-not-allowed" : "cursor-pointer"
+                                    }`}
+                                    title="Move Couple Up"
+                                  >
+                                    <ArrowUp className="w-3 h-3" />
+                                  </button>
+                                  <button
+                                    type="button"
+                                    disabled={index === (activeHeat.couples || []).length - 1}
+                                    onClick={async () => {
+                                      const couplesList = (activeHeat.couples || []).map(c => ({ ...c }));
+                                      [couplesList[index], couplesList[index + 1]] = [couplesList[index + 1], couplesList[index]];
+                                      await onUpdateHeat(activeHeat.id, { couples: couplesList, competitorBibs: couplesList.map(c => c.id), isCustom: true });
+                                    }}
+                                    className={`p-1 rounded border border-slate-250 dark:border-slate-850 hover:bg-slate-100 dark:hover:bg-slate-800 ${
+                                      index === (activeHeat.couples || []).length - 1 ? "opacity-30 cursor-not-allowed" : "cursor-pointer"
+                                    }`}
+                                    title="Move Couple Down"
+                                  >
+                                    <ArrowDown className="w-3 h-3" />
+                                  </button>
+                                  {lead && (
                                     <button
                                       type="button"
-                                      disabled={index === 0}
-                                      onClick={async () => {
-                                        const couplesList = [...(activeHeat.couples || [])];
-                                        const temp = couplesList[index].leadBib;
-                                        couplesList[index].leadBib = couplesList[index - 1].leadBib;
-                                        couplesList[index - 1].leadBib = temp;
-                                        couplesList[index].id = `${couplesList[index].leadBib}_${couplesList[index].followBib}`;
-                                        couplesList[index - 1].id = `${couplesList[index - 1].leadBib}_${couplesList[index - 1].followBib}`;
-
-                                        await onUpdateHeat(activeHeat.id, {
-                                          couples: couplesList,
-                                          competitorBibs: couplesList.map(c => c.id),
-                                          isCustom: true
-                                        });
-                                      }}
-                                      className={`p-1 rounded border border-slate-250 dark:border-slate-850 hover:bg-slate-100 dark:hover:bg-slate-800 ${
-                                        index === 0 ? "opacity-30 cursor-not-allowed" : "cursor-pointer"
-                                      }`}
-                                      title="Move Lead Up"
+                                      onClick={() => handleOpenEditModal(lead)}
+                                      className="p-1 rounded border border-slate-250 dark:border-slate-850 text-slate-500 hover:bg-slate-100 dark:hover:bg-slate-800 cursor-pointer"
+                                      title="Edit Leader Profile"
                                     >
-                                      <ArrowUp className="w-3 h-3" />
+                                      <Edit className="w-3 h-3" />
                                     </button>
-                                    <button
-                                      type="button"
-                                      disabled={index === (activeHeat.couples || []).length - 1}
-                                      onClick={async () => {
-                                        const couplesList = [...(activeHeat.couples || [])];
-                                        const temp = couplesList[index].leadBib;
-                                        couplesList[index].leadBib = couplesList[index + 1].leadBib;
-                                        couplesList[index + 1].leadBib = temp;
-                                        couplesList[index].id = `${couplesList[index].leadBib}_${couplesList[index].followBib}`;
-                                        couplesList[index + 1].id = `${couplesList[index + 1].leadBib}_${couplesList[index + 1].followBib}`;
-
-                                        await onUpdateHeat(activeHeat.id, {
-                                          couples: couplesList,
-                                          competitorBibs: couplesList.map(c => c.id),
-                                          isCustom: true
-                                        });
-                                      }}
-                                      className={`p-1 rounded border border-slate-250 dark:border-slate-850 hover:bg-slate-100 dark:hover:bg-slate-800 ${
-                                        index === (activeHeat.couples || []).length - 1 ? "opacity-30 cursor-not-allowed" : "cursor-pointer"
-                                      }`}
-                                      title="Move Lead Down"
-                                    >
-                                      <ArrowDown className="w-3 h-3" />
-                                    </button>
-                                    <button
-                                      type="button"
-                                      onClick={async () => {
-                                        const couplesList = (activeHeat.couples || []).filter((_, i) => i !== index);
-                                        await onUpdateHeat(activeHeat.id, {
-                                          couples: couplesList,
-                                          competitorBibs: couplesList.map(c => c.id),
-                                          isCustom: true
-                                        });
-                                      }}
-                                      className="p-1 rounded border border-slate-250 dark:border-slate-850 text-rose-500 hover:bg-rose-500/10 cursor-pointer animate-fade-in"
-                                      title="Remove Lead"
-                                    >
-                                      <Trash2 className="w-3 h-3" />
-                                    </button>
-                                    {lead && (
-                                      <button
-                                        type="button"
-                                        onClick={() => handleOpenEditModal(lead)}
-                                        className="p-1 rounded border border-slate-250 dark:border-slate-850 text-slate-500 hover:bg-slate-100 dark:hover:bg-slate-800 cursor-pointer"
-                                        title="Edit Lead Profile"
-                                      >
-                                        <Edit className="w-3 h-3" />
-                                      </button>
-                                    )}
-                                  </div>
-                                </td>
-                              </tr>
-                            );
-                          })}
-                          {(!activeHeat.couples || activeHeat.couples.length === 0) && (
-                            <tr>
-                              <td colSpan={isDrawMode ? 4 : 3} className="p-6 text-center text-slate-500">
-                                No leaders assigned to sheet.
+                                  )}
+                                </div>
                               </td>
                             </tr>
-                          )}
-                        </tbody>
-                      </table>
-                    </div>
-                  </div>
-
-                  {/* Followers List (Follows) */}
-                  <div className="space-y-3">
-                    <h3 className="text-xs font-bold font-mono text-slate-400 uppercase tracking-wider flex items-center gap-1.5">
-                      <span className="w-2 h-2 rounded-full bg-rose-500" />
-                      Followers (Follows) List
-                    </h3>
-                    <div className="overflow-x-auto rounded-xl border border-slate-200 dark:border-slate-800">
-                      <table className="w-full text-left border-collapse">
-                        <thead>
-                          <tr className={`${isDarkMode ? "bg-slate-800/50 text-slate-300" : "bg-slate-50 text-slate-500"} text-xs font-semibold font-mono border-b border-slate-200 dark:border-slate-800`}>
-                            <th className="p-3 w-12">No.</th>
-                            <th className="p-3">Follower Dancer</th>
-                            <th className="p-3 text-right w-24">Actions</th>
+                          );
+                        })}
+                        {(!activeHeat.couples || activeHeat.couples.length === 0) && (
+                          <tr>
+                            <td colSpan={4} className="p-6 text-center text-slate-500">
+                              No leaders assigned to sheet.
+                            </td>
                           </tr>
-                        </thead>
-                        <tbody className="divide-y divide-slate-200 dark:divide-slate-800 text-xs">
-                          {((activeHeat.couples || []).map(c => c.followBib)).map((followBib, index) => {
-                            if (!followBib) return null;
-                            const follow = competitors.find(c => c.bib === followBib);
-                            
-                            return (
-                              <tr key={`follow-${followBib}-${index}`} className="hover:bg-slate-50/50 dark:hover:bg-slate-800/20 transition-all">
-                                <td className="p-3 font-mono font-bold text-slate-400">{index + 1}</td>
-                                <td className="p-3">
-                                  <div className="flex items-center gap-2">
-                                    <span className="font-mono bg-rose-500/10 text-rose-500 px-1.5 py-0.5 rounded text-[10px] font-bold">#{followBib}</span>
-                                    <span className="font-semibold">{follow ? follow.name : "Unknown"}</span>
-                                  </div>
-                                </td>
-                                <td className="p-3 text-right">
-                                  <div className="flex items-center justify-end gap-1">
-                                    <button
-                                      type="button"
-                                      disabled={index === 0}
-                                      onClick={async () => {
-                                        const couplesList = [...(activeHeat.couples || [])];
-                                        const temp = couplesList[index].followBib;
-                                        couplesList[index].followBib = couplesList[index - 1].followBib;
-                                        couplesList[index - 1].followBib = temp;
-                                        couplesList[index].id = `${couplesList[index].leadBib}_${couplesList[index].followBib}`;
-                                        couplesList[index - 1].id = `${couplesList[index - 1].leadBib}_${couplesList[index - 1].followBib}`;
-
-                                        await onUpdateHeat(activeHeat.id, {
-                                          couples: couplesList,
-                                          competitorBibs: couplesList.map(c => c.id),
-                                          isCustom: true
-                                        });
-                                      }}
-                                      className={`p-1 rounded border border-slate-250 dark:border-slate-850 hover:bg-slate-100 dark:hover:bg-slate-800 ${
-                                        index === 0 ? "opacity-30 cursor-not-allowed" : "cursor-pointer"
-                                      }`}
-                                      title="Move Follow Up"
-                                    >
-                                      <ArrowUp className="w-3 h-3" />
-                                    </button>
-                                    <button
-                                      type="button"
-                                      disabled={index === (activeHeat.couples || []).length - 1}
-                                      onClick={async () => {
-                                        const couplesList = [...(activeHeat.couples || [])];
-                                        const temp = couplesList[index].followBib;
-                                        couplesList[index].followBib = couplesList[index + 1].followBib;
-                                        couplesList[index + 1].followBib = temp;
-                                        couplesList[index].id = `${couplesList[index].leadBib}_${couplesList[index].followBib}`;
-                                        couplesList[index + 1].id = `${couplesList[index + 1].leadBib}_${couplesList[index + 1].followBib}`;
-
-                                        await onUpdateHeat(activeHeat.id, {
-                                          couples: couplesList,
-                                          competitorBibs: couplesList.map(c => c.id),
-                                          isCustom: true
-                                        });
-                                      }}
-                                      className={`p-1 rounded border border-slate-250 dark:border-slate-850 hover:bg-slate-100 dark:hover:bg-slate-800 ${
-                                        index === (activeHeat.couples || []).length - 1 ? "opacity-30 cursor-not-allowed" : "cursor-pointer"
-                                      }`}
-                                      title="Move Follow Down"
-                                    >
-                                      <ArrowDown className="w-3 h-3" />
-                                    </button>
-                                    <button
-                                      type="button"
-                                      onClick={async () => {
-                                        const couplesList = (activeHeat.couples || []).filter((_, i) => i !== index);
-                                        await onUpdateHeat(activeHeat.id, {
-                                          couples: couplesList,
-                                          competitorBibs: couplesList.map(c => c.id),
-                                          isCustom: true
-                                        });
-                                      }}
-                                      className="p-1 rounded border border-slate-250 dark:border-slate-850 text-rose-500 hover:bg-rose-500/10 cursor-pointer"
-                                      title="Remove Follow"
-                                    >
-                                      <Trash2 className="w-3 h-3" />
-                                    </button>
-                                    {follow && (
-                                      <button
-                                        type="button"
-                                        onClick={() => handleOpenEditModal(follow)}
-                                        className="p-1 rounded border border-slate-250 dark:border-slate-850 text-slate-500 hover:bg-slate-100 dark:hover:bg-slate-800 cursor-pointer"
-                                        title="Edit Follower Profile"
-                                      >
-                                        <Edit className="w-3 h-3" />
-                                      </button>
-                                    )}
-                                  </div>
-                                </td>
-                              </tr>
-                            );
-                          })}
-                          {(!activeHeat.couples || activeHeat.couples.length === 0) && (
-                            <tr>
-                              <td colSpan={3} className="p-6 text-center text-slate-500">
-                                No followers assigned to sheet.
-                              </td>
-                            </tr>
-                          )}
-                        </tbody>
-                      </table>
-                    </div>
+                        )}
+                      </tbody>
+                    </table>
                   </div>
                 </div>
               ) : (
@@ -4084,7 +4087,7 @@ export default function AdminPanel({
                       const nextGlobalIndex = orderedHeatRows[idx + 1] ? orderedHeatRows[idx + 1].index : -1;
                       const isSplitActive = nextGlobalIndex !== -1 && currentSplits.includes(nextGlobalIndex);
                       const individualComp = activeHeat.role !== "Mixed"
-                        ? competitors.find(c => c.bib === row.id)
+                        ? activeHeatView.find(c => c.bib === row.id)
                         : null;
 
                       return (
@@ -4097,16 +4100,7 @@ export default function AdminPanel({
                                   value={individualComp.role}
                                   onChange={async (e) => {
                                     const newRole = e.target.value as "Lead" | "Follow";
-                                    if (onUpdateCompetitor) {
-                                      await onUpdateCompetitor(individualComp.bib, {
-                                        bib: individualComp.bib,
-                                        name: individualComp.name,
-                                        division: individualComp.division,
-                                        role: newRole,
-                                        checkedIn: individualComp.checkedIn,
-                                        scratched: individualComp.scratched
-                                      });
-                                    }
+                                    await updateRoleForActiveHeat(individualComp.bib, newRole);
                                   }}
                                   className={`text-xs px-2 py-1 rounded-lg border focus:outline-none focus:ring-1 focus:ring-violet-500 font-medium ${
                                     isDarkMode
@@ -4133,16 +4127,10 @@ export default function AdminPanel({
                               <div className="flex items-center justify-end gap-1.5">
                                 <button
                                   type="button"
-                                  disabled={row.index === 0}
-                                  onClick={async () => {
-                                    const list = [...activeHeat.competitorBibs];
-                                    const temp = list[row.index];
-                                    list[row.index] = list[row.index - 1];
-                                    list[row.index - 1] = temp;
-                                    await onUpdateHeat(activeHeat.id, { competitorBibs: list, isCustom: true });
-                                  }}
+                                  disabled={idx === 0}
+                                  onClick={() => moveSheetDancer(null, idx, idx - 1)}
                                   className={`p-1.5 rounded border border-slate-200 dark:border-slate-800 hover:bg-slate-100 dark:hover:bg-slate-800 transition-all ${
-                                    row.index === 0 ? "opacity-30 cursor-not-allowed" : "cursor-pointer"
+                                    idx === 0 ? "opacity-30 cursor-not-allowed" : "cursor-pointer"
                                   }`}
                                   title="Move Up"
                                 >
@@ -4150,16 +4138,10 @@ export default function AdminPanel({
                                 </button>
                                 <button
                                   type="button"
-                                  disabled={row.index === activeHeat.competitorBibs.length - 1}
-                                  onClick={async () => {
-                                    const list = [...activeHeat.competitorBibs];
-                                    const temp = list[row.index];
-                                    list[row.index] = list[row.index + 1];
-                                    list[row.index + 1] = temp;
-                                    await onUpdateHeat(activeHeat.id, { competitorBibs: list, isCustom: true });
-                                  }}
+                                  disabled={idx === orderedHeatRows.length - 1}
+                                  onClick={() => moveSheetDancer(null, idx, idx + 1)}
                                   className={`p-1.5 rounded border border-slate-200 dark:border-slate-800 hover:bg-slate-100 dark:hover:bg-slate-800 transition-all ${
-                                    row.index === activeHeat.competitorBibs.length - 1 ? "opacity-30 cursor-not-allowed" : "cursor-pointer"
+                                    idx === orderedHeatRows.length - 1 ? "opacity-30 cursor-not-allowed" : "cursor-pointer"
                                   }`}
                                   title="Move Down"
                                 >
@@ -4285,7 +4267,7 @@ export default function AdminPanel({
               <div className="p-4 bg-violet-500/[0.03] dark:bg-violet-950/20 border border-violet-500/15 rounded-xl flex flex-col items-center gap-2 select-none animate-fade-in mb-6">
                 <div className="text-center">
                   <span className="text-xs font-bold text-violet-500 font-mono uppercase tracking-wider block">Interactive Heat Sheet Splitter</span>
-                  <span className="text-[10px] text-slate-400 block mt-0.5">Drag this line down into any gap between table rows below to split the active heat:</span>
+                  <span className="text-[10px] text-slate-400 block mt-0.5">Drag this line into a gap between the rows above to split the active heat. On a touch screen, press and hold it first.</span>
                 </div>
                 <div
                   draggable
@@ -4335,10 +4317,10 @@ export default function AdminPanel({
                         }`}
                       >
                         <option value="">— Choose Lead to Add —</option>
-                        {competitors
-                          .filter(c => c.division === activeHeat.division && c.role === "Lead" && c.checkedIn && !c.scratched && !(activeHeat.couples || []).some(cp => cp.leadBib === c.bib))
+                        {activeHeatView
+                          .filter(c => activeHeatSides.get(c.bib) === "Lead" && c.checkedIn && !c.scratched && !(activeHeat.couples || []).some(cp => cp.leadBib === c.bib))
                           .map(c => (
-                            <option key={c.bib} value={c.bib}>#{c.bib} {c.name}</option>
+                            <option key={c.bib} value={c.bib}>{showSheetBibs ? `#${c.bib} ${c.name}` : c.name}</option>
                           ))}
                       </select>
                       <button
@@ -4372,10 +4354,10 @@ export default function AdminPanel({
                         }`}
                       >
                         <option value="">— Choose Follow to Add —</option>
-                        {competitors
-                          .filter(c => c.division === activeHeat.division && c.role === "Follow" && c.checkedIn && !c.scratched && !(activeHeat.couples || []).some(cp => cp.followBib === c.bib))
+                        {activeHeatView
+                          .filter(c => activeHeatSides.get(c.bib) === "Follow" && c.checkedIn && !c.scratched && !(activeHeat.couples || []).some(cp => cp.followBib === c.bib))
                           .map(c => (
-                            <option key={c.bib} value={c.bib}>#{c.bib} {c.name}</option>
+                            <option key={c.bib} value={c.bib}>{showSheetBibs ? `#${c.bib} ${c.name}` : c.name}</option>
                           ))}
                       </select>
                       <button
@@ -4415,8 +4397,8 @@ export default function AdminPanel({
                       }`}
                     >
                       <option value="">— Choose Competitor to Add —</option>
-                      {competitors
-                        .filter(c => c.division === activeHeat.division && c.role === activeHeat.role && c.checkedIn && !c.scratched && !activeHeat.competitorBibs.includes(c.bib))
+                      {activeHeatView
+                        .filter(c => activeHeatSides.get(c.bib) === activeHeat.role && c.checkedIn && !c.scratched && !activeHeat.competitorBibs.includes(c.bib))
                         .map(c => (
                           <option key={c.bib} value={c.bib}>#{c.bib} {c.name}</option>
                         ))}
@@ -4439,6 +4421,43 @@ export default function AdminPanel({
                 </div>
               )}
             </div>
+
+            {/* Draw mode: followers in bib order, dragged onto leaders above */}
+            {isDrawSheet && (
+              <div id="draw-followers-box" className={`sticky bottom-4 z-10 p-4 rounded-xl border border-rose-500/30 shadow-lg ${isDarkMode ? "bg-slate-950/95" : "bg-white/95"} backdrop-blur-sm`}>
+                <h3 className="text-xs font-bold font-mono uppercase tracking-wider text-rose-500 mb-1 flex items-center gap-1.5">
+                  <span className="w-2 h-2 rounded-full bg-rose-500" />
+                  Followers ({drawFollowers.length})
+                </h3>
+                <p className="text-[10px] text-slate-400 mb-3">In bib order. Drag a follower onto a leader's partner slot; dropping on a leader who already has a partner swaps the two followers.</p>
+                <div className="flex flex-wrap gap-2">
+                  {drawFollowers.map((bib) => {
+                    const follow = competitors.find(c => c.bib === bib);
+                    const partnerLeadBib = (activeHeat.couples || []).find(c => c.followBib === bib)?.leadBib;
+                    return (
+                      <div
+                        key={bib}
+                        id={`draw-follower-${bib}`}
+                        draggable
+                        onDragStart={(e) => {
+                          e.dataTransfer.setData("text/plain", `${DRAW_FOLLOWER_PREFIX}${bib}`);
+                          e.dataTransfer.effectAllowed = "move";
+                        }}
+                        onDragEnd={() => setDrawDropIndex(null)}
+                        className="px-2.5 py-1.5 rounded-lg border border-rose-500/30 bg-rose-500/5 text-xs flex items-center gap-2 cursor-grab active:cursor-grabbing select-none hover:bg-rose-500/10 transition-all"
+                      >
+                        <span className="font-mono bg-rose-500/10 text-rose-500 px-1.5 py-0.5 rounded text-[10px] font-bold">#{bib}</span>
+                        <span className="font-semibold">{follow ? follow.name : "Unknown"}</span>
+                        <span className="text-[9px] text-slate-400">{partnerLeadBib ? `w/ #${partnerLeadBib}` : "No partner"}</span>
+                      </div>
+                    );
+                  })}
+                  {drawFollowers.length === 0 && (
+                    <p className="text-[11px] text-slate-400">No followers on this sheet yet. Add them with the form above.</p>
+                  )}
+                </div>
+              </div>
+            )}
 
           </div>
         ) : (
@@ -4470,20 +4489,15 @@ export default function AdminPanel({
                       <div className="min-w-0">
                         <div className="flex items-center gap-2 flex-wrap">
                           <span className="text-sm font-bold truncate">{row.name}</span>
-                          <span className="text-[9px] px-1.5 py-0.5 rounded-full bg-violet-500/10 text-violet-400 font-semibold uppercase tracking-wider font-mono">
-                            {row.role}
+                          <span className={`text-[9px] px-1.5 py-0.5 rounded-full font-semibold uppercase tracking-wider font-mono ${
+                            row.judgingSide === "Leaders"
+                              ? "bg-emerald-500/10 text-emerald-500"
+                              : row.judgingSide === "Followers"
+                                ? "bg-rose-500/10 text-rose-500"
+                                : "bg-violet-500/10 text-violet-400"
+                          }`}>
+                            Judging: {row.judgingSide}
                           </span>
-                          {row.judgingSide !== "N/A" && (
-                            <span className={`text-[9px] px-1.5 py-0.5 rounded-full font-semibold uppercase tracking-wider font-mono ${
-                              row.judgingSide === "Leaders"
-                                ? "bg-emerald-500/10 text-emerald-500"
-                                : row.judgingSide === "Followers"
-                                  ? "bg-rose-500/10 text-rose-500"
-                                  : "bg-slate-500/10 text-slate-400"
-                            }`}>
-                              Judging: {row.judgingSide}
-                            </span>
-                          )}
                           {row.isFinalized && (
                             <span className="text-[9px] px-1.5 py-0.5 rounded-full bg-emerald-500/10 text-emerald-500 font-semibold uppercase tracking-wider font-mono">
                               Finalized
@@ -4511,12 +4525,12 @@ export default function AdminPanel({
                           <span className={`text-[9px] font-mono uppercase tracking-wider block ${row.isQuotaSatisfied ? "text-green-500" : "text-red-500"}`}>
                             Quota
                           </span>
-                          <span className={`text-xs font-bold font-mono block ${row.isQuotaSatisfied ? "text-green-500" : "text-red-500"}`}>
-                            Callbacks: {row.yesCount}/{judgeTargetCallbackCount}
-                          </span>
-                          <span className={`text-xs font-bold font-mono block ${row.isQuotaSatisfied ? "text-green-500" : "text-red-500"}`}>
-                            Alts: {row.altCount}/{judgeTargetAlternateCount}
-                          </span>
+                          {row.quotaStatuses.map(({ quota, yesCount, altCount, isMet }) => (
+                            <span key={quota.side || "all"} className={`text-xs font-bold font-mono block ${isMet ? "text-green-500" : "text-red-500"}`}>
+                              {quota.side && row.quotaStatuses.length > 1 ? `${quota.side === "Lead" ? "Leaders" : "Followers"}: ` : ""}
+                              Callbacks: {yesCount}/{quota.callbackCount} · Alts: {altCount}/{quota.alternateCount}
+                            </span>
+                          ))}
                         </div>
                       )}
 
@@ -4553,7 +4567,7 @@ export default function AdminPanel({
 
     {/* Live Heat Rankings & Advancement (non-Finals only) */}
     {liveHeat && !liveHeatIsFinals && canCompleteHeat && (
-      <div className={`p-6 rounded-2xl border transition-all ${isDarkMode ? "bg-slate-900 border-slate-800 text-slate-100" : "bg-white border-slate-200 shadow-sm text-slate-800"}`}>
+      <div className={`p-6 rounded-2xl border transition-all ${guideRing("todo")} ${isDarkMode ? "bg-slate-900 border-slate-800 text-slate-100" : "bg-white border-slate-200 shadow-sm text-slate-800"}`}>
         <h2 className="text-sm font-bold tracking-tight mb-1 flex items-center gap-1.5">
           <Trophy className="w-4 h-4 text-violet-500" />
           Live Heat Rankings
@@ -4564,6 +4578,27 @@ export default function AdminPanel({
           <span className="text-amber-500 font-semibold">amber</span> rows are alternates, and{" "}
           <span className="text-slate-400 font-semibold">grey</span> rows did not pass.
         </p>
+
+        {liveHeatHasChiefScores && (
+          <label className="mb-4 flex items-start gap-2 text-[11px] text-slate-400 cursor-pointer select-none">
+            <input
+              id="live-chief-scores-toggle"
+              type="checkbox"
+              checked={getContestOptions(settings, liveHeat.id).includeChiefScores !== false}
+              onChange={(e) => onUpdateSettings({
+                contestOptions: {
+                  ...(settings.contestOptions || {}),
+                  [liveHeat.id]: { ...getContestOptions(settings, liveHeat.id), includeChiefScores: e.target.checked }
+                }
+              })}
+              className="mt-0.5 cursor-pointer"
+            />
+            <span>
+              <span className="font-semibold text-slate-300">Include {settings.chiefJudgeName || "Chief Judge"}'s Scores</span>
+              <span className="block">Judging Both sides, they count only where nobody else scores a side, or to settle a tie. Given one side, they count like any judge and settle ties.</span>
+            </span>
+          </label>
+        )}
 
         {liveHeatHasDistinctRoles ? (
           <div className="space-y-5">
@@ -4580,7 +4615,7 @@ export default function AdminPanel({
                       <th className="p-2 text-right">Cut</th>
                     </tr>
                   </thead>
-                  <tbody>{liveHeatRankedLeads.map((r) => renderLiveRankRow(r))}</tbody>
+                  <tbody>{liveHeatRankedLeads.map((r) => renderLiveRankRow(r, liveHeat?.contestType))}</tbody>
                 </table>
               </div>
             </div>
@@ -4597,7 +4632,7 @@ export default function AdminPanel({
                       <th className="p-2 text-right">Cut</th>
                     </tr>
                   </thead>
-                  <tbody>{liveHeatRankedFollows.map((r) => renderLiveRankRow(r))}</tbody>
+                  <tbody>{liveHeatRankedFollows.map((r) => renderLiveRankRow(r, liveHeat?.contestType))}</tbody>
                 </table>
               </div>
             </div>
@@ -4614,7 +4649,7 @@ export default function AdminPanel({
                   <th className="p-2 text-right">Cut</th>
                 </tr>
               </thead>
-              <tbody>{liveHeatRankedFlat.map((r) => renderLiveRankRow(r))}</tbody>
+              <tbody>{liveHeatRankedFlat.map((r) => renderLiveRankRow(r, liveHeat?.contestType))}</tbody>
             </table>
           </div>
         )}
@@ -4646,12 +4681,23 @@ export default function AdminPanel({
         (so the round above is no longer `liveHeat`), but its finalists haven't
         been carried into a Next Contest yet. */}
     {showAdvanceCompletedCard && lastCompletedResult && (
-      <div className={`p-6 rounded-2xl border transition-all ${isDarkMode ? "bg-slate-900 border-slate-800 text-slate-100" : "bg-white border-slate-200 shadow-sm text-slate-800"}`}>
-        <h2 className="text-sm font-bold tracking-tight mb-1 flex items-center gap-1.5">
-          <Trophy className="w-4 h-4 text-violet-500" />
-          Advance Last Completed Contest
-        </h2>
-        <p className="text-[11px] text-slate-400 mb-4 leading-relaxed">
+      <div className={`p-6 rounded-2xl border transition-all ${guideRing("done")} ${isDarkMode ? "bg-slate-900 border-slate-800 text-slate-100" : "bg-white border-slate-200 shadow-sm text-slate-800"}`}>
+        <button
+          type="button"
+          id="advance-completed-toggle"
+          onClick={() => toggleCard("advanceCompleted")}
+          aria-expanded={!collapsedCards.advanceCompleted}
+          className="w-full flex items-center justify-between gap-2 cursor-pointer select-none text-left"
+        >
+          <h2 className="text-sm font-bold tracking-tight flex items-center gap-1.5">
+            <Trophy className="w-4 h-4 text-violet-500" />
+            Advance Last Completed Contest
+          </h2>
+          {collapsedCards.advanceCompleted ? <ChevronDown className="w-4 h-4 text-slate-400" /> : <ChevronUp className="w-4 h-4 text-slate-400" />}
+        </button>
+        {!collapsedCards.advanceCompleted && (
+        <>
+        <p className="mt-1 text-[11px] text-slate-400 mb-4 leading-relaxed">
           <span className="font-semibold text-slate-300">{lastCompletedResult.name}</span> was completed at {lastCompletedResult.timestamp}.{" "}
           <span className="text-green-500 font-semibold">green</span> rows made the callback cut,{" "}
           <span className="text-amber-500 font-semibold">amber</span> rows are alternates, and{" "}
@@ -4673,7 +4719,7 @@ export default function AdminPanel({
                       <th className="p-2 text-right">Cut</th>
                     </tr>
                   </thead>
-                  <tbody>{lastCompletedRankedLeads.map((r) => renderLiveRankRow(r, lastCompletedResult.judgingStyle))}</tbody>
+                  <tbody>{lastCompletedRankedLeads.map((r) => renderLiveRankRow(r, lastCompletedHeat?.contestType, lastCompletedResult.judgingStyle))}</tbody>
                 </table>
               </div>
             </div>
@@ -4690,7 +4736,7 @@ export default function AdminPanel({
                       <th className="p-2 text-right">Cut</th>
                     </tr>
                   </thead>
-                  <tbody>{lastCompletedRankedFollows.map((r) => renderLiveRankRow(r, lastCompletedResult.judgingStyle))}</tbody>
+                  <tbody>{lastCompletedRankedFollows.map((r) => renderLiveRankRow(r, lastCompletedHeat?.contestType, lastCompletedResult.judgingStyle))}</tbody>
                 </table>
               </div>
             </div>
@@ -4707,7 +4753,7 @@ export default function AdminPanel({
                   <th className="p-2 text-right">Cut</th>
                 </tr>
               </thead>
-              <tbody>{lastCompletedRankedFlat.map((r) => renderLiveRankRow(r, lastCompletedResult.judgingStyle))}</tbody>
+              <tbody>{lastCompletedRankedFlat.map((r) => renderLiveRankRow(r, lastCompletedHeat?.contestType, lastCompletedResult.judgingStyle))}</tbody>
             </table>
           </div>
         )}
@@ -4731,6 +4777,8 @@ export default function AdminPanel({
               ))}
             </div>
           </div>
+        )}
+        </>
         )}
       </div>
     )}
@@ -4768,121 +4816,10 @@ export default function AdminPanel({
         onClick={async () => {
           setLoading(true);
           try {
-            let updatedCompletedResults = settings.completedResults || [];
-
-            // 1. End/score/record contest: calculate results for the live heat
-            const liveHeatToComplete = heats.find(h => h.id === settings.currentHeatId);
-            if (liveHeatToComplete) {
-              const hCallbackCount = liveHeatToComplete.role === "Lead"
-                ? (settings.callbackCountLeaders !== undefined ? settings.callbackCountLeaders : settings.callbackCount)
-                : liveHeatToComplete.role === "Follow"
-                  ? (settings.callbackCountFollowers !== undefined ? settings.callbackCountFollowers : settings.callbackCount)
-                  : (settings.callbackCount || 5);
-
-              const hAlternateCount = liveHeatToComplete.role === "Lead"
-                ? (settings.alternateCountLeaders !== undefined ? settings.alternateCountLeaders : (settings.alternateCount !== undefined ? settings.alternateCount : 2))
-                : liveHeatToComplete.role === "Follow"
-                  ? (settings.alternateCountFollowers !== undefined ? settings.alternateCountFollowers : (settings.alternateCount !== undefined ? settings.alternateCount : 2))
-                  : (settings.alternateCount !== undefined ? settings.alternateCount : 2);
-
-              const results = calculateHeatResults(
-                liveHeatToComplete,
-                competitors,
-                scores,
-                settings.judgingStyle || "raw",
-                hCallbackCount,
-                hAlternateCount,
-                settings.callbackCountLeaders,
-                settings.callbackCountFollowers,
-                settings.alternateCountLeaders,
-                settings.alternateCountFollowers,
-                settings
-              );
-
-              const completedItem: CompletedContestResult = {
-                id: `${liveHeatToComplete.id}_${Date.now()}`,
-                heatId: liveHeatToComplete.id,
-                name: liveHeatToComplete.name,
-                division: liveHeatToComplete.division,
-                heatType: liveHeatToComplete.heatType || "Prelim",
-                timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
-                judgingStyle: settings.judgingStyle || "raw",
-                rankings: results.map((r, index) => ({
-                  rank: r.rank || (index + 1),
-                  bib: r.competitor.bib,
-                  name: r.competitor.name,
-                  averageScore: r.averageScore,
-                  averagePlacement: r.averagePlacement,
-                  prelimPoints: r.prelimPoints,
-                  qualified: r.qualified,
-                  isAlternate: r.isAlternate,
-                  alternateRank: r.alternateRank
-                })),
-                configSnapshot: {
-                  callbackCount: hCallbackCount,
-                  alternateCount: hAlternateCount,
-                  callbackCountLeaders: settings.callbackCountLeaders,
-                  callbackCountFollowers: settings.callbackCountFollowers,
-                  alternateCountLeaders: settings.alternateCountLeaders,
-                  alternateCountFollowers: settings.alternateCountFollowers,
-                  judgeNames: settings.judgeNames,
-                  judgeRoles: settings.judgeRoles,
-                  chiefJudgeName: settings.chiefJudgeName,
-                  chiefJudgeRole: settings.chiefJudgeRole
-                }
-              };
-
-              updatedCompletedResults = [
-                ...updatedCompletedResults.filter(r => r.heatId !== liveHeatToComplete.id), // replace if already exists
-                completedItem
-              ];
-            }
-
-            // 2. Advance / Reset logic
-            if (settings.queuedHeatId) {
-              const nextHeat = heats.find(h => h.id === settings.queuedHeatId);
-              const promotePayload: any = {
-                completedResults: updatedCompletedResults,
-                currentHeatId: settings.queuedHeatId,
-                queuedHeatId: null,
-                checkInFinalized: false, // Reset check-in finalization for the next live heat!
-                finalizedSheets: [], // Reset finalized sheets for the next live heat!
-                ...(settings.nextContestType ? { contestType: settings.nextContestType, nextContestType: null } : {}),
-                ...(settings.nextDivision ? { division: settings.nextDivision, nextDivision: null } : {}),
-                ...(settings.nextHeatType ? { heatType: settings.nextHeatType, nextHeatType: null } : {}),
-                ...(settings.nextJudgingStyle ? { judgingStyle: settings.nextJudgingStyle, nextJudgingStyle: null } : {}),
-                ...(settings.nextCallbackCount ? { callbackCount: settings.nextCallbackCount, nextCallbackCount: null } : {}),
-                ...(settings.nextAlternateCount !== undefined ? { alternateCount: settings.nextAlternateCount, nextAlternateCount: null } : {}),
-                ...(settings.nextCallbackCountLeaders ? { callbackCountLeaders: settings.nextCallbackCountLeaders, nextCallbackCountLeaders: null } : {}),
-                ...(settings.nextCallbackCountFollowers ? { callbackCountFollowers: settings.nextCallbackCountFollowers, nextCallbackCountFollowers: null } : {}),
-                ...(settings.nextAlternateCountLeaders !== undefined ? { alternateCountLeaders: settings.nextAlternateCountLeaders, nextAlternateCountLeaders: null } : {}),
-                ...(settings.nextAlternateCountFollowers !== undefined ? { alternateCountFollowers: settings.nextAlternateCountFollowers, nextAlternateCountFollowers: null } : {}),
-                ...(settings.nextJudgeNames ? { judgeNames: settings.nextJudgeNames, nextJudgeNames: null } : {}),
-                ...(settings.nextJudgeRoles ? { judgeRoles: settings.nextJudgeRoles, nextJudgeRoles: null } : {}),
-                ...(settings.nextChiefJudgeName ? { chiefJudgeName: settings.nextChiefJudgeName, nextChiefJudgeName: null } : {}),
-                ...(settings.nextChiefJudgeRole ? { chiefJudgeRole: settings.nextChiefJudgeRole, nextChiefJudgeRole: null } : {}),
-              };
-              await onUpdateSettings(promotePayload);
-              setActiveHeatControlTab("live");
-              alert(`Contest ended & recorded! ${nextHeat ? nextHeat.name : "Queued heat"} is now LIVE with promoted configuration settings.`);
-            } else {
-              // No Next Heat exists, reset admin panel!
-              await onUpdateSettings({
-                completedResults: updatedCompletedResults,
-                currentHeatId: null,
-                checkInFinalized: false,
-                finalizedSheets: [],
-                contestType: "Jack & Jill",
-                division: "Novice",
-                heatType: "Prelim",
-                queuedHeatId: null
-              });
-              setContestType("Jack & Jill");
-              setDivision("Novice");
-              setHeatType("Prelim");
-              setActiveHeatControlTab("live");
-              alert("Contest ended & recorded! No further heats are queued. Admin panel has been reset.");
-            }
+            const { promotedName } = await completeLiveContest();
+            alert(promotedName
+              ? `Contest ended & recorded! ${promotedName} is now LIVE with promoted configuration settings.`
+              : "Contest ended & recorded! No further heats are queued. Admin panel has been reset.");
           } catch (err) {
             console.error(err);
             alert("Failed to complete heat.");
@@ -4908,6 +4845,35 @@ export default function AdminPanel({
         <ExternalLink className="w-3.5 h-3.5" />
         Go to Scoring
       </button>
+
+      {(liveHeat || settings.queuedHeatId) && (
+        <div className="mt-2 flex flex-col sm:flex-row gap-2">
+          {liveHeat && (
+            <button
+              id="delete-live-contest-btn"
+              type="button"
+              disabled={loading}
+              onClick={handleResetLiveContest}
+              className="flex-1 py-2 rounded-xl font-bold text-[11px] border border-rose-500/30 text-rose-500 hover:bg-rose-500/10 transition-all flex items-center justify-center gap-1.5 cursor-pointer"
+            >
+              <Trash2 className="w-3.5 h-3.5" />
+              Delete Live Contest
+            </button>
+          )}
+          {settings.queuedHeatId && (
+            <button
+              id="delete-next-contest-btn"
+              type="button"
+              disabled={loading}
+              onClick={handleResetNextContest}
+              className="flex-1 py-2 rounded-xl font-bold text-[11px] border border-rose-500/30 text-rose-500 hover:bg-rose-500/10 transition-all flex items-center justify-center gap-1.5 cursor-pointer"
+            >
+              <Trash2 className="w-3.5 h-3.5" />
+              Delete Next Contest
+            </button>
+          )}
+        </div>
+      )}
     </div>
     </>)}
 
@@ -4918,7 +4884,7 @@ export default function AdminPanel({
         System Database Control
       </h2>
       <p className="text-[11px] text-slate-400 mb-4 leading-relaxed">
-        Restore all references and entries back to the default reference contest starting catalog.
+        Clear every contest, score and result to start a new event. Your dancers stay registered.
       </p>
       {!showResetConfirm ? (
         <button
@@ -4932,7 +4898,7 @@ export default function AdminPanel({
         </button>
       ) : (
         <div className="space-y-2 p-1 bg-slate-50 dark:bg-slate-900/40 rounded-xl border border-slate-100 dark:border-slate-800">
-          <p className="text-[11px] text-amber-500 font-semibold text-center">Are you sure? This will restore all default dancers and heats, and wipe all scores.</p>
+          <p className="text-[11px] text-amber-500 font-semibold text-center">Are you sure? This will delete all contests, scores and results. Dancers are kept.</p>
           <div className="grid grid-cols-2 gap-2">
             <button
               onClick={handleReset}
@@ -4977,18 +4943,23 @@ export default function AdminPanel({
 
       {!collapsedCards.devUtils && (
         <div className="space-y-3">
-          <button
-            id="simulate-scores-btn"
-            onClick={handleSimulate}
-            disabled={loading}
-            className="w-full py-2.5 rounded-xl bg-violet-600 hover:bg-violet-750 text-white text-xs font-bold shadow transition-all flex items-center justify-center gap-2"
-          >
-            <Play className="w-4 h-4" />
-            Simulate 3 Judges Sheets
-          </button>
-          <p className="text-[10px] text-slate-400 text-center leading-relaxed">
-            Instantly populates realistic scores for Judge A, B, and C in the active heat to immediately view completed results matrices!
-          </p>
+          {/* Overwrites real judges' scores, so it never ships to communities */}
+          {import.meta.env.DEV && (
+            <>
+              <button
+                id="simulate-scores-btn"
+                onClick={handleSimulate}
+                disabled={loading}
+                className="w-full py-2.5 rounded-xl bg-violet-600 hover:bg-violet-750 text-white text-xs font-bold shadow transition-all flex items-center justify-center gap-2"
+              >
+                <Play className="w-4 h-4" />
+                Simulate 3 Judges Sheets
+              </button>
+              <p className="text-[10px] text-slate-400 text-center leading-relaxed">
+                Instantly populates realistic scores for Judge A, B, and C in the active heat to immediately view completed results matrices!
+              </p>
+            </>
+          )}
 
           <button
             id="clear-all-database-btn"
@@ -5070,7 +5041,7 @@ export default function AdminPanel({
             {/* Division and Role */}
             <div className="grid grid-cols-2 gap-3">
               <div>
-                <label className="block text-[10px] uppercase font-bold tracking-wider text-slate-400 mb-1">Division</label>
+                <label className="block text-[10px] uppercase font-bold tracking-wider text-slate-400 mb-1">Jack &amp; Jill Division</label>
                 <select
                   value={editDivision}
                   onChange={(e) => setEditDivision(e.target.value)}
@@ -5088,7 +5059,7 @@ export default function AdminPanel({
                 </select>
               </div>
               <div>
-                <label className="block text-[10px] uppercase font-bold tracking-wider text-slate-400 mb-1">Role</label>
+                <label className="block text-[10px] uppercase font-bold tracking-wider text-slate-400 mb-1">Jack &amp; Jill Role</label>
                 <select
                   value={editRole}
                   onChange={(e) => setEditRole(e.target.value as "Lead" | "Follow")}
@@ -5103,11 +5074,13 @@ export default function AdminPanel({
             </div>
 
             <div className="pt-2 border-t border-slate-200 dark:border-slate-850">
-              <label className="block text-[10px] uppercase font-bold tracking-wider text-slate-400 mb-2">Partnered Contests</label>
-              <PartnerContestFields
-                value={editPartnerFields}
-                onChange={setEditPartnerFields}
+              <label className="block text-[10px] uppercase font-bold tracking-wider text-slate-400 mb-2">More Contest Entries</label>
+              <ContestEntryInputs
+                value={editEntryFields}
+                onChange={setEditEntryFields}
                 isDarkMode={isDarkMode}
+                mainDivision={editDivision}
+                mainRole={editRole}
               />
             </div>
 
@@ -5122,7 +5095,7 @@ export default function AdminPanel({
                 />
                 <div>
                   <span className="font-semibold text-xs">Mark as Checked In</span>
-                  <p className="text-[10px] text-slate-400">Competitor is checked-in on the coordination desk</p>
+                  <p className="text-[10px] text-slate-400">Checked in for this contest only</p>
                 </div>
               </label>
 
@@ -5135,7 +5108,7 @@ export default function AdminPanel({
                 />
                 <div>
                   <span className="font-semibold text-xs text-rose-500">Scratch Competitor</span>
-                  <p className="text-[10px] text-slate-400">Competitor is scratched (withdrawn/absent) from contest</p>
+                  <p className="text-[10px] text-slate-400">Scratched from this contest only; other contests are unaffected</p>
                 </div>
               </label>
             </div>

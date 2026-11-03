@@ -1,7 +1,8 @@
 import React, { useState, useEffect } from "react";
 import { Award, Check, Save, User, Clock, AlertTriangle, ChevronUp, ChevronDown, RefreshCw } from "lucide-react";
 import { Competitor, Heat, ScoreRecord, JudgingStyle, CallbackValue, AppSettings } from "../types";
-import { getJudgeHeatCompetitors } from "../utils/calculations";
+import { checkSheetQuota, getJudgeHeatCompetitors, getSheetQuotas } from "../utils/calculations";
+import { getDisplayBib, projectCompetitorsForHeat, showsBibs } from "../utils/partners";
 
 interface JudgePortalProps {
   competitors: Competitor[];
@@ -21,7 +22,9 @@ interface JudgePortalProps {
   onRefresh: () => Promise<void>;
   settings: AppSettings;
   onSelectJudge?: (id: string) => void;
-  onUpdateSettings: (newSettings: Partial<AppSettings>) => Promise<void>;
+  onClaimJudge: (name: string) => Promise<void>;
+  onReleaseJudge: (name: string) => Promise<void>;
+  onFinalizeSheet: (key: string, name: string) => Promise<void>;
   // The judge name (if any) that THIS browser has already claimed, so it can
   // still re-select that same name after a logout or refresh even though the
   // name is otherwise locked out for everyone else.
@@ -40,15 +43,22 @@ export default function JudgePortal({
   onRefresh,
   settings,
   onSelectJudge,
-  onUpdateSettings,
+  onClaimJudge,
+  onReleaseJudge,
+  onFinalizeSheet,
   myClaimedJudge,
 }: JudgePortalProps) {
+  const [claimError, setClaimError] = useState("");
   const [localScores, setLocalScores] = useState<{ [bib: string]: number }>({});
   const [localCallbacks, setLocalCallbacks] = useState<{ [bib: string]: CallbackValue }>({});
   const [localRawScores, setLocalRawScores] = useState<{ [bib: string]: string }>({});
   const [savedStatus, setSavedStatus] = useState<{ [bib: string]: "idle" | "saving" | "saved" | "error" }>({});
   const [syncing, setSyncing] = useState(false);
-  const isSheetFinalized = !!(activeHeatId && settings.finalizedSheets?.includes(`${activeHeatId}:${judgeId}`));
+  // What the judge is typing into a score box, saved once they leave the box.
+  const [scoreDrafts, setScoreDrafts] = useState<{ [bib: string]: string }>({});
+  const [isFinalizing, setIsFinalizing] = useState(false);
+  const [finalizeError, setFinalizeError] = useState("");
+  const isSheetFinalized =!!(activeHeatId && settings.finalizedSheets?.includes(`${activeHeatId}:${judgeId}`));
 
   // Name selection dropdown states
   const [tempSelectedJudge, setTempSelectedJudge] = useState(judgeId || "");
@@ -63,6 +73,20 @@ export default function JudgePortal({
   // because a save (possibly this judge's own) round-tripped." Only the former should
   // ever wipe local input state -- see the merge-not-overwrite fix a few lines down.
   const lastJudgeContextRef = React.useRef<string>("");
+
+  // A finger covers the slider's thumb, so the score floats above it mid-drag.
+  // The release can land anywhere on the page, so it's watched for there.
+  const [draggingBib, setDraggingBib] = useState<string | null>(null);
+  useEffect(() => {
+    if (!draggingBib) return;
+    const stopDragging = () => setDraggingBib(null);
+    window.addEventListener("pointerup", stopDragging);
+    window.addEventListener("pointercancel", stopDragging);
+    return () => {
+      window.removeEventListener("pointerup", stopDragging);
+      window.removeEventListener("pointercancel", stopDragging);
+    };
+  }, [draggingBib]);
 
   useEffect(() => {
     setTempSelectedJudge(judgeId || "");
@@ -159,25 +183,23 @@ export default function JudgePortal({
     : "No Role Assigned";
 
   const activeHeat = heats.find((h) => h.id === activeHeatId);
-  const targetCallbackCount = activeHeat && activeHeat.role === "Lead"
-    ? (settings.callbackCountLeaders !== undefined ? settings.callbackCountLeaders : settings.callbackCount)
-    : activeHeat && activeHeat.role === "Follow"
-      ? (settings.callbackCountFollowers !== undefined ? settings.callbackCountFollowers : settings.callbackCount)
-      : settings.callbackCount;
-
-  const targetAlternateCount = activeHeat && activeHeat.role === "Lead"
-    ? (settings.alternateCountLeaders !== undefined ? settings.alternateCountLeaders : (settings.alternateCount || 0))
-    : activeHeat && activeHeat.role === "Follow"
-      ? (settings.alternateCountFollowers !== undefined ? settings.alternateCountFollowers : (settings.alternateCount || 0))
-      : (settings.alternateCount || 0);
-
   const isHeatFinals = activeHeat ? (activeHeat.heatType === "Finals" || activeHeat.name.includes("Finals")) : false;
+  // Routines show their running order where other sheets show a bib.
+  const showBibs = showsBibs(activeHeat?.contestType);
 
   // Shared with AdminPanel's Judges tab so a judge's own sheet always lines up
   // with what the admin's live "who has/hasn't submitted" view expects of them.
   const heatCompetitors = activeHeat
     ? getJudgeHeatCompetitors(activeHeat, competitors, judgeRole)
     : [];
+  // The Chief Judge scores both sides of a Leaders+Followers round on one
+  // sheet, so quotas and rankings on the sheet are worked out side by side.
+  const sheetQuotas = activeHeat ? getSheetQuotas(activeHeat, heatCompetitors, settings) : [];
+  const getSideQuota = (bib: string) =>
+    sheetQuotas.find((quota) => quota.competitors.some((c) => c.bib === bib)) ||
+    { side: null, competitors: heatCompetitors, callbackCount: 0, alternateCount: 0 };
+  // Each dancer's entry for this heat's contest+division (division and role).
+  const heatRoster = activeHeat ? projectCompetitorsForHeat(competitors, activeHeat) : competitors;
 
   // Same shared row-position split model as AdminPanel/CoordinatorCheckIn: a stored split
   // value is a local index within each role's own ordered subset, applied identically to
@@ -187,7 +209,7 @@ export default function JudgePortal({
     const sortedSplits = [...(activeHeat.splits || [])].sort((a, b) => a - b);
     if (sortedSplits.length === 0) return 1;
     const roleBibs = activeHeat.competitorBibs.filter(b => {
-      const comp = competitors.find(cc => cc.bib === b);
+      const comp = heatRoster.find(cc => cc.bib === b);
       return (comp?.role || "Lead") === (role || "Lead");
     });
     const roleSpecificIndex = roleBibs.indexOf(bib);
@@ -363,11 +385,14 @@ export default function JudgePortal({
               disabled={!tempSelectedJudge || isNameClaimedByOther(tempSelectedJudge)}
               onClick={async () => {
                 if (!tempSelectedJudge || isNameClaimedByOther(tempSelectedJudge)) return;
-                if (!claimedJudges.includes(tempSelectedJudge)) {
-                  await onUpdateSettings({ claimedJudges: [...claimedJudges, tempSelectedJudge] });
-                }
-                if (onSelectJudge) {
-                  onSelectJudge(tempSelectedJudge);
+                try {
+                  setClaimError("");
+                  await onClaimJudge(tempSelectedJudge);
+                  if (onSelectJudge) {
+                    onSelectJudge(tempSelectedJudge);
+                  }
+                } catch (err: any) {
+                  setClaimError(err.message);
                 }
               }}
               className={`w-full py-3 rounded-xl font-semibold text-xs tracking-wide uppercase transition-all ${
@@ -378,6 +403,7 @@ export default function JudgePortal({
             >
               Enter Scoring Console
             </button>
+            {claimError && <p className="text-[11px] text-rose-500 text-center font-semibold">{claimError}</p>}
           </div>
         </div>
       </div>
@@ -399,9 +425,7 @@ export default function JudgePortal({
           <button
             onClick={async () => {
               if (judgeId) {
-                await onUpdateSettings({
-                  claimedJudges: (settings.claimedJudges || []).filter((name) => name !== judgeId),
-                });
+                await onReleaseJudge(judgeId);
               }
               if (onSelectJudge) onSelectJudge("");
             }}
@@ -445,27 +469,29 @@ export default function JudgePortal({
     // Auto-calculate callbacks in raw mode
     const nextCallbacks = { ...localCallbacks };
     if (judgingStyle === "raw") {
-      const scored = [...heatCompetitors]
-        .map(c => ({ bib: c.bib, score: tempScores[c.bib] || 0 }))
-        .sort((a, b) => {
-          if (b.score !== a.score) return b.score - a.score;
-          return a.bib.localeCompare(b.bib, undefined, { numeric: true });
-        });
+      sheetQuotas.forEach(({ competitors: sideCompetitors, callbackCount, alternateCount }) => {
+        const scored = [...sideCompetitors]
+          .map(c => ({ bib: c.bib, score: tempScores[c.bib] || 0 }))
+          .sort((a, b) => {
+            if (b.score !== a.score) return b.score - a.score;
+            return a.bib.localeCompare(b.bib, undefined, { numeric: true });
+          });
 
-      scored.forEach((item, index) => {
-        let cbStatus: CallbackValue = "No";
-        if (item.score > 0) {
-          if (index < targetCallbackCount) {
-            cbStatus = "Yes";
-          } else if (index < targetCallbackCount + targetAlternateCount) {
-            const altIndex = index - targetCallbackCount;
-            if (altIndex === 0) cbStatus = "Alt 1";
-            else if (altIndex === 1) cbStatus = "Alt 2";
-            else if (altIndex === 2) cbStatus = "Alt 3";
-            else cbStatus = "Alt 1";
+        scored.forEach((item, index) => {
+          let cbStatus: CallbackValue = "No";
+          if (item.score > 0) {
+            if (index < callbackCount) {
+              cbStatus = "Yes";
+            } else if (index < callbackCount + alternateCount) {
+              const altIndex = index - callbackCount;
+              if (altIndex === 0) cbStatus = "Alt 1";
+              else if (altIndex === 1) cbStatus = "Alt 2";
+              else if (altIndex === 2) cbStatus = "Alt 3";
+              else cbStatus = "Alt 1";
+            }
           }
-        }
-        nextCallbacks[item.bib] = cbStatus;
+          nextCallbacks[item.bib] = cbStatus;
+        });
       });
       setLocalCallbacks(nextCallbacks);
     }
@@ -488,6 +514,17 @@ export default function JudgePortal({
         }
       }
     }
+  };
+
+  const commitScoreDraft = (bib: string) => {
+    const draft = scoreDrafts[bib];
+    if (draft === undefined) return;
+    setScoreDrafts((prev) => {
+      const { [bib]: _, ...rest } = prev;
+      return rest;
+    });
+    const value = parseFloat(draft);
+    if (!isNaN(value) && value !== (localScores[bib] || 0)) handleScoreChange(bib, value);
   };
 
   const decreaseScore = async (bib: string, currentScore: number) => {
@@ -581,7 +618,7 @@ export default function JudgePortal({
     const currentScore = localScores[bib] || 0;
     if (currentScore === 0) return "—";
 
-    const scored = heatCompetitors
+    const scored = getSideQuota(bib).competitors
       .map(c => ({ bib: c.bib, score: localScores[c.bib] || 0 }))
       .filter(item => item.score > 0)
       .sort((a, b) => b.score - a.score);
@@ -599,7 +636,8 @@ export default function JudgePortal({
     const currentScore = localScores[bib] || 0;
     if (currentScore === 0) return "—";
 
-    const scored = [...heatCompetitors]
+    const { competitors: sideCompetitors, callbackCount, alternateCount } = getSideQuota(bib);
+    const scored = [...sideCompetitors]
       .map(c => ({ bib: c.bib, score: localScores[c.bib] || 0 }))
       .sort((a, b) => {
         if (b.score !== a.score) return b.score - a.score;
@@ -609,10 +647,10 @@ export default function JudgePortal({
     const index = scored.findIndex(item => item.bib === bib);
     if (index === -1) return "—";
 
-    if (index < targetCallbackCount) {
+    if (index < callbackCount) {
       return "Yes";
-    } else if (index < targetCallbackCount + targetAlternateCount) {
-      const altIdx = index - targetCallbackCount + 1;
+    } else if (index < callbackCount + alternateCount) {
+      const altIdx = index - callbackCount + 1;
       return `Alt ${altIdx}`;
     } else {
       return "No";
@@ -630,7 +668,7 @@ export default function JudgePortal({
 
     const currentWeight = cbWeights[localCallbacks[bib] || "No"];
 
-    const list = heatCompetitors.map(c => ({
+    const list = getSideQuota(bib).competitors.map(c => ({
       bib: c.bib,
       weight: cbWeights[localCallbacks[c.bib] || "No"]
     }));
@@ -658,7 +696,7 @@ export default function JudgePortal({
   const getAltConflicts = (bib: string): Competitor[] => {
     const val = localCallbacks[bib];
     if (!val || val === "Yes" || val === "No") return [];
-    return heatCompetitors.filter((c) => c.bib !== bib && localCallbacks[c.bib] === val);
+    return getSideQuota(bib).competitors.filter((c) => c.bib !== bib && localCallbacks[c.bib] === val);
   };
 
   const triggerSave = async (bib: string, scoreVal: number, cbVal: CallbackValue) => {
@@ -773,9 +811,7 @@ export default function JudgePortal({
           <button
             onClick={async () => {
               if (judgeId) {
-                await onUpdateSettings({
-                  claimedJudges: (settings.claimedJudges || []).filter((name) => name !== judgeId),
-                });
+                await onReleaseJudge(judgeId);
               }
               if (onSelectJudge) onSelectJudge("");
             }}
@@ -818,9 +854,7 @@ export default function JudgePortal({
           <button
             onClick={async () => {
               if (judgeId) {
-                await onUpdateSettings({
-                  claimedJudges: (settings.claimedJudges || []).filter((name) => name !== judgeId),
-                });
+                await onReleaseJudge(judgeId);
               }
               if (onSelectJudge) onSelectJudge("");
             }}
@@ -865,9 +899,7 @@ export default function JudgePortal({
           <button
             onClick={async () => {
               if (judgeId) {
-                await onUpdateSettings({
-                  claimedJudges: (settings.claimedJudges || []).filter((name) => name !== judgeId),
-                });
+                await onReleaseJudge(judgeId);
               }
               if (onSelectJudge) onSelectJudge("");
             }}
@@ -904,17 +936,19 @@ export default function JudgePortal({
   // Check for duplicate or tied ranks/scores
   const tiedBibs = new Set<string>();
   if (judgingStyle === "raw") {
-    const scoredCompetitors = heatCompetitors.filter(c => (localScores[c.bib] || 0) > 0);
-    const scoreMap: Record<number, string[]> = {};
-    scoredCompetitors.forEach(c => {
-      const s = localScores[c.bib];
-      if (!scoreMap[s]) scoreMap[s] = [];
-      scoreMap[s].push(c.bib);
-    });
-    Object.values(scoreMap).forEach(bibs => {
-      if (bibs.length > 1) {
-        bibs.forEach(b => tiedBibs.add(b));
-      }
+    sheetQuotas.forEach(({ competitors: sideCompetitors }) => {
+      const scoredCompetitors = sideCompetitors.filter(c => (localScores[c.bib] || 0) > 0);
+      const scoreMap: Record<number, string[]> = {};
+      scoredCompetitors.forEach(c => {
+        const s = localScores[c.bib];
+        if (!scoreMap[s]) scoreMap[s] = [];
+        scoreMap[s].push(c.bib);
+      });
+      Object.values(scoreMap).forEach(bibs => {
+        if (bibs.length > 1) {
+          bibs.forEach(b => tiedBibs.add(b));
+        }
+      });
     });
   } else if (judgingStyle === "placement") {
     const rankedCompetitors = heatCompetitors.filter(c => (localScores[c.bib] || 0) > 0);
@@ -932,27 +966,16 @@ export default function JudgePortal({
   }
 
   // Quota satisfied calculation
-  const currentYesCount = heatCompetitors.filter(c => localCallbacks[c.bib] === "Yes").length;
-  const currentAltCount = heatCompetitors.filter(c => {
-    const val = localCallbacks[c.bib];
-    return val && val !== "No" && val !== "Yes";
-  }).length;
-  
-  let areAltsSatisfied = true;
-  for (let r = 1; r <= targetAlternateCount; r++) {
-    const rStr = `Alt ${r}`;
-    const cnt = heatCompetitors.filter(c => localCallbacks[c.bib] === rStr).length;
-    if (cnt !== 1) areAltsSatisfied = false;
-  }
-  for (let r = targetAlternateCount + 1; r <= 3; r++) {
-    const rStr = `Alt ${r}`;
-    const cnt = heatCompetitors.filter(c => localCallbacks[c.bib] === rStr).length;
-    if (cnt > 0) areAltsSatisfied = false;
-  }
-
-  const isQuotaSatisfied = currentYesCount === targetCallbackCount && areAltsSatisfied;
+  const quotaStatuses = sheetQuotas.map((quota) => ({ quota, ...checkSheetQuota(quota, (bib) => localCallbacks[bib]) }));
+  const areAltsSatisfied = quotaStatuses.every((status) => status.areAltsSatisfied);
+  const isQuotaSatisfied = quotaStatuses.every((status) => status.isMet);
   const isQuotaReady = (judgingStyle !== "callback") ? true : isQuotaSatisfied;
-  const canFinalize = isSheetComplete && isQuotaReady && tiedBibs.size === 0;
+  const canFinalize = isSheetComplete && isQuotaReady && tiedBibs.size === 0 && !isFinalizing;
+  // A raw score sheet works callbacks out by itself, so its quotas only need
+  // showing when one sheet covers both sides. Under quota isn't an error there:
+  // it just means the sheet isn't finished.
+  const showQuotas = judgingStyle === "callback" || (judgingStyle === "raw" && sheetQuotas.length > 1);
+  const unmetQuotaColor = judgingStyle === "callback" ? "text-red-500" : "text-amber-500";
 
   const hasJudgeStartedInput = !!(
     (activeHeat && scores.some((s) => s.judgeId === judgeId && s.heatId === activeHeat.id)) ||
@@ -962,21 +985,26 @@ export default function JudgePortal({
 
   const handleFinalizeClick = async () => {
     if (!canFinalize || !activeHeatId) return;
-    const key = `${activeHeatId}:${judgeId}`;
-    const currentFinalized = settings.finalizedSheets || [];
-    const payload: Partial<AppSettings> = {};
-    if (!currentFinalized.includes(key)) {
-      payload.finalizedSheets = [...currentFinalized, key];
+    // A callback sheet shows untouched dancers as "No" without saving anything
+    // for them; record that "No" so the submitted sheet is complete.
+    if (judgingStyle === "callback" && activeHeat) {
+      const savedBibs = new Set(scores.filter((s) => s.judgeId === judgeId && s.heatId === activeHeat.id).map((s) => s.competitorBib));
+      for (const c of heatCompetitors) {
+        if (!savedBibs.has(c.bib)) await triggerSave(c.bib, localScores[c.bib] || 0, localCallbacks[c.bib] || "No");
+      }
     }
-    // Release this judge's claimed-name slot as soon as they finalize, so the
-    // name is immediately available again (e.g. for the next round, or for
-    // someone else at a shared station) without forcing this browser's own
-    // view away from the "Finalized & Locked" confirmation below.
-    if (judgeId && (settings.claimedJudges || []).includes(judgeId)) {
-      payload.claimedJudges = (settings.claimedJudges || []).filter((name) => name !== judgeId);
-    }
-    if (Object.keys(payload).length > 0) {
-      await onUpdateSettings(payload);
+    // Also releases this judge's claimed-name slot, so the name is immediately
+    // available again (e.g. for the next round, or for someone else at a shared
+    // station) without forcing this browser's own view away from the
+    // "Finalized & Locked" confirmation below.
+    setFinalizeError("");
+    setIsFinalizing(true);
+    try {
+      await onFinalizeSheet(`${activeHeatId}:${judgeId}`, judgeId);
+    } catch (err: any) {
+      setFinalizeError(err.message);
+    } finally {
+      setIsFinalizing(false);
     }
   };
 
@@ -986,8 +1014,390 @@ export default function JudgePortal({
     ? [...heatCompetitors].sort((a, b) => getSplitBucket(a.bib, a.role) - getSplitBucket(b.bib, b.role))
     : heatCompetitors;
 
+  // A judge scoring both sides gets a list for each: two columns where there's
+  // room, and all the leaders followed by all the followers where there isn't.
+  const judgesBothSides = sheetQuotas.length > 1;
+  // The columns are too narrow for a row's parts to sit side by side.
+  const rawRowLayout = judgesBothSides ? "flex flex-col gap-3" : "flex flex-col lg:flex-row lg:items-center justify-between gap-3 lg:gap-4";
+  const callbackRowLayout = judgesBothSides ? "flex flex-col gap-3" : "flex flex-col md:flex-row md:items-center justify-between gap-3 md:gap-4";
+
+  const renderSheetRow = (c: Competitor, index: number, list: Competitor[]) => {
+    const score = localScores[c.bib] || 0;
+    const callbackVal = localCallbacks[c.bib] || "No";
+    const status = savedStatus[c.bib] || "idle";
+
+    const rowBucket = getSplitBucket(c.bib, c.role);
+    const prevBucket = index > 0
+      ? getSplitBucket(list[index - 1].bib, list[index - 1].role)
+      : rowBucket;
+    const isSplitActive = rowBucket !== prevBucket;
+    const nextHeatNum = rowBucket;
+
+    if (judgingStyle === "raw") {
+      const isTied = tiedBibs.has(c.bib);
+      // Finals have no callbacks, only this judge's order
+      const rawResult = isHeatFinals ? getRawPlacement(c.bib) : getRawRankStatus(c.bib);
+      const sliderValue = score > 0 ? score : 75;
+      // Raw Score Format
+      return (
+        <React.Fragment key={c.bib}>
+        {isSplitActive && (
+          <div className="my-4 py-2.5 px-6 rounded-2xl bg-violet-600/5 dark:bg-violet-600/15 border border-dashed border-violet-500/30 text-center font-mono text-xs uppercase tracking-widest text-violet-500 font-bold flex flex-col items-center justify-center gap-1.5 print:break-before-page">
+            <div className="h-3 w-px bg-violet-500/30 mb-0.5" />
+            <span>GAP: HEAT {nextHeatNum} STARTING HERE</span>
+            <div className="h-3 w-px bg-violet-500/30 mt-0.5" />
+          </div>
+        )}
+          <div
+            className={`p-4 sm:p-5 rounded-2xl border transition-all relative ${
+              isTied
+                ? isDarkMode
+                  ? "bg-amber-950/20 border-amber-500 text-slate-100 shadow-md ring-1 ring-amber-500/30"
+                  : "bg-amber-50/50 border-amber-500 text-slate-800 shadow-md ring-1 ring-amber-500/20"
+                : isDarkMode
+                  ? "bg-slate-900 border-slate-800 text-slate-100"
+                  : "bg-white border-slate-200 text-slate-800 shadow-sm"
+            }`}
+          >
+          <div className={rawRowLayout}>
+            {/* Bib No. & Name */}
+            <div className="flex items-center gap-3 min-w-[200px]">
+              <div className="w-10 h-10 rounded-xl bg-violet-600/10 text-violet-500 font-mono font-bold flex items-center justify-center text-sm border border-violet-500/10 shadow-inner">
+                {showBibs ? `#${getDisplayBib(c.bib, activeHeat?.contestType)}` : index + 1}
+              </div>
+              <div>
+                <h3 className="font-bold text-sm tracking-tight">{c.name}</h3>
+                <p className="text-[10px] text-slate-400 font-mono">
+                  {showBibs ? `${c.division} • ${c.role}s` : c.division}
+                </p>
+              </div>
+            </div>
+
+            {/* 0-100 slider, minus button, raw score, + button */}
+            <div className="flex-1 flex items-center gap-2 sm:gap-3 w-full lg:max-w-md">
+              {/* Minus button */}
+              <button
+                onClick={() => decreaseScore(c.bib, score > 0 ? score : 75.0)}
+                className="w-11 h-11 sm:w-8 sm:h-8 flex-shrink-0 rounded-lg bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 dark:hover:bg-slate-700 font-mono font-bold text-lg sm:text-sm flex items-center justify-center transition-all border border-slate-200 dark:border-slate-700"
+                title="Decrease score by 0.25"
+              >
+                -
+              </button>
+
+              {/* Slider */}
+              <div className="relative flex-1 min-w-0 flex flex-col">
+                {draggingBib === c.bib && (
+                  <span
+                    id="score-drag-bubble"
+                    // The thumb's centre moves 16px less than the track's width.
+                    style={{ left: `calc(${sliderValue}% + ${8 - sliderValue * 0.16}px)` }}
+                    className="absolute bottom-full mb-5 -translate-x-1/2 z-20 px-3 py-1.5 rounded-lg bg-violet-600 text-white text-base font-mono font-bold shadow-lg pointer-events-none"
+                  >
+                    {sliderValue.toFixed(2)}
+                    <span className="absolute left-1/2 -bottom-1 -translate-x-1/2 w-2.5 h-2.5 rotate-45 bg-violet-600" />
+                  </span>
+                )}
+                <input
+                  id={`score-slider-${c.bib}`}
+                  type="range"
+                  min="0"
+                  max="100"
+                  step="0.25"
+                  value={sliderValue}
+                  onPointerDown={() => setDraggingBib(c.bib)}
+                  onChange={(e) => handleScoreChange(c.bib, parseFloat(e.target.value))}
+                  className={`w-full h-1.5 rounded-lg appearance-none cursor-pointer touch-pan-y accent-violet-600 bg-slate-200 dark:bg-slate-700 transition-opacity ${score > 0 ? "opacity-100" : "opacity-40"}`}
+                />
+                <div className="flex justify-between text-[9px] text-slate-400 font-mono mt-1">
+                  <span>0</span>
+                  <span>50</span>
+                  <span>100</span>
+                </div>
+              </div>
+
+              {/* Plus button */}
+              <button
+                onClick={() => increaseScore(c.bib, score > 0 ? score : 75.0)}
+                className="w-11 h-11 sm:w-8 sm:h-8 flex-shrink-0 rounded-lg bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 dark:hover:bg-slate-700 font-mono font-bold text-lg sm:text-sm flex items-center justify-center transition-all border border-slate-200 dark:border-slate-700"
+                title="Increase score by 0.25"
+              >
+                +
+              </button>
+
+              {/* Raw score: shown here, and typed here for an exact score */}
+              <input
+                id={`score-input-${c.bib}`}
+                type="text"
+                inputMode="decimal"
+                aria-label={`Score for ${c.name}`}
+                placeholder="—"
+                value={scoreDrafts[c.bib] ?? (score > 0 ? score.toFixed(2) : "")}
+                onFocus={(e) => e.target.select()}
+                onChange={(e) => {
+                  const typed = e.target.value.replace(/,/g, ".");
+                  setScoreDrafts((prev) => ({ ...prev, [c.bib]: typed }));
+                }}
+                onBlur={() => commitScoreDraft(c.bib)}
+                onKeyDown={(e) => { if (e.key === "Enter") e.currentTarget.blur(); }}
+                className={`w-[76px] flex-shrink-0 px-1 py-2 text-center text-xs font-mono font-bold rounded-lg border focus:outline-none focus:ring-2 focus:ring-violet-500 ${
+                  score > 0
+                    ? "text-violet-500 bg-violet-600/10 border-violet-500/15"
+                    : "text-slate-400 bg-slate-500/10 border-slate-500/15"
+                }`}
+              />
+            </div>
+
+            {/* Yes/No/Alt status placement */}
+            <div className="flex items-center gap-4">
+              {/* Computed placement rank */}
+              <div className="text-left sm:text-right min-w-[95px]">
+                <span className="block text-[9px] font-semibold text-slate-400 font-mono uppercase tracking-wider mb-1">Judge Placement</span>
+                <span className={`text-xs font-mono font-bold px-2.5 py-1 rounded border ${
+                  isHeatFinals && score > 0 ? "text-violet-500 bg-violet-600/10 border-violet-500/15" :
+                  rawResult === "Yes" ? "text-green-500 bg-green-500/10 border-green-500/15" :
+                  rawResult.startsWith("Alt") ? "text-amber-500 bg-amber-500/10 border-amber-500/15" :
+                  "text-slate-400 bg-slate-500/10 border-slate-500/15"
+                }`}>
+                  {rawResult}
+                </span>
+              </div>
+
+              {/* Save indicator */}
+              <div className="flex items-center justify-end min-w-[20px]">
+                {status === "saving" && (
+                  <span className="w-2 h-2 rounded-full bg-amber-500 animate-pulse" />
+                )}
+                {status === "saved" && (
+                  <Check className="w-4 h-4 text-green-500" />
+                )}
+                {status === "error" && (
+                  <span className="text-[9px] text-rose-500 font-mono font-bold">Err</span>
+                )}
+              </div>
+            </div>
+          </div>
+        </div>
+        </React.Fragment>
+      );
+    }
+
+    if (judgingStyle === "callback") {
+      // Callback Format
+      return (
+        <React.Fragment key={c.bib}>
+        {isSplitActive && (
+          <div className="my-4 py-2.5 px-6 rounded-2xl bg-violet-600/5 dark:bg-violet-600/15 border border-dashed border-violet-500/30 text-center font-mono text-xs uppercase tracking-widest text-violet-500 font-bold flex flex-col items-center justify-center gap-1.5 print:break-before-page">
+            <div className="h-3 w-px bg-violet-500/30 mb-0.5" />
+            <span>GAP: HEAT {nextHeatNum} STARTING HERE</span>
+            <div className="h-3 w-px bg-violet-500/30 mt-0.5" />
+          </div>
+        )}
+          <div
+            className={`p-4 sm:p-5 rounded-2xl border transition-all relative ${
+              isDarkMode
+                ? "bg-slate-900 border-slate-800 text-slate-100"
+                : "bg-white border-slate-200 text-slate-800 shadow-sm"
+            }`}
+          >
+          <div className={callbackRowLayout}>
+            {/* Bib No. & Name */}
+            <div className="flex items-center gap-3 min-w-[200px]">
+              <div className="w-10 h-10 rounded-xl bg-violet-600/10 text-violet-500 font-mono font-bold flex items-center justify-center text-sm border border-violet-500/10 shadow-inner">
+                #{getDisplayBib(c.bib, activeHeat?.contestType)}
+              </div>
+              <div>
+                <h3 className="font-bold text-sm tracking-tight">{c.name}</h3>
+                <p className="text-[10px] text-slate-400 font-mono">
+                  {c.division} • {c.role}s
+                </p>
+              </div>
+            </div>
+
+            {/* Yes/No/Alt 1, Alt 2, Alt 3 select dropdown */}
+            <div className="min-w-[140px] flex items-center gap-2">
+              <div>
+                <span className="block text-[9px] font-semibold text-slate-400 font-mono uppercase tracking-wider mb-1">Callback Selection</span>
+                <select
+                  value={callbackVal}
+                  onChange={(e) => handleCallbackChange(c.bib, e.target.value as CallbackValue)}
+                  className={`text-xs px-3 py-2 rounded-xl border focus:outline-none focus:ring-2 focus:ring-violet-500 font-mono w-full ${
+                    isDarkMode
+                      ? "bg-slate-800 border-slate-700 text-slate-100"
+                      : "bg-slate-50 border-slate-200 text-slate-800"
+                  }`}
+                >
+                  <option value="No">No (Unselected)</option>
+                  <option value="Yes">Yes (Callback)</option>
+                  {getSideQuota(c.bib).alternateCount >= 1 && <option value="Alt 1">Alt 1 (Alternate 1)</option>}
+                  {getSideQuota(c.bib).alternateCount >= 2 && <option value="Alt 2">Alt 2 (Alternate 2)</option>}
+                  {getSideQuota(c.bib).alternateCount >= 3 && <option value="Alt 3">Alt 3 (Alternate 3)</option>}
+                </select>
+              </div>
+              {(() => {
+                const conflicts = getAltConflicts(c.bib);
+                if (conflicts.length === 0) return null;
+                return (
+                  <span
+                    className="flex items-center gap-1 text-[9px] font-mono font-bold text-red-500 whitespace-nowrap self-end mb-2"
+                    title={`Also assigned to ${conflicts.map((cc) => `#${getDisplayBib(cc.bib, activeHeat?.contestType)} ${cc.name}`).join(", ")}`}
+                  >
+                    <AlertTriangle className="w-3.5 h-3.5 shrink-0" />
+                    Conflict: {conflicts.map((cc) => `#${getDisplayBib(cc.bib, activeHeat?.contestType)}`).join(", ")}
+                  </span>
+                );
+              })()}
+            </div>
+
+            {/* placement based off other competitors scored */}
+            <div className="flex items-center gap-4">
+              <div className="text-left md:text-right min-w-[110px]">
+                <span className="block text-[9px] font-semibold text-slate-400 font-mono uppercase tracking-wider mb-1">Callback Rank</span>
+                <span className="text-xs font-mono font-bold text-emerald-500 bg-emerald-500/10 px-2.5 py-1 rounded border border-emerald-500/15">
+                  {getCallbackPlacement(c.bib)}
+                </span>
+              </div>
+
+              {/* Save indicator */}
+              <div className="flex items-center justify-end min-w-[20px]">
+                {status === "saving" && (
+                  <span className="w-2 h-2 rounded-full bg-amber-500 animate-pulse" />
+                )}
+                {status === "saved" && (
+                  <Check className="w-4 h-4 text-green-500" />
+                )}
+                {status === "error" && (
+                  <span className="text-[9px] text-rose-500 font-mono font-bold">Err</span>
+                )}
+              </div>
+            </div>
+          </div>
+        </div>
+        </React.Fragment>
+      );
+    }
+
+    if (judgingStyle === "placement") {
+      // Placement (Finals) format
+      const [leadBib, followBib] = c.bib.includes("_") ? c.bib.split("_") : [c.bib, ""];
+      const lead = competitors.find((comp) => comp.bib === leadBib);
+      const follow = competitors.find((comp) => comp.bib === followBib);
+      const leadName = lead ? lead.name : `Lead #${leadBib}`;
+      const followName = follow ? follow.name : (followBib ? `Follow #${followBib}` : "—");
+      const rawScoreStr = localRawScores[c.bib] || "";
+      const isTied = tiedBibs.has(c.bib);
+
+      return (
+        <React.Fragment key={c.bib}>
+        {isSplitActive && (
+          <div className="my-4 py-2.5 px-6 rounded-2xl bg-violet-600/5 dark:bg-violet-600/15 border border-dashed border-violet-500/30 text-center font-mono text-xs uppercase tracking-widest text-violet-500 font-bold flex flex-col items-center justify-center gap-1.5 print:break-before-page">
+            <div className="h-3 w-px bg-violet-500/30 mb-0.5" />
+            <span>GAP: HEAT {nextHeatNum} STARTING HERE</span>
+            <div className="h-3 w-px bg-violet-500/30 mt-0.5" />
+          </div>
+        )}
+          <div
+            className={`p-4 sm:p-5 rounded-2xl border transition-all relative ${
+              isTied
+                ? isDarkMode
+                  ? "bg-amber-950/20 border-amber-500 text-slate-100 shadow-md ring-1 ring-amber-500/30"
+                  : "bg-amber-50/50 border-amber-500 text-slate-800 shadow-md ring-1 ring-amber-500/20"
+                : isDarkMode
+                  ? "bg-slate-900 border-slate-800 text-slate-100"
+                  : "bg-white border-slate-200 text-slate-800 shadow-sm"
+            }`}
+          >
+          <div className="flex flex-col xl:flex-row xl:items-center justify-between gap-4">
+            {/* Leaders Bib No., Leaders Name, Followers Bib No., Followers Name */}
+            <div className="flex-1 grid grid-cols-1 md:grid-cols-2 gap-4">
+              {/* Leader info */}
+              <div className="flex items-center gap-3">
+                <div className="w-9 h-9 rounded-lg bg-emerald-600/10 text-emerald-500 font-mono font-bold flex items-center justify-center text-xs border border-emerald-500/10 shadow-inner">
+                  {showBibs ? `L#${leadBib}` : index + 1}
+                </div>
+                <div>
+                  <span className="text-[9px] text-slate-400 font-mono uppercase tracking-wider block">{showBibs ? "Leader" : "Partner"}</span>
+                  <h4 className="font-bold text-sm tracking-tight">{leadName}</h4>
+                </div>
+              </div>
+
+              {/* Follower info */}
+              <div className="flex items-center gap-3">
+                {showBibs && (
+                  <div className="w-9 h-9 rounded-lg bg-rose-600/10 text-rose-500 font-mono font-bold flex items-center justify-center text-xs border border-rose-500/10 shadow-inner">
+                    {activeHeat?.contestType === "Strictly Swing" ? "F" : `F#${followBib || "—"}`}
+                  </div>
+                )}
+                <div>
+                  <span className="text-[9px] text-slate-400 font-mono uppercase tracking-wider block">{showBibs ? "Follower" : "Partner"}</span>
+                  <h4 className="font-bold text-sm tracking-tight">{followName}</h4>
+                </div>
+              </div>
+            </div>
+
+            {/* text field for entering raw score and dropdown for selecting placement */}
+            <div className="grid grid-cols-2 sm:flex sm:flex-wrap sm:items-center gap-3 sm:gap-4">
+              {/* Raw score text field */}
+              <div className="min-w-[110px]">
+                <label className="block text-[9px] font-semibold text-slate-400 font-mono uppercase tracking-wider mb-1">Raw Score</label>
+                <input
+                  type="text"
+                  inputMode="decimal"
+                placeholder="e.g. 85.50"
+                  value={rawScoreStr}
+                  onChange={(e) => handleRawScoreChangeLocal(c.bib, e.target.value)}
+                  className={`text-xs px-3 py-2 rounded-xl border focus:outline-none focus:ring-2 focus:ring-violet-500 font-mono w-full ${
+                    isDarkMode
+                      ? "bg-slate-800 border-slate-700 text-slate-100 placeholder-slate-500"
+                      : "bg-slate-50 border-slate-200 text-slate-800 placeholder-slate-400"
+                  }`}
+                />
+              </div>
+
+              {/* Dropdown for selecting placement */}
+              <div className="min-w-[130px]">
+                <label className="block text-[9px] font-semibold text-slate-400 font-mono uppercase tracking-wider mb-1">Final Placement</label>
+                <select
+                  value={score}
+                  onChange={(e) => handlePlacementDropdownChange(c.bib, Number(e.target.value))}
+                  className={`text-xs px-3 py-2 rounded-xl border focus:outline-none focus:ring-2 focus:ring-violet-500 font-mono w-full ${
+                    isDarkMode
+                      ? "bg-slate-800 border-slate-700 text-slate-100"
+                      : "bg-slate-50 border-slate-200 text-slate-800"
+                  }`}
+                >
+                  <option value="0">Unranked</option>
+                  {heatCompetitors.map((_, i) => (
+                    <option key={i + 1} value={i + 1}>
+                      Rank {i + 1} {i === 0 ? "🏆" : ""}
+                    </option>
+                  ))}
+                </select>
+              </div>
+
+              {/* Save indicator */}
+              <div className="col-span-2 flex items-center justify-end min-w-[20px] sm:pt-4 xl:pt-0">
+                {status === "saving" && (
+                  <span className="w-2 h-2 rounded-full bg-amber-500 animate-pulse" />
+                )}
+                {status === "saved" && (
+                  <Check className="w-4 h-4 text-green-500" />
+                )}
+                {status === "error" && (
+                  <span className="text-[9px] text-rose-500 font-mono font-bold">Err</span>
+                )}
+              </div>
+            </div>
+          </div>
+        </div>
+        </React.Fragment>
+      );
+    }
+
+    return null;
+  };
+
   return (
-    <div className="space-y-6 animate-fade-in">
+    <div className="space-y-6 animate-fade-in pb-24 lg:pb-0">
       {/* Pull down to refresh indicator */}
       {pullProgress > 0 && (
         <div 
@@ -1020,9 +1430,7 @@ export default function JudgePortal({
         <button
           onClick={async () => {
             if (judgeId) {
-              await onUpdateSettings({
-                claimedJudges: (settings.claimedJudges || []).filter((name) => name !== judgeId),
-              });
+              await onReleaseJudge(judgeId);
             }
             if (onSelectJudge) onSelectJudge("");
           }}
@@ -1032,12 +1440,12 @@ export default function JudgePortal({
         </button>
       </div>
       {/* Active Heat Status Header */}
-      <div className={`p-5 rounded-2xl border transition-all ${isDarkMode ? "bg-slate-900 border-slate-800" : "bg-white border-slate-100 shadow-sm"}`}>
+      <div className={`p-4 sm:p-5 rounded-2xl border transition-all ${isDarkMode ? "bg-slate-900 border-slate-800" : "bg-white border-slate-100 shadow-sm"}`}>
         <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-3">
           <div>
             <div className="flex items-center gap-2">
               <span className="text-[10px] bg-red-500/10 text-red-500 px-2 py-0.5 rounded-full font-mono font-bold uppercase tracking-wider animate-pulse">Live Judging Active</span>
-              <span className="text-xs font-mono text-slate-400">Heat ID: {activeHeat.id}</span>
+              <span className="hidden sm:inline text-xs font-mono text-slate-400">Heat ID: {activeHeat.id}</span>
             </div>
             <h2 className="text-lg font-bold tracking-tight text-violet-500 mt-1">{activeHeat.name}</h2>
             <div className="flex items-center gap-1.5 mt-1 text-xs text-slate-400">
@@ -1057,22 +1465,20 @@ export default function JudgePortal({
           </div>
 
           <div className="flex items-center gap-3 w-full sm:w-auto justify-between sm:justify-end border-t sm:border-t-0 pt-3 sm:pt-0 border-slate-200 dark:border-slate-800 flex-wrap sm:flex-nowrap">
-            {judgingStyle === "callback" && (
+            {showQuotas && (
               <div className="text-left sm:text-right pr-3 sm:border-r border-slate-200 dark:border-slate-800">
-                <span className={`text-[10px] font-bold font-mono block uppercase tracking-wider ${isQuotaReady && isQuotaSatisfied ? "text-green-500" : "text-red-500"}`}>
+                <span className={`text-[10px] font-bold font-mono block uppercase tracking-wider ${isQuotaReady && isQuotaSatisfied ? "text-green-500" : unmetQuotaColor}`}>
                   Callback Quota
                 </span>
-                <span className={`text-xs font-bold font-mono block ${isQuotaReady && isQuotaSatisfied ? "text-green-500" : "text-red-500"}`}>
-                  Callbacks: {currentYesCount}/{targetCallbackCount}
-                </span>
-                <span className={`text-xs font-bold font-mono block ${isQuotaReady && isQuotaSatisfied ? "text-green-500" : "text-red-500"}`}>
-                  Alts: {currentAltCount}/{targetAlternateCount}
-                </span>
-                {!areAltsSatisfied && (
+                {quotaStatuses.map(({ quota, yesCount, altCount, isMet }) => (
+                  <span key={quota.side || "all"} className={`text-xs font-bold font-mono block ${isMet ? "text-green-500" : unmetQuotaColor}`}>
+                    {quota.side && quotaStatuses.length > 1 ? `${quota.side === "Lead" ? "Leaders" : "Followers"}: ` : ""}
+                    Callbacks: {yesCount}/{quota.callbackCount} · Alts: {altCount}/{quota.alternateCount}
+                  </span>
+                ))}
+                {judgingStyle === "callback" && !areAltsSatisfied && (
                   <span className="block text-[9px] text-rose-500 font-mono mt-0.5 font-bold animate-pulse">
-                    {targetAlternateCount > 1
-                      ? `Must assign exactly one of each: ${Array.from({ length: targetAlternateCount }).map((_, i) => `Alt ${i + 1}`).join(", ")}`
-                      : "Alt conflict — see indicator(s) below"}
+                    Each alternate must be assigned exactly once — see indicator(s) below
                   </span>
                 )}
               </div>
@@ -1097,7 +1503,7 @@ export default function JudgePortal({
                     : "bg-slate-200 dark:bg-slate-800 text-slate-400 dark:text-slate-600 cursor-not-allowed border border-slate-300 dark:border-slate-700"
               }`}
             >
-              {isSheetFinalized ? "Finalized ✓" : "Finalize"}
+              {isFinalizing ? "Saving..." : isSheetFinalized ? "Finalized ✓" : "Finalize"}
             </button>
 
             <button
@@ -1123,6 +1529,13 @@ export default function JudgePortal({
           </div>
         )}
 
+        {finalizeError && (
+          <div className="mt-4 p-3 rounded-xl bg-rose-500/10 border border-rose-500/20 text-rose-500 text-xs font-medium flex items-center gap-2">
+            <AlertTriangle className="w-4 h-4 flex-shrink-0" />
+            <span>{finalizeError}</span>
+          </div>
+        )}
+
         {tiedBibs.size > 0 && (
           <div className="mt-4 p-3 rounded-xl bg-amber-500/10 border border-amber-500/20 text-amber-500 text-xs font-medium flex items-center gap-2">
             <AlertTriangle className="w-4 h-4 flex-shrink-0" />
@@ -1137,6 +1550,34 @@ export default function JudgePortal({
           </div>
         )}
       </div>
+
+      {!isSheetFinalized && (
+        <div className={`lg:hidden fixed bottom-0 inset-x-0 z-30 border-t px-4 pt-3 pb-[max(0.75rem,env(safe-area-inset-bottom))] flex items-center justify-between gap-3 ${
+          isDarkMode ? "bg-slate-900 border-slate-800" : "bg-white border-slate-200"
+        }`}>
+          <div id="judge-mobile-progress" className="min-w-0 font-mono">
+            <span className={`block text-sm font-bold ${isSheetComplete ? "text-green-500" : "text-amber-500"}`}>
+              {scoredCount} / {heatCompetitors.length} scored
+            </span>
+            {showQuotas && quotaStatuses.map(({ quota, yesCount, altCount, isMet }) => (
+              <span key={quota.side || "all"} className={`block text-[11px] font-bold ${isMet ? "text-green-500" : unmetQuotaColor}`}>
+                {quota.side && quotaStatuses.length > 1 ? `${quota.side === "Lead" ? "Leaders" : "Followers"}: ` : ""}
+                Callbacks {yesCount}/{quota.callbackCount} · Alts {altCount}/{quota.alternateCount}
+              </span>
+            ))}
+          </div>
+          <button
+            id="judge-finalize-btn-mobile"
+            disabled={!canFinalize}
+            onClick={handleFinalizeClick}
+            className={`px-6 py-3 text-sm font-bold rounded-xl transition-all ${
+              canFinalize ? "bg-green-600 text-white shadow-md" : "bg-slate-200 dark:bg-slate-800 text-slate-400 dark:text-slate-600 cursor-not-allowed"
+            }`}
+          >
+            {isFinalizing ? "Saving..." : "Finalize"}
+          </button>
+        </div>
+      )}
 
       {/* Competitors List for Scoring */}
       <div className="space-y-4">
@@ -1163,350 +1604,33 @@ export default function JudgePortal({
           </div>
         )}
 
-        {orderedCompetitorsForRender.map((c, index) => {
-          const score = localScores[c.bib] || 0;
-          const callbackVal = localCallbacks[c.bib] || "No";
-          const status = savedStatus[c.bib] || "idle";
-
-          const rowBucket = getSplitBucket(c.bib, c.role);
-          const prevBucket = index > 0
-            ? getSplitBucket(orderedCompetitorsForRender[index - 1].bib, orderedCompetitorsForRender[index - 1].role)
-            : rowBucket;
-          const isSplitActive = rowBucket !== prevBucket;
-          const nextHeatNum = rowBucket;
-
-          if (judgingStyle === "raw") {
-            const isTied = tiedBibs.has(c.bib);
-            // Raw Score Format
-            return (
-              <React.Fragment key={c.bib}>
-              {isSplitActive && (
-                <div className="my-4 py-2.5 px-6 rounded-2xl bg-violet-600/5 dark:bg-violet-600/15 border border-dashed border-violet-500/30 text-center font-mono text-xs uppercase tracking-widest text-violet-500 font-bold flex flex-col items-center justify-center gap-1.5 print:break-before-page">
-                  <div className="h-3 w-px bg-violet-500/30 mb-0.5" />
-                  <span>GAP: HEAT {nextHeatNum} STARTING HERE</span>
-                  <div className="h-3 w-px bg-violet-500/30 mt-0.5" />
-                </div>
-              )}
-                <div
-                  className={`p-5 rounded-2xl border transition-all relative ${
-                    isTied
-                      ? isDarkMode
-                        ? "bg-amber-950/20 border-amber-500 text-slate-100 shadow-md ring-1 ring-amber-500/30"
-                        : "bg-amber-50/50 border-amber-500 text-slate-800 shadow-md ring-1 ring-amber-500/20"
-                      : isDarkMode
-                        ? "bg-slate-900 border-slate-800 text-slate-100"
-                        : "bg-white border-slate-200 text-slate-800 shadow-sm"
-                  }`}
-                >
-                <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-4">
-                  {/* Bib No. & Name */}
-                  <div className="flex items-center gap-3 min-w-[200px]">
-                    <div className="w-10 h-10 rounded-xl bg-violet-600/10 text-violet-500 font-mono font-bold flex items-center justify-center text-sm border border-violet-500/10 shadow-inner">
-                      #{c.bib}
-                    </div>
-                    <div>
-                      <h3 className="font-bold text-sm tracking-tight">{c.name}</h3>
-                      <p className="text-[10px] text-slate-400 font-mono">
-                        {c.division} • {c.role}s
-                      </p>
-                    </div>
-                  </div>
-
-                  {/* 0-100 slider, minus button, raw score, + button */}
-                  <div className="flex-1 flex items-center gap-3 max-w-md">
-                    {/* Minus button */}
-                    <button
-                      onClick={() => decreaseScore(c.bib, score > 0 ? score : 75.0)}
-                      className="w-8 h-8 rounded-lg bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 dark:hover:bg-slate-700 font-mono font-bold text-sm flex items-center justify-center transition-all border border-slate-200 dark:border-slate-700"
-                      title="Decrease score by 0.25"
-                    >
-                      -
-                    </button>
-
-                    {/* Slider */}
-                    <div className="flex-1 flex flex-col">
-                      <input
-                        id={`score-slider-${c.bib}`}
-                        type="range"
-                        min="0"
-                        max="100"
-                        step="0.25"
-                        value={score > 0 ? score : 75.0}
-                        onChange={(e) => handleScoreChange(c.bib, parseFloat(e.target.value))}
-                        className={`w-full h-1.5 rounded-lg appearance-none cursor-pointer accent-violet-600 bg-slate-200 dark:bg-slate-700 transition-opacity ${score > 0 ? "opacity-100" : "opacity-40"}`}
-                      />
-                      <div className="flex justify-between text-[9px] text-slate-400 font-mono mt-1">
-                        <span>0</span>
-                        <span>50</span>
-                        <span>100</span>
-                      </div>
-                    </div>
-
-                    {/* Plus button */}
-                    <button
-                      onClick={() => increaseScore(c.bib, score > 0 ? score : 75.0)}
-                      className="w-8 h-8 rounded-lg bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 dark:hover:bg-slate-700 font-mono font-bold text-sm flex items-center justify-center transition-all border border-slate-200 dark:border-slate-700"
-                      title="Increase score by 0.25"
-                    >
-                      +
-                    </button>
-
-                    {/* Raw score display */}
-                    <div className="min-w-[65px] text-center">
-                      <span className={`text-xs font-mono font-bold px-2.5 py-1 rounded border ${
-                        score > 0 
-                          ? "text-violet-500 bg-violet-600/10 border-violet-500/15" 
-                          : "text-slate-400 bg-slate-500/10 border-slate-500/15"
-                      }`}>
-                        {score > 0 ? score.toFixed(2) : "—"}
+        {judgesBothSides ? (
+          <div id="judge-sheet-sides" className="grid grid-cols-1 lg:grid-cols-2 gap-4 lg:gap-6 items-start">
+            {quotaStatuses.map(({ quota, yesCount, altCount, isMet }) => {
+              const isLeaders = quota.side === "Lead";
+              const sideList = orderedCompetitorsForRender.filter((c) => c.role === quota.side);
+              return (
+                <section key={quota.side} id={`judge-sheet-${isLeaders ? "leaders" : "followers"}`} className="space-y-3 min-w-0">
+                  <div className={`sticky top-0 z-10 px-3 py-2 rounded-xl border flex items-center justify-between gap-3 ${
+                    isDarkMode ? "bg-slate-950 border-slate-800" : "bg-white border-slate-200 shadow-sm"
+                  }`}>
+                    <h3 className={`text-sm font-bold font-mono uppercase tracking-wider ${isLeaders ? "text-emerald-500" : "text-rose-500"}`}>
+                      {isLeaders ? "Leaders" : "Followers"} ({sideList.length})
+                    </h3>
+                    {showQuotas && (
+                      <span className={`text-[11px] font-bold font-mono text-right ${isMet ? "text-green-500" : unmetQuotaColor}`}>
+                        Callbacks {yesCount}/{quota.callbackCount} · Alts {altCount}/{quota.alternateCount}
                       </span>
-                    </div>
+                    )}
                   </div>
-
-                  {/* Yes/No/Alt status placement */}
-                  <div className="flex items-center gap-4">
-                    {/* Computed placement rank */}
-                    <div className="text-left sm:text-right min-w-[95px]">
-                      <span className="block text-[9px] font-semibold text-slate-400 font-mono uppercase tracking-wider mb-1">Judge Placement</span>
-                      <span className={`text-xs font-mono font-bold px-2.5 py-1 rounded border ${
-                        getRawRankStatus(c.bib) === "Yes" ? "text-green-500 bg-green-500/10 border-green-500/15" :
-                        getRawRankStatus(c.bib).startsWith("Alt") ? "text-amber-500 bg-amber-500/10 border-amber-500/15" :
-                        "text-slate-400 bg-slate-500/10 border-slate-500/15"
-                      }`}>
-                        {getRawRankStatus(c.bib)}
-                      </span>
-                    </div>
-
-                    {/* Save indicator */}
-                    <div className="flex items-center justify-end min-w-[20px]">
-                      {status === "saving" && (
-                        <span className="w-2 h-2 rounded-full bg-amber-500 animate-pulse" />
-                      )}
-                      {status === "saved" && (
-                        <Check className="w-4 h-4 text-green-500" />
-                      )}
-                      {status === "error" && (
-                        <span className="text-[9px] text-rose-500 font-mono font-bold">Err</span>
-                      )}
-                    </div>
-                  </div>
-                </div>
-              </div>
-              </React.Fragment>
-            );
-          }
-
-          if (judgingStyle === "callback") {
-            // Callback Format
-            return (
-              <React.Fragment key={c.bib}>
-              {isSplitActive && (
-                <div className="my-4 py-2.5 px-6 rounded-2xl bg-violet-600/5 dark:bg-violet-600/15 border border-dashed border-violet-500/30 text-center font-mono text-xs uppercase tracking-widest text-violet-500 font-bold flex flex-col items-center justify-center gap-1.5 print:break-before-page">
-                  <div className="h-3 w-px bg-violet-500/30 mb-0.5" />
-                  <span>GAP: HEAT {nextHeatNum} STARTING HERE</span>
-                  <div className="h-3 w-px bg-violet-500/30 mt-0.5" />
-                </div>
-              )}
-                <div
-                  className={`p-5 rounded-2xl border transition-all relative ${
-                    isDarkMode
-                      ? "bg-slate-900 border-slate-800 text-slate-100"
-                      : "bg-white border-slate-200 text-slate-800 shadow-sm"
-                  }`}
-                >
-                <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
-                  {/* Bib No. & Name */}
-                  <div className="flex items-center gap-3 min-w-[200px]">
-                    <div className="w-10 h-10 rounded-xl bg-violet-600/10 text-violet-500 font-mono font-bold flex items-center justify-center text-sm border border-violet-500/10 shadow-inner">
-                      #{c.bib}
-                    </div>
-                    <div>
-                      <h3 className="font-bold text-sm tracking-tight">{c.name}</h3>
-                      <p className="text-[10px] text-slate-400 font-mono">
-                        {c.division} • {c.role}s
-                      </p>
-                    </div>
-                  </div>
-
-                  {/* Yes/No/Alt 1, Alt 2, Alt 3 select dropdown */}
-                  <div className="min-w-[140px] flex items-center gap-2">
-                    <div>
-                      <span className="block text-[9px] font-semibold text-slate-400 font-mono uppercase tracking-wider mb-1">Callback Selection</span>
-                      <select
-                        value={callbackVal}
-                        onChange={(e) => handleCallbackChange(c.bib, e.target.value as CallbackValue)}
-                        className={`text-xs px-3 py-2 rounded-xl border focus:outline-none focus:ring-2 focus:ring-violet-500 font-mono w-full ${
-                          isDarkMode
-                            ? "bg-slate-800 border-slate-700 text-slate-100"
-                            : "bg-slate-50 border-slate-200 text-slate-800"
-                        }`}
-                      >
-                        <option value="No">No (Unselected)</option>
-                        <option value="Yes">Yes (Callback)</option>
-                        {targetAlternateCount >= 1 && <option value="Alt 1">Alt 1 (Alternate 1)</option>}
-                        {targetAlternateCount >= 2 && <option value="Alt 2">Alt 2 (Alternate 2)</option>}
-                        {targetAlternateCount >= 3 && <option value="Alt 3">Alt 3 (Alternate 3)</option>}
-                      </select>
-                    </div>
-                    {(() => {
-                      const conflicts = getAltConflicts(c.bib);
-                      if (conflicts.length === 0) return null;
-                      return (
-                        <span
-                          className="flex items-center gap-1 text-[9px] font-mono font-bold text-red-500 whitespace-nowrap self-end mb-2"
-                          title={`Also assigned to ${conflicts.map((cc) => `#${cc.bib} ${cc.name}`).join(", ")}`}
-                        >
-                          <AlertTriangle className="w-3.5 h-3.5 shrink-0" />
-                          Conflict: {conflicts.map((cc) => `#${cc.bib}`).join(", ")}
-                        </span>
-                      );
-                    })()}
-                  </div>
-
-                  {/* placement based off other competitors scored */}
-                  <div className="flex items-center gap-4">
-                    <div className="text-left md:text-right min-w-[110px]">
-                      <span className="block text-[9px] font-semibold text-slate-400 font-mono uppercase tracking-wider mb-1">Callback Rank</span>
-                      <span className="text-xs font-mono font-bold text-emerald-500 bg-emerald-500/10 px-2.5 py-1 rounded border border-emerald-500/15">
-                        {getCallbackPlacement(c.bib)}
-                      </span>
-                    </div>
-
-                    {/* Save indicator */}
-                    <div className="flex items-center justify-end min-w-[20px]">
-                      {status === "saving" && (
-                        <span className="w-2 h-2 rounded-full bg-amber-500 animate-pulse" />
-                      )}
-                      {status === "saved" && (
-                        <Check className="w-4 h-4 text-green-500" />
-                      )}
-                      {status === "error" && (
-                        <span className="text-[9px] text-rose-500 font-mono font-bold">Err</span>
-                      )}
-                    </div>
-                  </div>
-                </div>
-              </div>
-              </React.Fragment>
-            );
-          }
-
-          if (judgingStyle === "placement") {
-            // Placement (Finals) format
-            const [leadBib, followBib] = c.bib.includes("_") ? c.bib.split("_") : [c.bib, ""];
-            const lead = competitors.find((comp) => comp.bib === leadBib);
-            const follow = competitors.find((comp) => comp.bib === followBib);
-            const leadName = lead ? lead.name : `Lead #${leadBib}`;
-            const followName = follow ? follow.name : (followBib ? `Follow #${followBib}` : "—");
-            const rawScoreStr = localRawScores[c.bib] || "";
-            const isTied = tiedBibs.has(c.bib);
-
-            return (
-              <React.Fragment key={c.bib}>
-              {isSplitActive && (
-                <div className="my-4 py-2.5 px-6 rounded-2xl bg-violet-600/5 dark:bg-violet-600/15 border border-dashed border-violet-500/30 text-center font-mono text-xs uppercase tracking-widest text-violet-500 font-bold flex flex-col items-center justify-center gap-1.5 print:break-before-page">
-                  <div className="h-3 w-px bg-violet-500/30 mb-0.5" />
-                  <span>GAP: HEAT {nextHeatNum} STARTING HERE</span>
-                  <div className="h-3 w-px bg-violet-500/30 mt-0.5" />
-                </div>
-              )}
-                <div
-                  className={`p-5 rounded-2xl border transition-all relative ${
-                    isTied
-                      ? isDarkMode
-                        ? "bg-amber-950/20 border-amber-500 text-slate-100 shadow-md ring-1 ring-amber-500/30"
-                        : "bg-amber-50/50 border-amber-500 text-slate-800 shadow-md ring-1 ring-amber-500/20"
-                      : isDarkMode
-                        ? "bg-slate-900 border-slate-800 text-slate-100"
-                        : "bg-white border-slate-200 text-slate-800 shadow-sm"
-                  }`}
-                >
-                <div className="flex flex-col xl:flex-row xl:items-center justify-between gap-4">
-                  {/* Leaders Bib No., Leaders Name, Followers Bib No., Followers Name */}
-                  <div className="flex-1 grid grid-cols-1 md:grid-cols-2 gap-4">
-                    {/* Leader info */}
-                    <div className="flex items-center gap-3">
-                      <div className="w-9 h-9 rounded-lg bg-emerald-600/10 text-emerald-500 font-mono font-bold flex items-center justify-center text-xs border border-emerald-500/10 shadow-inner">
-                        L#{leadBib}
-                      </div>
-                      <div>
-                        <span className="text-[9px] text-slate-400 font-mono uppercase tracking-wider block">Leader</span>
-                        <h4 className="font-bold text-sm tracking-tight">{leadName}</h4>
-                      </div>
-                    </div>
-
-                    {/* Follower info */}
-                    <div className="flex items-center gap-3">
-                      <div className="w-9 h-9 rounded-lg bg-rose-600/10 text-rose-500 font-mono font-bold flex items-center justify-center text-xs border border-rose-500/10 shadow-inner">
-                        F#{followBib || "—"}
-                      </div>
-                      <div>
-                        <span className="text-[9px] text-slate-400 font-mono uppercase tracking-wider block">Follower</span>
-                        <h4 className="font-bold text-sm tracking-tight">{followName}</h4>
-                      </div>
-                    </div>
-                  </div>
-
-                  {/* text field for entering raw score and dropdown for selecting placement */}
-                  <div className="flex flex-wrap items-center gap-4">
-                    {/* Raw score text field */}
-                    <div className="min-w-[110px]">
-                      <label className="block text-[9px] font-semibold text-slate-400 font-mono uppercase tracking-wider mb-1">Raw Score</label>
-                      <input
-                        type="text"
-                        placeholder="e.g. 85.50"
-                        value={rawScoreStr}
-                        onChange={(e) => handleRawScoreChangeLocal(c.bib, e.target.value)}
-                        className={`text-xs px-3 py-2 rounded-xl border focus:outline-none focus:ring-2 focus:ring-violet-500 font-mono w-full ${
-                          isDarkMode
-                            ? "bg-slate-800 border-slate-700 text-slate-100 placeholder-slate-500"
-                            : "bg-slate-50 border-slate-200 text-slate-800 placeholder-slate-400"
-                        }`}
-                      />
-                    </div>
-
-                    {/* Dropdown for selecting placement */}
-                    <div className="min-w-[130px]">
-                      <label className="block text-[9px] font-semibold text-slate-400 font-mono uppercase tracking-wider mb-1">Final Placement</label>
-                      <select
-                        value={score}
-                        onChange={(e) => handlePlacementDropdownChange(c.bib, Number(e.target.value))}
-                        className={`text-xs px-3 py-2 rounded-xl border focus:outline-none focus:ring-2 focus:ring-violet-500 font-mono w-full ${
-                          isDarkMode
-                            ? "bg-slate-800 border-slate-700 text-slate-100"
-                            : "bg-slate-50 border-slate-200 text-slate-800"
-                        }`}
-                      >
-                        <option value="0">Unranked</option>
-                        {heatCompetitors.map((_, i) => (
-                          <option key={i + 1} value={i + 1}>
-                            Rank {i + 1} {i === 0 ? "🏆" : ""}
-                          </option>
-                        ))}
-                      </select>
-                    </div>
-
-                    {/* Save indicator */}
-                    <div className="flex items-center justify-end min-w-[20px] pt-4 xl:pt-0">
-                      {status === "saving" && (
-                        <span className="w-2 h-2 rounded-full bg-amber-500 animate-pulse" />
-                      )}
-                      {status === "saved" && (
-                        <Check className="w-4 h-4 text-green-500" />
-                      )}
-                      {status === "error" && (
-                        <span className="text-[9px] text-rose-500 font-mono font-bold">Err</span>
-                      )}
-                    </div>
-                  </div>
-                </div>
-              </div>
-              </React.Fragment>
-            );
-          }
-
-          return null;
-        })}
+                  {sideList.map(renderSheetRow)}
+                </section>
+              );
+            })}
+          </div>
+        ) : (
+          orderedCompetitorsForRender.map(renderSheetRow)
+        )}
       </div>
     </div>
   );

@@ -1,26 +1,29 @@
-import React, { useState } from "react";
-import { UserPlus, Search, ListFilter, Users, PlusCircle, Sparkles, Edit, Save } from "lucide-react";
-import { Competitor, Division, AppSettings, PartnerRegistrationFields } from "../types";
-import { validatePartnerFields } from "../utils/partners";
-import PartnerContestFields, { emptyPartnerFields, partnerFieldsFrom } from "./PartnerContestFields";
+import React, { useEffect, useRef, useState } from "react";
+import { UserPlus, Search, ListFilter, Users, PlusCircle, Edit, Save, Trash2, X } from "lucide-react";
+import { Competitor, Division, AppSettings, ContestEntryFields } from "../types";
+import { getAllContestEntries, getDivisionLockKey, getEntryLockKeys, validateContestEntries } from "../utils/partners";
+import ContestEntryInputs, { emptyContestEntries, contestEntriesFrom } from "./ContestEntryInputs";
 
-type CompetitorDetails = { bib: string; name: string; email: string; division: string; role: "Lead" | "Follow" } & PartnerRegistrationFields;
+type CompetitorDetails = { bib: string; name: string; email: string; division: string; role: "Lead" | "Follow" } & ContestEntryFields;
 
 interface RegisterCompetitorProps {
   competitors: Competitor[];
   onRegister: (competitor: CompetitorDetails) => Promise<void>;
   onUpdateCompetitor?: (oldBib: string, updates: CompetitorDetails) => Promise<void>;
+  onDeleteCompetitor: (bib: string) => Promise<void>;
+  // Held by the App, because the footer's sample dancers go into this division too.
+  division: Division;
+  setDivision: (division: Division) => void;
   isDarkMode: boolean;
   settings: AppSettings;
 }
 
-export default function RegisterCompetitor({ competitors, onRegister, onUpdateCompetitor, isDarkMode, settings }: RegisterCompetitorProps) {
+export default function RegisterCompetitor({ competitors, onRegister, onUpdateCompetitor, onDeleteCompetitor, division, setDivision, isDarkMode, settings }: RegisterCompetitorProps) {
   const [bib, setBib] = useState("");
   const [name, setName] = useState("");
   const [email, setEmail] = useState("");
-  const [division, setDivision] = useState<Division>("Novice");
   const [role, setRole] = useState<"Lead" | "Follow">("Lead");
-  const [partnerFields, setPartnerFields] = useState<PartnerRegistrationFields>(emptyPartnerFields());
+  const [entryFields, setEntryFields] = useState<ContestEntryFields>(emptyContestEntries());
   // When set, the sign-up form is editing this already-registered dancer.
   const [editingCompetitor, setEditingCompetitor] = useState<Competitor | null>(null);
   const [search, setSearch] = useState("");
@@ -28,6 +31,32 @@ export default function RegisterCompetitor({ competitors, onRegister, onUpdateCo
   const [error, setError] = useState("");
   const [success, setSuccess] = useState("");
   const [loading, setLoading] = useState(false);
+  const [deletingBib, setDeletingBib] = useState("");
+  // Floats over the page, since the form's messages are out of sight on phones.
+  const [deleteError, setDeleteError] = useState("");
+  // Phones show the form as a full-screen sheet over the list; larger screens
+  // keep it beside the list, so this only matters below the lg breakpoint.
+  const [isFormOpen, setIsFormOpen] = useState(false);
+  const sheetRef = useRef<HTMLDivElement>(null);
+
+  // The sheet is the only thing that should scroll while it's open.
+  useEffect(() => {
+    if (!isFormOpen || !window.matchMedia("(max-width: 1023px)").matches) return;
+    const previous = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    return () => { document.body.style.overflow = previous; };
+  }, [isFormOpen]);
+
+  // Messages sit above the form, while its buttons are at the bottom.
+  useEffect(() => {
+    if (error || success) sheetRef.current?.scrollTo({ top: 0, behavior: "smooth" });
+  }, [error, success]);
+
+  useEffect(() => {
+    if (!success || isFormOpen) return;
+    const timer = setTimeout(() => setSuccess(""), 4000);
+    return () => clearTimeout(timer);
+  }, [success, isFormOpen]);
 
   if (settings.registrationEnabled === false) {
     return (
@@ -43,7 +72,7 @@ export default function RegisterCompetitor({ competitors, onRegister, onUpdateCo
           
           <h2 className="text-xl font-bold tracking-tight mt-2 text-slate-900 dark:text-slate-100">Registration Locked</h2>
           <p className="text-xs text-slate-400 mt-2 leading-relaxed">
-            Competitor self-registration is currently suspended by the event administrators. Please contact the Contest Coordinator floor desk to register manually.
+            Registration is currently closed by the event administrators. Please contact the Contest Coordinator floor desk to register manually.
           </p>
         </div>
       </div>
@@ -54,7 +83,7 @@ export default function RegisterCompetitor({ competitors, onRegister, onUpdateCo
     setBib("");
     setName("");
     setEmail("");
-    setPartnerFields(emptyPartnerFields());
+    setEntryFields(emptyContestEntries());
     setEditingCompetitor(null);
   };
 
@@ -65,9 +94,17 @@ export default function RegisterCompetitor({ competitors, onRegister, onUpdateCo
     setEmail(c.email || "");
     setDivision(c.division as Division);
     setRole(c.role);
-    setPartnerFields(partnerFieldsFrom(c));
+    setEntryFields(contestEntriesFrom(c));
     setError("");
     setSuccess("");
+    setIsFormOpen(true);
+  };
+
+  // Closing the sheet keeps a half-typed new dancer, but abandons an edit.
+  const closeForm = () => {
+    if (editingCompetitor) resetForm();
+    setError("");
+    setIsFormOpen(false);
   };
 
   const handleSubmit = async (e: React.FormEvent) => {
@@ -91,9 +128,18 @@ export default function RegisterCompetitor({ competitors, onRegister, onUpdateCo
       return;
     }
 
-    const partnerError = validatePartnerFields(partnerFields);
-    if (partnerError) {
-      setError(partnerError);
+    const entryError = validateContestEntries({ ...entryFields, division: division, role: role });
+    if (entryError) {
+      setError(entryError);
+      return;
+    }
+
+    // Any newly entered contest+division whose check-in sheet already exists is closed.
+    const keptLockKeys = editingCompetitor ? getEntryLockKeys(editingCompetitor) : [];
+    const closedEntry = getAllContestEntries({ bib, name, division, role, ...entryFields })
+      .find((e) => !keptLockKeys.includes(getDivisionLockKey(e.contestType, e.division)) && (settings.lockedDivisions || []).includes(getDivisionLockKey(e.contestType, e.division)));
+    if (closedEntry) {
+      setError(`Registration for ${closedEntry.division} ${closedEntry.contestType} is closed — check-in has already been created.`);
       return;
     }
 
@@ -103,7 +149,7 @@ export default function RegisterCompetitor({ competitors, onRegister, onUpdateCo
       email: email.trim(),
       division,
       role,
-      ...partnerFields
+      ...entryFields
     };
 
     setLoading(true);
@@ -111,6 +157,7 @@ export default function RegisterCompetitor({ competitors, onRegister, onUpdateCo
       if (editingCompetitor && onUpdateCompetitor) {
         await onUpdateCompetitor(editingCompetitor.bib, details);
         setSuccess(`Registration for ${details.name} (Bib ${details.bib}) updated.`);
+        setIsFormOpen(false);
       } else {
         await onRegister(details);
         setSuccess(`Dancer ${name} (Bib ${bib}) registered successfully!`);
@@ -123,10 +170,26 @@ export default function RegisterCompetitor({ competitors, onRegister, onUpdateCo
     }
   };
 
+  const handleDelete = async (c: Competitor) => {
+    if (!window.confirm(`Delete ${c.name} (Bib ${c.bib})? This removes their registration and can't be undone.`)) return;
+    setDeleteError("");
+    setSuccess("");
+    setDeletingBib(c.bib);
+    try {
+      await onDeleteCompetitor(c.bib);
+      if (editingCompetitor?.bib === c.bib) resetForm();
+      setSuccess(`${c.name} (Bib ${c.bib}) was deleted.`);
+    } catch (err: any) {
+      setDeleteError(err.message || "Failed to delete this dancer.");
+    } finally {
+      setDeletingBib("");
+    }
+  };
+
   // Filtered list
   const filtered = competitors.filter((c) => {
     const matchesSearch = c.name.toLowerCase().includes(search.toLowerCase()) || c.bib.includes(search);
-    const matchesDiv = filterDivision === "All" || c.division === filterDivision;
+    const matchesDiv = filterDivision === "All" || c.division === filterDivision || (!!c.jjSecond && c.jjSecondDivision === filterDivision);
     return matchesSearch && matchesDiv;
   });
 
@@ -137,92 +200,160 @@ export default function RegisterCompetitor({ competitors, onRegister, onUpdateCo
   const intermediateCount = competitors.filter((c) => c.division === "Intermediate").length;
   const advancedCount = competitors.filter((c) => c.division === "Advance").length;
 
+  const getDivisionClass = (division: string) =>
+    division === "Novice" ? "bg-sky-500/10 text-sky-500 border-sky-500/20" :
+    division === "Intermediate" ? "bg-amber-500/10 text-amber-500 border-amber-500/20" :
+    "bg-purple-500/10 text-purple-500 border-purple-500/20";
+
+  const getRoleClass = (role: string) =>
+    role === "Lead" ? "bg-emerald-500/10 text-emerald-500" : "bg-rose-500/10 text-rose-500";
+
+  const renderOtherEntries = (c: Competitor) => (
+    <>
+      {c.jjSecond && <span className="block"><span className="font-semibold text-violet-500">J&amp;J</span> {c.jjSecondDivision} {c.jjSecondRole}</span>}
+      {c.strictlySwing && <span className="block"><span className="font-semibold text-violet-500">Strictly</span> {c.strictlyDivision} {c.strictlyRole || c.role} · w/ {c.strictlyPartner}</span>}
+      {c.strictlySwing && c.strictlySecond && <span className="block"><span className="font-semibold text-violet-500">Strictly</span> {c.strictlySecondDivision} {c.strictlySecondRole} · w/ {c.strictlySecondPartner}</span>}
+      {c.routine && <span className="block"><span className="font-semibold text-violet-500">Routine</span> {c.routineDivision} · w/ {c.routinePartner}</span>}
+    </>
+  );
+
   return (
-    <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+    <div className="grid grid-cols-1 lg:grid-cols-3 gap-6 pb-20 lg:pb-0">
       {/* Column 1 & 2: Stats + Registrations List */}
       <div className="lg:col-span-2 space-y-6">
         {/* Statistics Widgets */}
-        <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
-          <div className={`p-4 rounded-2xl border transition-all ${isDarkMode ? "bg-slate-900 border-slate-800" : "bg-white border-slate-100 shadow-sm"}`}>
-            <span className="text-xs font-medium text-slate-400 font-mono block">Total Dancers</span>
-            <span className="text-2xl font-bold text-violet-500 font-mono">{competitors.length}</span>
+        <div className="grid grid-cols-4 gap-2 sm:gap-4">
+          <div className={`p-2.5 sm:p-4 rounded-2xl border transition-all ${isDarkMode ? "bg-slate-900 border-slate-800" : "bg-white border-slate-100 shadow-sm"}`}>
+            <span className="text-[10px] sm:text-xs font-medium text-slate-400 font-mono block"><span className="sm:hidden">Total</span><span className="hidden sm:inline">Total Dancers</span></span>
+            <span className="text-lg sm:text-2xl font-bold text-violet-500 font-mono">{competitors.length}</span>
           </div>
-          <div className={`p-4 rounded-2xl border transition-all ${isDarkMode ? "bg-slate-900 border-slate-800" : "bg-white border-slate-100 shadow-sm"}`}>
-            <span className="text-xs font-medium text-slate-400 font-mono block">Leaders (Leads)</span>
-            <span className="text-2xl font-bold text-emerald-500 font-mono">{leadsCount}</span>
+          <div className={`p-2.5 sm:p-4 rounded-2xl border transition-all ${isDarkMode ? "bg-slate-900 border-slate-800" : "bg-white border-slate-100 shadow-sm"}`}>
+            <span className="text-[10px] sm:text-xs font-medium text-slate-400 font-mono block"><span className="sm:hidden">Leads</span><span className="hidden sm:inline">Leaders (Leads)</span></span>
+            <span className="text-lg sm:text-2xl font-bold text-emerald-500 font-mono">{leadsCount}</span>
           </div>
-          <div className={`p-4 rounded-2xl border transition-all ${isDarkMode ? "bg-slate-900 border-slate-800" : "bg-white border-slate-100 shadow-sm"}`}>
-            <span className="text-xs font-medium text-slate-400 font-mono block">Followers (Follows)</span>
-            <span className="text-2xl font-bold text-rose-500 font-mono">{followsCount}</span>
+          <div className={`p-2.5 sm:p-4 rounded-2xl border transition-all ${isDarkMode ? "bg-slate-900 border-slate-800" : "bg-white border-slate-100 shadow-sm"}`}>
+            <span className="text-[10px] sm:text-xs font-medium text-slate-400 font-mono block"><span className="sm:hidden">Follows</span><span className="hidden sm:inline">Followers (Follows)</span></span>
+            <span className="text-lg sm:text-2xl font-bold text-rose-500 font-mono">{followsCount}</span>
           </div>
-          <div className={`p-4 rounded-2xl border transition-all ${isDarkMode ? "bg-slate-900 border-slate-800" : "bg-white border-slate-100 shadow-sm"}`}>
-            <span className="text-xs font-medium text-slate-400 font-mono block">Ratio (L/F)</span>
-            <span className="text-lg font-bold text-sky-500 font-mono">
-              {followsCount > 0 ? (leadsCount / followsCount).toFixed(2) : leadsCount}
-            </span>
+          <div className={`p-2.5 sm:p-4 rounded-2xl border transition-all ${isDarkMode ? "bg-slate-900 border-slate-800" : "bg-white border-slate-100 shadow-sm"}`}>
+            <span className="text-[10px] sm:text-xs font-medium text-slate-400 font-mono block"><span className="sm:hidden">L/F</span><span className="hidden sm:inline">Ratio (L/F)</span></span>
+            <span className="text-lg sm:text-2xl font-bold text-sky-500 font-mono">{followsCount > 0 ? (leadsCount / followsCount).toFixed(2) : leadsCount}</span>
           </div>
         </div>
 
         {/* Competitor Directory Card */}
-        <div className={`p-6 rounded-2xl border transition-all ${isDarkMode ? "bg-slate-900 border-slate-800 text-slate-100" : "bg-white border-slate-200 shadow-sm text-slate-800"}`}>
-          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 mb-6">
-            <div>
-              <h2 className="text-lg font-bold tracking-tight">Competitor Directory</h2>
-              <p className="text-xs text-slate-400">View and filter all registered dancers</p>
+        <div className={`p-4 sm:p-6 rounded-2xl border transition-all ${isDarkMode ? "bg-slate-900 border-slate-800 text-slate-100" : "bg-white border-slate-200 shadow-sm text-slate-800"}`}>
+          <div className="mb-3">
+            <h2 className="text-lg font-bold tracking-tight">Competitor Directory</h2>
+            <p className="text-xs text-slate-400">
+              <span className="lg:hidden">Tap a dancer to edit their registration</span>
+              <span className="hidden lg:inline">View and filter all registered dancers</span>
+            </p>
+          </div>
+
+          {/* Quick search & filter */}
+          <div className={`sticky top-0 z-10 -mx-1 px-1 py-2 mb-2 flex items-center gap-2 ${isDarkMode ? "bg-slate-900" : "bg-white"}`}>
+            <div className="relative flex-1 min-w-0">
+              <Search className="w-4 h-4 absolute left-3 top-2.5 text-slate-400" />
+              <input
+                id="competitor-search-input"
+                type="text"
+                placeholder="Search name or bib..."
+                value={search}
+                onChange={(e) => setSearch(e.target.value)}
+                className={`w-full pl-9 pr-4 py-2 text-xs rounded-xl border focus:outline-none focus:ring-1 focus:ring-violet-500 ${
+                  isDarkMode ? "bg-slate-800 border-slate-700 text-slate-100 placeholder-slate-500" : "bg-slate-50 border-slate-200 text-slate-800"
+                }`}
+              />
             </div>
 
-            {/* Quick search & filter */}
-            <div className="flex flex-wrap items-center gap-2">
-              <div className="relative">
-                <Search className="w-4 h-4 absolute left-3 top-2.5 text-slate-400" />
-                <input
-                  id="competitor-search-input"
-                  type="text"
-                  placeholder="Search name or bib..."
-                  value={search}
-                  onChange={(e) => setSearch(e.target.value)}
-                  className={`pl-9 pr-4 py-2 text-xs rounded-xl border focus:outline-none focus:ring-1 focus:ring-violet-500 ${
-                    isDarkMode ? "bg-slate-800 border-slate-700 text-slate-100 placeholder-slate-500" : "bg-slate-50 border-slate-200 text-slate-800"
-                  }`}
-                />
-              </div>
-
-              <div className="flex items-center gap-1">
-                <ListFilter className="w-3.5 h-3.5 text-slate-400" />
-                <select
-                  id="division-filter-select"
-                  value={filterDivision}
-                  onChange={(e) => setFilterDivision(e.target.value)}
-                  className={`text-xs px-3 py-2 rounded-xl border focus:outline-none focus:ring-1 focus:ring-violet-500 ${
-                    isDarkMode ? "bg-slate-800 border-slate-700 text-slate-100" : "bg-slate-50 border-slate-200 text-slate-800"
-                  }`}
-                >
-                  <option value="All">All Divisions</option>
-                  <option value="Newcomer">Newcomer</option>
-                  <option value="Novice">Novice</option>
-                  <option value="Intermediate">Intermediate</option>
-                  <option value="Advance">Advance</option>
-                  <option value="All-Star">All-Star</option>
-                  <option value="Pro">Pro</option>
-                  <option value="Open">Open</option>
-                </select>
-              </div>
+            <div className="flex items-center gap-1 flex-shrink-0">
+              <ListFilter className="w-3.5 h-3.5 text-slate-400 hidden sm:block" />
+              <select
+                id="division-filter-select"
+                aria-label="Filter by division"
+                value={filterDivision}
+                onChange={(e) => setFilterDivision(e.target.value)}
+                className={`max-w-[120px] sm:max-w-none text-xs px-2 sm:px-3 py-2 rounded-xl border focus:outline-none focus:ring-1 focus:ring-violet-500 ${
+                  isDarkMode ? "bg-slate-800 border-slate-700 text-slate-100" : "bg-slate-50 border-slate-200 text-slate-800"
+                }`}
+              >
+                <option value="All">All Divisions</option>
+                <option value="Newcomer">Newcomer</option>
+                <option value="Novice">Novice</option>
+                <option value="Intermediate">Intermediate</option>
+                <option value="Advance">Advance</option>
+                <option value="All-Star">All-Star</option>
+                <option value="Pro">Pro</option>
+                <option value="Open">Open</option>
+              </select>
             </div>
           </div>
 
+          {/* Phones: one card per dancer, tapped to edit */}
+          <div id="competitor-cards" className="lg:hidden space-y-2">
+            {filtered.map((c) => (
+              <div
+                key={c.bib}
+                className={`w-full min-h-[60px] rounded-xl border flex items-stretch transition-all ${
+                  editingCompetitor?.bib === c.bib
+                    ? "border-violet-500 bg-violet-500/10"
+                    : isDarkMode ? "bg-slate-950/40 border-slate-800" : "bg-slate-50 border-slate-200"
+                }`}
+              >
+                <button
+                  type="button"
+                  id={`edit-dancer-${c.bib}`}
+                  disabled={!onUpdateCompetitor}
+                  onClick={() => handleStartEdit(c)}
+                  className={`flex-1 min-w-0 p-3 rounded-l-xl text-left flex items-center gap-3 transition-all ${isDarkMode ? "active:bg-slate-800" : "active:bg-slate-100"}`}
+                >
+                  <span className="font-mono font-bold text-violet-500 text-sm w-9 flex-shrink-0">{c.bib}</span>
+                  <span className="flex-1 min-w-0">
+                    <span className="block text-sm font-semibold truncate">{c.name}</span>
+                    <span className="flex items-center gap-1.5 mt-1 flex-wrap">
+                      <span className={`px-2 py-0.5 rounded-full text-[10px] font-semibold border ${getDivisionClass(c.division)}`}>{c.division}</span>
+                      <span className={`px-2 py-0.5 rounded-full text-[10px] font-semibold ${getRoleClass(c.role)}`}>{c.role}</span>
+                    </span>
+                    {(c.jjSecond || c.strictlySwing || c.routine) && (
+                      <span className="block mt-1 text-[10px] text-slate-400">{renderOtherEntries(c)}</span>
+                    )}
+                  </span>
+                  {onUpdateCompetitor && <Edit className="w-4 h-4 text-slate-400 flex-shrink-0" />}
+                </button>
+                {onUpdateCompetitor && (
+                  <button
+                    type="button"
+                    id={`delete-dancer-${c.bib}`}
+                    disabled={deletingBib === c.bib}
+                    onClick={() => handleDelete(c)}
+                    aria-label={`Delete ${c.name}`}
+                    className={`w-12 flex-shrink-0 rounded-r-xl border-l flex items-center justify-center text-slate-400 hover:text-rose-500 active:text-rose-500 transition-all disabled:opacity-50 ${
+                      isDarkMode ? "border-slate-800" : "border-slate-200"
+                    }`}
+                  >
+                    <Trash2 className="w-4 h-4" />
+                  </button>
+                )}
+              </div>
+            ))}
+            {filtered.length === 0 && (
+              <p className="p-6 text-center text-xs text-slate-500">No dancers found. Tap Add Dancer to register someone.</p>
+            )}
+          </div>
+
           {/* Table */}
-          <div className="overflow-x-auto rounded-xl border border-slate-200 dark:border-slate-800">
+          <div className="hidden lg:block overflow-x-auto rounded-xl border border-slate-200 dark:border-slate-800">
             <table className="w-full text-left border-collapse">
               <thead>
                 <tr className={`${isDarkMode ? "bg-slate-800/50 text-slate-300" : "bg-slate-50 text-slate-500"} text-xs font-semibold font-mono border-b border-slate-200 dark:border-slate-800`}>
                   <th className="p-3">Bib</th>
                   <th className="p-3">Name</th>
-                  <th className="p-3">Email</th>
+                  {onUpdateCompetitor && <th className="p-3">Email</th>}
                   <th className="p-3">Division</th>
                   <th className="p-3">Role</th>
-                  <th className="p-3">Strictly / Routine</th>
-                  <th className="p-3">Check-In Status</th>
-                  {onUpdateCompetitor && <th className="p-3 text-right">Edit</th>}
+                  <th className="p-3">Other Entries</th>
+                  {onUpdateCompetitor && <th className={`p-3 text-right sticky right-0 ${isDarkMode ? "bg-slate-800" : "bg-slate-50"}`}>Actions</th>}
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-200 dark:divide-slate-800 text-xs">
@@ -234,38 +365,23 @@ export default function RegisterCompetitor({ competitors, onRegister, onUpdateCo
                     >
                       <td className="p-3 font-mono font-bold text-violet-500">{c.bib}</td>
                       <td className="p-3 font-medium">{c.name}</td>
-                      <td className="p-3 text-slate-400">{c.email || "—"}</td>
+                      {onUpdateCompetitor && <td className="p-3 text-slate-400">{c.email || "—"}</td>}
                       <td className="p-3">
-                        <span className={`px-2 py-0.5 rounded-full text-[10px] font-semibold border ${
-                          c.division === "Novice" ? "bg-sky-500/10 text-sky-500 border-sky-500/20" :
-                          c.division === "Intermediate" ? "bg-amber-500/10 text-amber-500 border-amber-500/20" :
-                          "bg-purple-500/10 text-purple-500 border-purple-500/20"
-                        }`}>
+                        <span className={`px-2 py-0.5 rounded-full text-[10px] font-semibold border ${getDivisionClass(c.division)}`}>
                           {c.division}
                         </span>
                       </td>
                       <td className="p-3">
-                        <span className={`px-2 py-0.5 rounded-full text-[10px] font-semibold ${
-                          c.role === "Lead" ? "bg-emerald-500/10 text-emerald-500" : "bg-rose-500/10 text-rose-500"
-                        }`}>
+                        <span className={`px-2 py-0.5 rounded-full text-[10px] font-semibold ${getRoleClass(c.role)}`}>
                           {c.role}
                         </span>
                       </td>
                       <td className="p-3 text-[10px] text-slate-400 space-y-0.5">
-                        {c.strictlySwing && <div><span className="font-semibold text-violet-500">Strictly</span> {c.strictlyDivision} · w/ {c.strictlyPartner}</div>}
-                        {c.routine && <div><span className="font-semibold text-violet-500">Routine</span> {c.routineDivision} · w/ {c.routinePartner}</div>}
-                        {!c.strictlySwing && !c.routine && "—"}
-                      </td>
-                      <td className="p-3">
-                        <span className={`inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full text-[10px] font-semibold ${
-                          c.checkedIn ? "bg-green-500/10 text-green-500" : "bg-yellow-500/10 text-yellow-500"
-                        }`}>
-                          <span className={`w-1.5 h-1.5 rounded-full ${c.checkedIn ? "bg-green-500" : "bg-yellow-500 animate-pulse"}`} />
-                          {c.checkedIn ? "Checked In" : "Pending Check-In"}
-                        </span>
+                        {renderOtherEntries(c)}
+                        {!c.jjSecond && !c.strictlySwing && !c.routine && "—"}
                       </td>
                       {onUpdateCompetitor && (
-                        <td className="p-3 text-right">
+                        <td className={`p-3 text-right whitespace-nowrap sticky right-0 ${isDarkMode ? "bg-slate-900" : "bg-white"}`}>
                           <button
                             type="button"
                             onClick={() => handleStartEdit(c)}
@@ -274,13 +390,23 @@ export default function RegisterCompetitor({ competitors, onRegister, onUpdateCo
                             <Edit className="w-3 h-3" />
                             Edit
                           </button>
+                          <button
+                            type="button"
+                            id={`delete-dancer-row-${c.bib}`}
+                            disabled={deletingBib === c.bib}
+                            onClick={() => handleDelete(c)}
+                            className="ml-1.5 inline-flex items-center gap-1 px-2 py-1 rounded-lg text-[10px] font-bold border border-slate-200 dark:border-slate-700 text-slate-500 hover:text-rose-500 hover:border-rose-500/40 transition-all disabled:opacity-50"
+                          >
+                            <Trash2 className="w-3 h-3" />
+                            Delete
+                          </button>
                         </td>
                       )}
                     </tr>
                   ))
                 ) : (
                   <tr>
-                    <td colSpan={onUpdateCompetitor ? 8 : 7} className="p-6 text-center text-slate-500">
+                    <td colSpan={onUpdateCompetitor ? 7 : 5} className="p-6 text-center text-slate-500">
                       No competitors found. Use the form to register new dancers.
                     </td>
                   </tr>
@@ -291,12 +417,56 @@ export default function RegisterCompetitor({ competitors, onRegister, onUpdateCo
         </div>
       </div>
 
+      {/* The list stays where it was after a save, so the note floats over it */}
+      {success && !isFormOpen && (
+        <div id="registration-saved-note" role="status" className="lg:hidden fixed top-3 inset-x-4 z-40 p-3 rounded-xl bg-green-600 text-white text-xs font-semibold shadow-xl">
+          {success}
+        </div>
+      )}
+
+      {deleteError && (
+        <div id="dancer-delete-error" role="alert" className="fixed top-3 inset-x-4 lg:inset-x-auto lg:right-4 lg:w-96 z-40 p-3 rounded-xl bg-rose-600 text-white text-xs font-semibold shadow-xl flex items-start gap-2">
+          <span className="flex-1">{deleteError}</span>
+          <button type="button" onClick={() => setDeleteError("")} aria-label="Dismiss" className="flex-shrink-0">
+            <X className="w-4 h-4" />
+          </button>
+        </div>
+      )}
+
+      {/* Phones add dancers from a button that's always in reach */}
+      {!isFormOpen && (
+        <button
+          type="button"
+          id="open-add-dancer-btn"
+          onClick={() => setIsFormOpen(true)}
+          className="lg:hidden fixed bottom-4 right-4 z-30 px-5 py-3.5 rounded-full bg-violet-600 hover:bg-violet-500 text-white text-sm font-bold shadow-xl shadow-violet-600/30 flex items-center gap-2"
+        >
+          <UserPlus className="w-5 h-5" />
+          Add Dancer
+        </button>
+      )}
+
       {/* Column 3: Registration Form */}
-      <div className="space-y-6">
-        <div className={`p-6 rounded-2xl border transition-all ${isDarkMode ? "bg-slate-900 border-slate-800 text-slate-100" : "bg-white border-slate-200 shadow-sm text-slate-800"}`}>
+      <div
+        id="registration-sheet"
+        ref={sheetRef}
+        className={`${isFormOpen ? "fixed inset-0 z-50 overflow-y-auto overscroll-contain" : "hidden"} ${
+          isDarkMode ? "bg-slate-950" : "bg-slate-50"
+        } lg:bg-transparent lg:block lg:static lg:inset-auto lg:z-auto lg:sticky lg:top-4 lg:self-start lg:max-h-[calc(100vh-2rem)] lg:overflow-y-auto`}
+      >
+        <div className={`p-4 sm:p-6 lg:rounded-2xl lg:border transition-all ${isDarkMode ? "lg:bg-slate-900 lg:border-slate-800 text-slate-100" : "lg:bg-white lg:border-slate-200 lg:shadow-sm text-slate-800"}`}>
           <div className="flex items-center gap-2 mb-4">
             {editingCompetitor ? <Edit className="w-5 h-5 text-violet-500" /> : <UserPlus className="w-5 h-5 text-violet-500" />}
-            <h2 className="text-lg font-bold tracking-tight">{editingCompetitor ? "Edit Registration" : "Competitor Sign-Up"}</h2>
+            <h2 className="text-lg font-bold tracking-tight flex-1">{editingCompetitor ? "Edit Registration" : "Competitor Sign-Up"}</h2>
+            <button
+              type="button"
+              id="close-registration-sheet-btn"
+              onClick={closeForm}
+              aria-label="Close"
+              className="lg:hidden p-2.5 -mr-2 rounded-xl text-slate-400 hover:text-slate-200"
+            >
+              <X className="w-5 h-5" />
+            </button>
           </div>
           <p className="text-xs text-slate-400 mb-6">
             {editingCompetitor
@@ -322,6 +492,7 @@ export default function RegisterCompetitor({ competitors, onRegister, onUpdateCo
               <input
                 id="competitor-bib-input"
                 type="text"
+                inputMode="numeric"
                 required
                 placeholder="e.g. 101"
                 value={bib}
@@ -366,7 +537,7 @@ export default function RegisterCompetitor({ competitors, onRegister, onUpdateCo
 
             {/* Division */}
             <div>
-              <label className="block text-xs font-medium text-slate-400 mb-1.5">Division</label>
+              <label className="block text-xs font-medium text-slate-400 mb-1.5">Jack &amp; Jill Division</label>
               <div className="grid grid-cols-2 gap-2">
                 {(["Newcomer", "Novice", "Intermediate", "Advance", "All-Star", "Pro", "Open"] as Division[]).map((div) => {
                   const isLocked = (settings.lockedDivisions || []).includes(div) && editingCompetitor?.division !== div;
@@ -396,7 +567,7 @@ export default function RegisterCompetitor({ competitors, onRegister, onUpdateCo
 
             {/* Role */}
             <div>
-              <label className="block text-xs font-medium text-slate-400 mb-1.5">Dance Role</label>
+              <label className="block text-xs font-medium text-slate-400 mb-1.5">Jack &amp; Jill Role</label>
               <div className="grid grid-cols-2 gap-3">
                 <button
                   type="button"
@@ -432,13 +603,16 @@ export default function RegisterCompetitor({ competitors, onRegister, onUpdateCo
 
             {/* Partnered contests */}
             <div>
-              <label className="block text-xs font-medium text-slate-400 mb-1.5">Partnered Contests</label>
-              <PartnerContestFields
-                value={partnerFields}
-                onChange={setPartnerFields}
+              <label className="block text-xs font-medium text-slate-400 mb-1.5">More Contest Entries</label>
+              <p className="text-[10px] text-slate-400 mb-2">Jack &amp; Jill and Strictly Swing can each be entered in up to 2 divisions, with a different role in each. Routines are entered once, as a couple, with no role.</p>
+              <ContestEntryInputs
+                value={entryFields}
+                onChange={setEntryFields}
                 isDarkMode={isDarkMode}
                 lockedDivisions={settings.lockedDivisions}
-                initialValue={editingCompetitor ? partnerFieldsFrom(editingCompetitor) : undefined}
+                initialValue={editingCompetitor ? contestEntriesFrom(editingCompetitor) : undefined}
+                mainDivision={division}
+                mainRole={role}
               />
             </div>
 
@@ -456,7 +630,7 @@ export default function RegisterCompetitor({ competitors, onRegister, onUpdateCo
             {editingCompetitor && (
               <button
                 type="button"
-                onClick={() => { resetForm(); setError(""); }}
+                onClick={closeForm}
                 className="w-full py-2 rounded-xl border border-slate-200 dark:border-slate-700 text-xs font-semibold text-slate-500 hover:text-slate-300 transition-all"
               >
                 Cancel Editing
