@@ -1,3 +1,4 @@
+import type { Response } from "express";
 import type { Transaction } from "firebase-admin/firestore";
 import type { AppSettings, AppState, CompletedContestResult, Competitor, Heat, HeatEntryStatus, ScoreRecord } from "../src/types";
 import { getScoreDocId, toDocId } from "../src/utils/ids";
@@ -8,6 +9,15 @@ export class HttpError extends Error {
   constructor(public status: number, message: string, public code?: string) {
     super(message);
   }
+}
+
+export function sendError(res: Response, error: unknown) {
+  if (error instanceof HttpError) {
+    res.status(error.status).json({ error: error.message, code: error.code });
+    return;
+  }
+  console.error("Unexpected API error", error);
+  res.status(500).json({ error: "Something went wrong. Please try again." });
 }
 
 // A brand new gateway, and what /api/clear-all returns a community to.

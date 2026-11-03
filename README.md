@@ -15,6 +15,18 @@ Local development never touches the live database. Press Ctrl+C once to stop `np
 
 Forgotten passcode: `npm run gateway:create -- --reset-passcode <gatewayCode> <admin|judge|coordinator|scoring|competitor> <newPasscode>` (`competitor` is the Registration portal)
 
+## Owner app
+
+The platform owner manages every gateway from the owner console at `/owner/`: create gateways, send their codes, make new codes or passcodes, lock them, and open their own community as Admin. It signs in with Google, and only an account marked as the owner gets in:
+
+`npm run owner:grant -- you@example.com --live` (sign in to the console once first; `--revoke` removes it)
+
+Two apps show the same console:
+- **Windows** (`apps/desktop`, Electron): `npm install`, then `npm run build` makes a portable `dist/SwingScore Owner.exe`. Google sign-in opens in your normal browser and hands back to the app.
+- **Android** (`apps/android`, Capacitor): `npm install`, put the Firebase Android app's `google-services.json` in `android/app/`, then `npm run build` makes `android/app/build/outputs/apk/debug/app-debug.apk`. It needs Android Studio's SDK, and Java from Android Studio.
+
+Both apps load the console from the live site, so they update with every deploy.
+
 ## Tests
 
 `npm test` runs the scoring, Security Rules and API tests against the emulators. Stop `npm run dev` first, because they use the same ports.

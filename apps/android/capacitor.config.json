@@ -1,0 +1,15 @@
+{
+  "appId": "com.swingscore.owner",
+  "appName": "SwingScore Owner",
+  "webDir": "web",
+  "server": {
+    "url": "https://swingscore-ab034.web.app/owner/",
+    "allowNavigation": ["swingscore-ab034.web.app"]
+  },
+  "plugins": {
+    "FirebaseAuthentication": {
+      "skipNativeAuth": true,
+      "providers": ["google.com"]
+    }
+  }
+}

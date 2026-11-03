@@ -10,6 +10,15 @@ const configDir = path.dirname(fileURLToPath(import.meta.url));
 export default defineConfig(() => {
   return {
     plugins: [react(), tailwindcss()],
+    // The site, plus the owner console at /owner/.
+    build: {
+      rollupOptions: {
+        input: {
+          main: path.resolve(configDir, "index.html"),
+          owner: path.resolve(configDir, "owner/index.html"),
+        },
+      },
+    },
     resolve: {
       alias: {
         '@': path.resolve(configDir, '.'),

@@ -154,6 +154,26 @@ export default function App() {
     return () => window.removeEventListener("hashchange", readPass);
   }, [portalLink]);
 
+  // The owner app's "Open Admin portal" link signs this browser in as Admin of
+  // the owner's own community, then shows its Central Gateway.
+  const [ownerAdminLink] = useState(() =>
+    window.location.pathname === "/owner-admin" ? new URLSearchParams(window.location.hash.slice(1)) : null
+  );
+  const [isOpeningOwnerAdmin, setIsOpeningOwnerAdmin] = useState(!!ownerAdminLink);
+  const isUsingOwnerAdminLinkRef = useRef(false);
+  useEffect(() => {
+    if (!isReady || !ownerAdminLink || isUsingOwnerAdminLinkRef.current) return;
+    isUsingOwnerAdminLinkRef.current = true;
+    apiRequest("/api/gateway/owner-admin-pass", { communityId: ownerAdminLink.get("community"), pass: ownerAdminLink.get("pass") })
+      .then(({ token }) => applyToken(token))
+      .catch((err) => setActionError(err.message))
+      .finally(() => {
+        window.history.replaceState(null, "", "/?role=portal");
+        setCurrentRole("portal");
+        setIsOpeningOwnerAdmin(false);
+      });
+  }, [isReady, ownerAdminLink, applyToken]);
+
   // Anyone connected can see Results. The Central Gateway is the Admin's alone.
   const requiredRole: StaffRole | null = currentRole === "results" ? null : currentRole === "portal" ? "admin" : currentRole;
   const isAuthenticated = !requiredRole || !!session?.roles.includes(requiredRole);
@@ -498,7 +518,7 @@ export default function App() {
             </div>
           )}
 
-          {!isReady ? (
+          {!isReady || isOpeningOwnerAdmin ? (
             <div className="flex flex-col items-center justify-center py-20 gap-4">
               <RefreshCw className="w-8 h-8 text-violet-500 animate-spin" />
             </div>

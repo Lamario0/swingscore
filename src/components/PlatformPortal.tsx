@@ -1,7 +1,8 @@
 import React from "react";
 import { ShieldAlert, Award, UserCheck, Users, Landmark, ExternalLink, KeyRound, Trophy, ChevronDown, ChevronUp, Sparkles, Copy, Check, QrCode, X } from "lucide-react";
 import { AppSettings, Competitor, CompletedContestResult, Heat, ScoreRecord, StaffRole } from "../types";
-import { apiRequest, copyText } from "../utils/api";
+import { apiRequest } from "../utils/api";
+import { copyText } from "../utils/clipboard";
 import { getPortalLink, LinkedPortal } from "../utils/portalLinks";
 import PasscodeNote from "./PasscodeNote";
 import PortalQrDialog from "./PortalQrDialog";

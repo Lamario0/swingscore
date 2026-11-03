@@ -6,7 +6,7 @@ import { after, before, test } from "node:test";
 import { initializeApp } from "firebase/app";
 import { connectAuthEmulator, getAuth, signInWithCustomToken, type Auth } from "firebase/auth";
 import { FieldValue } from "firebase-admin/firestore";
-import { adminDb } from "../server/firebaseAdmin";
+import { adminAuth, adminDb } from "../server/firebaseAdmin";
 import { createApp } from "../server/app";
 import { createCommunity } from "../server/gateway";
 import ExcelJS from "exceljs";
@@ -357,6 +357,121 @@ test("deleting a dancer clears them from contests they never competed in", async
   assert.deepEqual(heat.couples, []);
   assert.deepEqual(heat.unpairedBibs, []);
   assert.deepEqual(heat.finalistBibs, ["2"]);
+});
+
+// The platform owner's Google account carries the platformOwner claim.
+const ownerDevice = async () => {
+  const device = new Device();
+  await signInWithCustomToken(device.auth, await adminAuth.createCustomToken(`owner-${deviceCount}`, { platformOwner: true }));
+  return device;
+};
+
+// Requests that are meant to fail come from their own address, so they don't
+// use up the shared limit on failed attempts.
+const postFrom = async (address: string, path: string, body: object) => {
+  const res = await fetch(baseUrl + path, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", "Fastly-Client-IP": address },
+    body: JSON.stringify(body)
+  });
+  return { status: res.status, data: await res.json() as any };
+};
+
+test("only the platform owner can manage gateways", async () => {
+  const community = await createCommunity("Owner Guard");
+  assert.equal((await new Device().call("/api/owner/gateways", {}, "GET")).status, 401);
+  const admin = await signedInAdmin(community);
+  assert.equal((await admin.call("/api/owner/gateways", {}, "GET")).status, 403);
+  assert.equal((await admin.call("/api/owner/gateways", { name: "Sneaky" })).status, 403);
+  assert.equal((await admin.call(`/api/owner/gateways/${community.communityId}/rotate-code`)).status, 403);
+
+  const owner = await ownerDevice();
+  const { gateways } = await owner.ok("/api/owner/gateways", {}, "GET");
+  const listed = gateways.find((g: any) => g.communityId === community.communityId);
+  assert.equal(listed.gatewayCode, community.gatewayCode);
+  assert.equal(listed.slug, community.slug);
+  assert.deepEqual(listed.passcodes, community.passcodes);
+  assert.equal(listed.status, "active");
+});
+
+test("a gateway the owner creates works straight away", async () => {
+  const owner = await ownerDevice();
+  assert.equal((await owner.call("/api/owner/gateways", { name: "  " })).status, 400);
+  const { gateway } = await owner.ok("/api/owner/gateways", { name: "New Community" });
+  assert.equal(gateway.name, "New Community");
+  assert.equal(gateway.isMine, false);
+  assert.ok(gateway.createdAt > 0);
+
+  const device = new Device();
+  await device.connect(gateway.gatewayCode);
+  await device.login("admin", gateway.passcodes.admin);
+});
+
+test("a new code or passcode from the owner signs the community's devices out", async () => {
+  const community = await createCommunity("Owner Rotate");
+  const id = community.communityId;
+  const admin = await signedInAdmin(community);
+  const owner = await ownerDevice();
+  assert.equal((await owner.call("/api/owner/gateways/no-such-gateway/rotate-code")).status, 404);
+
+  const { gateway } = await owner.ok(`/api/owner/gateways/${id}/rotate-code`);
+  assert.notEqual(gateway.gatewayCode, community.gatewayCode);
+  assert.notEqual(gateway.slug, community.slug);
+  assert.equal((await admin.call("/api/gateway/portal-access", {}, "GET")).status, 401);
+  assert.equal((await postFrom("198.51.100.1", "/api/gateway/connect", { code: community.gatewayCode })).status, 404);
+
+  const reset = await owner.ok(`/api/owner/gateways/${id}/passcode`, { role: "judge" });
+  const newPasscode = reset.gateway.passcodes.judge;
+  assert.match(newPasscode, /^[A-Z0-9]{6}$/);
+  assert.notEqual(newPasscode, community.passcodes.judge);
+  const device = new Device();
+  await device.connect(gateway.gatewayCode);
+  assert.equal((await device.call("/api/gateway/role-login", { role: "judge", passcode: community.passcodes.judge })).status, 403);
+  await device.login("judge", newPasscode);
+});
+
+test("the owner locks, unlocks and renames a gateway", async () => {
+  const community = await createCommunity("Owner Lock");
+  const id = community.communityId;
+  const owner = await ownerDevice();
+  assert.equal((await owner.call(`/api/owner/gateways/${id}/status`, { status: "deleted" })).status, 400);
+
+  await owner.ok(`/api/owner/gateways/${id}/status`, { status: "locked" });
+  const locked = await new Device().call("/api/gateway/connect", { code: community.gatewayCode });
+  assert.equal(locked.status, 403);
+  assert.equal(locked.data.code, "gateway_locked");
+  await owner.ok(`/api/owner/gateways/${id}/status`, { status: "active" });
+  await new Device().connect(community.gatewayCode);
+
+  const { gateway } = await owner.ok(`/api/owner/gateways/${id}/rename`, { name: "Owner Lock Renamed" });
+  assert.equal(gateway.name, "Owner Lock Renamed");
+  const actions = (await adminDb.collection("ownerLog").where("communityId", "==", id).get()).docs.map((d) => d.data().action);
+  assert.deepEqual(actions.sort(), ["rename", "status:active", "status:locked"]);
+});
+
+test("Open Admin portal works once, briefly, and only for the owner's own community", async () => {
+  const community = await createCommunity("Owner Home");
+  const id = community.communityId;
+  const owner = await ownerDevice();
+  assert.equal((await owner.call(`/api/owner/gateways/${id}/admin-link`)).status, 403);
+
+  const { gateway } = await owner.ok(`/api/owner/gateways/${id}/mine`, { isMine: true });
+  assert.equal(gateway.isMine, true);
+  const linkParams = async () => new URLSearchParams((await owner.ok(`/api/owner/gateways/${id}/admin-link`)).path.split("#")[1]);
+  const params = await linkParams();
+  assert.equal(params.get("community"), id);
+
+  const browser = new Device();
+  await browser.ok("/api/gateway/owner-admin-pass", { communityId: id, pass: params.get("pass") });
+  const { claims } = await browser.auth.currentUser!.getIdTokenResult();
+  assert.equal(claims.communityId, id);
+  assert.deepEqual(claims.roles, ["admin"]);
+  assert.equal((await postFrom("198.51.100.2", "/api/gateway/owner-admin-pass", { communityId: id, pass: params.get("pass") })).status, 403);
+
+  const expired = await linkParams();
+  await adminDb.doc(`communities/${id}/private/auth`).update({ "ownerAdminPass.expiresAt": Date.now() - 1 });
+  assert.equal((await postFrom("198.51.100.3", "/api/gateway/owner-admin-pass", { communityId: id, pass: expired.get("pass") })).status, 403);
+  assert.equal((await postFrom("198.51.100.4", "/api/gateway/owner-admin-pass", { communityId: "../evil", pass: "x" })).status, 403);
 });
 
 test("failed attempts are counted per device address behind Hosting", async () => {

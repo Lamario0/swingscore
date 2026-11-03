@@ -16,3 +16,8 @@ data.json
 # Firebase CLI cache and local emulator exports
 .firebase/
 emulator-data/
+
+# Owner apps: packaged builds and this machine's Firebase app file
+apps/desktop/dist/
+apps/android/dist/
+apps/android/android/app/google-services.json

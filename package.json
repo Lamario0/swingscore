@@ -13,9 +13,11 @@
     "lint": "tsc --noEmit",
     "test": "firebase emulators:exec --only auth,firestore \"tsx --test tests/scoring.test.ts tests/rules.test.ts tests/api.test.ts\"",
     "gateway:create": "tsx scripts/create-gateway.ts",
-    "gateway:import": "tsx scripts/import-data-json.ts"
+    "gateway:import": "tsx scripts/import-data-json.ts",
+    "owner:grant": "tsx scripts/grant-owner.ts"
   },
   "dependencies": {
+    "@capacitor/core": "^8.6.0",
     "@google/genai": "^2.4.0",
     "@tailwindcss/vite": "^4.1.14",
     "@vitejs/plugin-react": "^5.0.4",

@@ -1,5 +1,6 @@
 import { createHash, randomBytes, randomInt, randomUUID, scrypt, timingSafeEqual } from "crypto";
 import { promisify } from "util";
+import { FieldValue } from "firebase-admin/firestore";
 import type { GatewayStatus, StaffRole } from "../src/types";
 import { adminAuth, adminDb } from "./firebaseAdmin";
 import { blankSettings, HttpError, saveCommunityState } from "./state";
@@ -24,6 +25,9 @@ export interface CommunityRecord {
   name: string;
   status: GatewayStatus;
   sessionEpoch: number;
+  createdAt?: number;
+  // The platform owner's own community, which their app can open as Admin.
+  isOwnerCommunity?: boolean;
 }
 
 // Read aloud and typed on phones, so no characters that look alike (0/O, 1/I/L).
@@ -111,7 +115,7 @@ export async function createCommunity(name: string) {
   );
 
   const batch = adminDb.batch();
-  const community: CommunityRecord = { name, status: "active", sessionEpoch: 1 };
+  const community: CommunityRecord = { name, status: "active", sessionEpoch: 1, createdAt: Date.now() };
   batch.set(communityRef(communityId), community);
   batch.set(privateAuthRef(communityId), { gatewayCode, slug, passcodes: hashes, readablePasscodes: passcodes });
   batch.set(gatewayCodeRef(gatewayCode), { communityId });
@@ -150,3 +154,44 @@ export function recordFailedAttempt(key: string) {
 export const clearFailedAttempts = (key: string) => rateLimitRef(key).delete();
 
 export const generateGatewayCode = () => randomCode(8);
+
+export const generatePasscode = () => randomCode(6);
+
+// The owner app's "Open Admin portal" link carries this, and it works once.
+export const generateOwnerAdminPass = () => ({ pass: randomCode(24), expiresAt: Date.now() + 2 * 60 * 1000 });
+
+// Changing a passcode signs out every device in the community, so a leaked one
+// stops working at once. That portal's QR code goes with it.
+export async function setRolePasscode(communityId: string, role: StaffRole, passcode: string): Promise<number> {
+  const hash = await hashPasscode(passcode);
+  return adminDb.runTransaction(async (tx) => {
+    const community = (await tx.get(communityRef(communityId))).data() as CommunityRecord;
+    const epoch = community.sessionEpoch + 1;
+    tx.update(privateAuthRef(communityId), {
+      [`passcodes.${role}`]: hash,
+      [`readablePasscodes.${role}`]: passcode,
+      [`portalPasses.${role}`]: FieldValue.delete()
+    });
+    tx.update(communityRef(communityId), { sessionEpoch: epoch });
+    return epoch;
+  });
+}
+
+// A new gateway code signs out every device too. Portal links and QR codes go
+// with the code, so a leaked one stops working as well.
+export async function rotateGatewayCode(communityId: string): Promise<{ gatewayCode: string; epoch: number }> {
+  const gatewayCode = generateGatewayCode();
+  const epoch = await adminDb.runTransaction(async (tx) => {
+    const community = (await tx.get(communityRef(communityId))).data() as CommunityRecord;
+    const auth = (await tx.get(privateAuthRef(communityId))).data();
+    const slug = generateGatewaySlug(community.name);
+    if (auth?.gatewayCode) tx.delete(gatewayCodeRef(auth.gatewayCode));
+    if (auth?.slug) tx.delete(gatewaySlugRef(auth.slug));
+    tx.set(gatewayCodeRef(gatewayCode), { communityId });
+    tx.set(gatewaySlugRef(slug), { communityId });
+    tx.update(privateAuthRef(communityId), { gatewayCode, slug, portalPasses: FieldValue.delete() });
+    tx.update(communityRef(communityId), { sessionEpoch: community.sessionEpoch + 1 });
+    return community.sessionEpoch + 1;
+  });
+  return { gatewayCode: formatGatewayCode(gatewayCode), epoch };
+}
